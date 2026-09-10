@@ -86,10 +86,10 @@ on:
         type: boolean
         default: 'true'
       bore_enable:
-        description: '是否集成 BORE 调度器(Burst-Oriented Response Enhancer, 按任务突发性区分调度权重, 提升前台交互响应; 不需要可关闭)'
+        description: '是否集成 BORE 调度器(Burst-Oriented Response Enhancer), 已知会造成Bootloop，暂时关闭'
         required: true
         type: boolean
-        default: 'true'
+        default: 'false'
       ccache_update:
         description: '更新ccache缓存(将本次编译生成的ccache缓存覆盖至仓库缓存，在更改编译配置、源码或需要刷新缓存时开启)'
         required: true

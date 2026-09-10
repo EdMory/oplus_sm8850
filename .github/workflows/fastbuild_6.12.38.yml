@@ -573,274 +573,61 @@ jobs:
         run: |
           echo "正在集成 BORE 调度器(按任务突发性区分调度权重, 提升前台交互响应)…"
           cd kernel_workspace/common
-          # 拉取 BORE 6.8.0 补丁(优先取本仓库 other_patch, 上游仓库兜底)
-          wget -q "https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/bore-6.8.0.patch" -O bore-6.8.0.patch \
-            || wget -q "https://github.com/EdMory/oplus_sm8850/raw/refs/heads/main/other_patch/bore-6.8.0.patch" -O bore-6.8.0.patch
-          [ -s bore-6.8.0.patch ] || { echo "BORE 补丁下载失败, 请检查仓库中 other_patch/bore-6.8.0.patch 是否存在"; exit 1; }
-          # 补丁基于上游 6.12.37 生成, 与本内核树有 2 处上下文差异(见脚本注释), 由脚本先适配补丁、再逐 hunk 应用,
-          # 并补回 update_curr() 中等价注入; 任何一步失败即中断, 避免产出不含 BORE 的静默失败内核
-          cat > /tmp/bore_integrate.py <<'PY'
-          #!/usr/bin/env python3
-          # -*- coding: utf-8 -*-
-          """BORE 调度器补丁集成工具: 把 bore-6.8.0.patch 应用到本 GKI 内核树
+          # 拉取与本 vendor 树(6.12.38)逐行对位重写的 BORE 补丁(优先取本仓库 other_patch, 兜底取上游仓库)
+          wget -q "https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/bore-6.8.0-oplus.patch" -O bore-6.8.0-oplus.patch \
+            || wget -q "https://github.com/EdMory/oplus_sm8850/raw/refs/heads/main/other_patch/bore-6.8.0-oplus.patch" -O bore-6.8.0-oplus.patch
+          [ -s bore-6.8.0-oplus.patch ] || { echo "BORE 补丁下载失败, 请检查仓库中 other_patch/bore-6.8.0-oplus.patch 是否存在"; exit 1; }
 
-          本内核树(欧加真 GKI 6.12.38 vendor 树)与补丁基线(上游 6.12.37)存在两处差异,
-          因此在应用补丁前先做定点适配, 应用后补上等价注入:
+          # 一、严格零 fuzz 应用: 先 dry-run 探路, 任何 FAILED / fuzz / offset / 重复应用痕迹立即中止。
+          #     旧版脚本用手写 fuzz + 就近定位"猜"位置, 补丁错位也能"成功", 是开机卡第一屏 logo 的根因之一。
+          if ! patch -p1 --dry-run < bore-6.8.0-oplus.patch > /tmp/bore_dryrun.log 2>&1; then
+            cat /tmp/bore_dryrun.log
+            echo "BORE 补丁存在无法应用的 hunk, 已中止"; exit 1
+          fi
+          cat /tmp/bore_dryrun.log
+          # 硬失败(fuzz / hunk 失败 / 重复应用)必须中止; 纯行号偏移不阻塞:
+          # 本 workflow 中 droidspaces 等补丁会先改 include/linux/sched.h, 使行号平移,
+          # 但 hunk 上下文仍精确匹配, 位置正确, 且应用后有 check/ABI 校验兜底
+          if grep -qE 'with fuzz|FAILED|ignored|Reversed|previously applied' /tmp/bore_dryrun.log; then
+            echo "BORE 补丁与当前内核树不匹配(fuzz / hunk 失败 / 重复应用), 已中止"; exit 1
+          fi
+          if grep -q 'offset' /tmp/bore_dryrun.log; then
+            echo "提示: 以下 hunk 存在纯行号偏移(上下文精确匹配, 位置正确, 属其他补丁先行改动所致), 继续应用:"
+            grep 'offset' /tmp/bore_dryrun.log
+          fi
+          patch -p1 --no-backup-if-mismatch < bore-6.8.0-oplus.patch
 
-            适配 1: fair.c 该 hunk 上下文缺少 EXPORT_SYMBOL_GPL(sysctl_sched_base_slice) 行 -> 补入上下文行
-            适配 2: 针对上游 update_curr() 的 hunk 无法应用(本树记账已重构至 update_se(),
-                    无 update_curr_task()); 删除该 hunk, 改由 inject_update_curr_bore() 等价注入
+          # 二、集成结果校验: 调度热路径挂钩必须齐全
+          check() { grep -qF "$2" "$1" || { echo "BORE 集成校验失败: $1 缺少 '$2'"; exit 1; }; }
+          check include/linux/sched.h      'struct bore_ctx {'
+          check include/linux/sched/bore.h 'extern void update_curr_bore'
+          check kernel/sched/bore.c        'void update_curr_bore'
+          check kernel/sched/Makefile      'obj-$(CONFIG_SCHED_BORE) += bore.o'
+          check kernel/sched/fair.c        'update_curr_bore(task_of(curr), delta_exec);'
+          check kernel/sched/fair.c        'sched_bore_key'
+          check kernel/sched/core.c        'sched_init_bore();'
+          check kernel/fork.c              'task_fork_bore(p, current, clone_flags, p->start_time);'
+          check kernel/futex/waitwake.c    'current->bore.futex_waiting = true;'
+          check include/linux/sched.h      'ANDROID_KABI_RESERVE(8);'
 
-          用法: python3 bore_integrate.py <内核树根目录> <补丁文件>
-          """
+          # 三、ABI 校验: bore_ctx 必须复用 task_struct 的 KABI reserve 5~8(4 x u64 = 32B) 且与原始
+          #     reserve 区等长, task_struct 尺寸与后续成员偏移保持不变; 一旦改成"在 task_struct 尾部
+          #     追加新字段", 结构体变大, 与 OPLUS 预编译 ko 的 ABI 冲突 -> 设备卡第一屏 logo
+          grep -q 'static_assert(sizeof(struct bore_ctx) == 4 \* sizeof(u64)' kernel/sched/bore.c \
+            || { echo "BORE ABI 校验失败: bore.c 缺少 sizeof(bore_ctx)==32 的编译期断言"; exit 1; }
+          grep -q 'struct bore_ctx bore;' include/linux/sched.h \
+            || { echo "BORE ABI 校验失败: task_struct 未挂载 bore_ctx"; exit 1; }
+          grep -q '} __kabi_reserved_bore;' include/linux/sched.h \
+            || { echo "BORE ABI 校验失败: 缺少 KABI reserve 备份成员, ABI 不安全"; exit 1; }
+          [ "$(grep -c 'ANDROID_KABI_RESERVE(5);' include/linux/sched.h)" = "2" ] \
+            || { echo "BORE ABI 校验失败: task_struct 尾部布局异常(reserve 5~8 未按 union 方式复用)"; exit 1; }
+          grep -A3 'ANDROID_KABI_RESERVE(4);' include/linux/sched.h | grep -q '#ifdef CONFIG_SCHED_BORE' \
+            || { echo "BORE ABI 校验失败: reserve(4) 之后未紧跟 BORE 分支"; exit 1; }
 
-          import os
-          import re
-          import sys
-
-          FAILED = []
-
-
-          def die(msg):
-              print("[BORE] 错误: " + msg)
-              sys.exit(1)
-
-
-          def read_text(path):
-              with open(path, encoding="utf-8", errors="surrogateescape") as fp:
-                  return fp.read()
-
-
-          def write_text(path, text):
-              with open(path, "w", encoding="utf-8", errors="surrogateescape", newline="") as fp:
-                  fp.write(text)
-
-
-          # --------------------------------------------------------------------------- #
-          # 一、补丁适配
-          # --------------------------------------------------------------------------- #
-          def adapt_patch(text):
-              # 适配 1: 补入 EXPORT_SYMBOL_GPL(sysctl_sched_base_slice) 上下文行
-              old_ctx = " unsigned int sysctl_sched_base_slice\t\t\t= 700000ULL;\n"
-              if text.count(old_ctx) != 1:
-                  die("补丁中未找到 sysctl_sched_base_slice 上下文行, 上游补丁可能已变动")
-              text = text.replace(
-                  old_ctx,
-                  old_ctx + " EXPORT_SYMBOL_GPL(sysctl_sched_base_slice);\n",
-                  1,
-              )
-
-              # 适配 2: 删除针对上游 update_curr() 的 hunk (其新增代码由后置注入等价实现)
-              lines = text.split("\n")
-              out, dropped, i = [], None, 0
-              while i < len(lines):
-                  line = lines[i]
-                  if line.startswith("@@") and "static void update_curr(struct cfs_rq *cfs_rq)" in line:
-                      dropped = line
-                      i += 1
-                      while i < len(lines) and not lines[i].startswith("@@") \
-                              and not lines[i].startswith("diff --git"):
-                          i += 1
-                      continue
-                  out.append(line)
-                  i += 1
-              if dropped is None:
-                  die("补丁中未找到 update_curr() 相关 hunk, 上游补丁可能已变动")
-              print("[BORE] 适配: 删除无法应用的 hunk -> " + dropped)
-              return "\n".join(out)
-
-
-          # --------------------------------------------------------------------------- #
-          # 二、补丁解析与应用 (与 GNU patch 一致的 fuzz / 就近定位策略)
-          # --------------------------------------------------------------------------- #
-          def parse_patch(text):
-              files, order = {}, []
-              lines = text.split("\n")
-              i, cur = 0, None
-              while i < len(lines):
-                  line = lines[i]
-                  m = re.match(r"^diff --git a/(\S+) b/(\S+)$", line)
-                  if m:
-                      cur = m.group(2)
-                      files[cur] = {"new": False, "hunks": []}
-                      order.append(cur)
-                      i += 1
-                      while i < len(lines) and not lines[i].startswith("@@"):
-                          if lines[i].startswith("new file mode"):
-                              files[cur]["new"] = True
-                          i += 1
-                      continue
-                  if line.startswith("@@"):
-                      mh = re.match(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)$", line)
-                      if not mh:
-                          die("无法解析 hunk 头: " + line)
-                      body = []
-                      i += 1
-                      while i < len(lines) and not lines[i].startswith("@@") \
-                              and not lines[i].startswith("diff --git"):
-                          body.append(lines[i])
-                          i += 1
-                      while body and (body[-1].strip() == "" or body[-1].startswith("\\")):
-                          body.pop()
-                      files[cur]["hunks"].append(
-                          {"old_start": int(mh.group(1)), "ctx": mh.group(5).strip(), "body": body})
-                      continue
-                  i += 1
-              return files, order
-
-
-          def pre_image(body, drop_head, drop_tail):
-              core = body[drop_head:len(body) - drop_tail] if drop_tail else body[drop_head:]
-              return [x[1:] for x in core if x[0] in (" ", "-")]
-
-
-          def locate(target, body, expect, max_fuzz=3):
-              """按 fuzz 逐级放宽上下文, 取离预期行号最近的位置(与 GNU patch 行为一致)"""
-              for fuzz in range(max_fuzz + 1):
-                  cands = []
-                  for dh in range(fuzz + 1):
-                      for dt in range(fuzz + 1):
-                          pre = pre_image(body, dh, dt)
-                          if not pre:
-                              continue
-                          for pos in range(0, len(target) - len(pre) + 1):
-                              if target[pos:pos + len(pre)] == pre:
-                                  # 优先保留更多上下文(丢弃越少越可信), 其次取离预期行号最近的匹配
-                                  cands.append((dh + dt, abs(pos - expect), dh, dt, pos))
-                  if cands:
-                      cands.sort()
-                      _, _, dh, dt, pos = cands[0]
-                      return fuzz, dh, dt, pos
-              return None
-
-
-          def apply_patch(root, files, order):
-              total, fuzz_used = 0, []
-              for rel in order:
-                  info = files[rel]
-                  path = os.path.join(root, rel.replace("/", os.sep))
-                  if info["new"]:
-                      content = []
-                      for hunk in info["hunks"]:
-                          content += [x[1:] for x in hunk["body"] if x[0] in ("+", " ")]
-                      os.makedirs(os.path.dirname(path), exist_ok=True)
-                      write_text(path, "\n".join(content) + "\n")
-                      print("[BORE] 新建 %s (%d 行)" % (rel, len(content)))
-                      continue
-                  if not os.path.isfile(path):
-                      die("目标文件不存在: " + rel)
-                  target = read_text(path).replace("\r\n", "\n").split("\n")
-                  shift = 0
-                  for num, hunk in enumerate(info["hunks"], 1):
-                      expect = hunk["old_start"] - 1 + shift
-                      hit = locate(target, hunk["body"], max(expect, 0))
-                      if hit is None:
-                          die("%s 第 %d 个 hunk 无法应用(上下文不匹配)" % (rel, num))
-                      fuzz, dh, dt, pos = hit
-                      pre = pre_image(hunk["body"], dh, dt)
-                      new_lines = [x[1:] for x in hunk["body"][dh:len(hunk["body"]) - dt] if x[0] in (" ", "+")]
-                      target[pos:pos + len(pre)] = new_lines
-                      shift = pos + len(new_lines) - hunk["old_start"]
-                      total += 1
-                      if fuzz:
-                          fuzz_used.append("%s#%d(fuzz=%d)" % (rel, num, fuzz))
-                  write_text(path, "\n".join(target))
-              print("[BORE] 补丁应用完成: %d 个 hunk 覆盖 %d 个文件" % (total, len([f for f in order if not files[f]["new"]])))
-              if fuzz_used:
-                  print("[BORE] 以 fuzz 方式应用(上下文存在偏移, 属预期): " + ", ".join(fuzz_used))
-
-
-          # --------------------------------------------------------------------------- #
-          # 三、把被删除 hunk 的等价注入补回 update_curr()
-          # --------------------------------------------------------------------------- #
-          INJECT_OLD = ("\tif (entity_is_task(curr)) {\n"
-                        "\t\t/*\n"
-                        "\t\t * If the fair_server is active, we need to account for the\n")
-          INJECT_NEW = ("\tif (entity_is_task(curr)) {\n"
-                        "#ifdef CONFIG_SCHED_BORE\n"
-                        "\t\tupdate_curr_bore(task_of(curr), delta_exec);\n"
-                        "#endif /* CONFIG_SCHED_BORE */\n"
-                        "\t\t/*\n"
-                        "\t\t * If the fair_server is active, we need to account for the\n")
-          SHORT_OLD = "\tif (entity_is_task(curr)) {\n"
-
-
-          def inject_update_curr_bore(root):
-              path = os.path.join(root, "kernel", "sched", "fair.c")
-              text = read_text(path)
-              if "update_curr_bore(" in text:
-                  print("[BORE] 注入: update_curr_bore() 已存在, 跳过")
-                  return
-              if text.count(INJECT_OLD) == 1:
-                  text = text.replace(INJECT_OLD, INJECT_NEW, 1)
-              elif text.count(SHORT_OLD) == 1:
-                  text = text.replace(SHORT_OLD, INJECT_NEW.replace(INJECT_OLD, SHORT_OLD), 1)
-              else:
-                  die("kernel/sched/fair.c 中定位 update_curr() 失败, 无法注入 update_curr_bore()")
-              write_text(path, text)
-              print("[BORE] 注入: kernel/sched/fair.c update_curr() 已补入 update_curr_bore() 调用")
-
-
-          # --------------------------------------------------------------------------- #
-          # 四、校验集成结果
-          # --------------------------------------------------------------------------- #
-          CHECKS = [
-              ("kernel/sched/bore.c", "void update_curr_bore"),
-              ("include/linux/sched/bore.h", "void update_curr_bore"),
-              ("include/linux/sched.h", "struct bore_ctx"),
-              ("kernel/sched/Makefile", "obj-$(CONFIG_SCHED_BORE) += bore.o"),
-              ("kernel/sched/fair.c", "update_curr_bore(task_of(curr), delta_exec);"),
-              ("kernel/sched/fair.c", "do_preempt_weight(cfs_rq, pse, se)"),
-              ("kernel/sched/fair.c", "vslice_found:"),
-              ("kernel/sched/fair.c", "restart_burst_bore(p);"),
-              ("kernel/sched/core.c", "sched_init_bore();"),
-              ("kernel/sched/debug.c", "sched_min_base_slice_fops"),
-              ("kernel/sched/sched.h", "sched_update_min_base_slice"),
-              ("kernel/futex/waitwake.c", "current->bore.futex_waiting = true;"),
-              ("kernel/fork.c", "task_fork_bore(p, current, clone_flags, p->start_time);"),
-              ("kernel/exit.c", "list_del_rcu(&p->sibling);"),
-              ("init/Kconfig", "config SCHED_BORE"),
-              ("kernel/Kconfig.hz", "config MIN_BASE_SLICE_NS"),
-          ]
-
-
-          def verify(root):
-              bad = []
-              for rel, marker in CHECKS:
-                  path = os.path.join(root, rel.replace("/", os.sep))
-                  if not os.path.isfile(path) or marker not in read_text(path):
-                      bad.append("%s 缺少 %s" % (rel, marker))
-              if bad:
-                  for item in bad:
-                      print("[BORE] 校验失败: " + item)
-                  die("集成结果校验未通过")
-              print("[BORE] 校验通过: %d 项关键标记全部就位" % len(CHECKS))
-
-
-          def main():
-              if len(sys.argv) != 3:
-                  die("用法: python3 bore_integrate.py <内核树根目录> <补丁文件>")
-              root, patch_file = sys.argv[1], sys.argv[2]
-              if not os.path.isdir(root):
-                  die("内核树根目录不存在: " + root)
-              patch = read_text(patch_file).replace("\r\n", "\n")
-              patch = adapt_patch(patch)
-              files, order = parse_patch(patch)
-              apply_patch(root, files, order)
-              inject_update_curr_bore(root)
-              verify(root)
-
-
-          if __name__ == "__main__":
-              main()
-          PY
-          python3 /tmp/bore_integrate.py . bore-6.8.0.patch || { echo "BORE 集成失败, 请检查上游源码是否变动"; exit 1; }
-          # 显式写入开关与参数, 避免 defconfig 合并差异导致未启用
+          # 四、显式写入开关与参数, 避免 defconfig 合并差异导致未启用
           echo "CONFIG_SCHED_BORE=y" >> ./arch/arm64/configs/gki_defconfig
           echo "CONFIG_MIN_BASE_SLICE_NS=2000000" >> ./arch/arm64/configs/gki_defconfig
-          echo "CONFIG_SCHED_DEBUG=y" >> ./arch/arm64/configs/gki_defconfig
-          echo "BORE 集成完成！"
-
+          echo "BORE 集成完成(零 fuzz 应用 + ABI 校验通过)！"
       - name: 添加制作名称
         run: |
           cd kernel_workspace

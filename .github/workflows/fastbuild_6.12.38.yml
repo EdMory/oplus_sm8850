@@ -579,9 +579,23 @@ jobs:
           echo "正在集成 BORE 调度器(按任务突发性区分调度权重, 提升前台交互响应)…"
           cd kernel_workspace/common
           # 拉取与本 vendor 树(6.12.38)逐行对位重写的 BORE 补丁(优先取本仓库 other_patch, 兜底取上游仓库)
-          wget -q "https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/bore-6.8.0-oplus.patch" -O bore-6.8.0-oplus.patch \
-            || wget -q "https://github.com/EdMory/oplus_sm8850/raw/refs/heads/main/other_patch/bore-6.8.0-oplus.patch" -O bore-6.8.0-oplus.patch
-          [ -s bore-6.8.0-oplus.patch ] || { echo "BORE 补丁下载失败, 请检查仓库中 other_patch/bore-6.8.0-oplus.patch 是否存在"; exit 1; }
+          # 逐源尝试并把失败原因落到日志: 避免 wget -q 静默失败 + bash -e 直接退出, 导致失败点无法定位
+          rm -f bore-6.8.0-oplus.patch
+          for u in \
+            "https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/bore-6.8.0-oplus.patch" \
+            "https://github.com/EdMory/oplus_sm8850/raw/refs/heads/main/other_patch/bore-6.8.0-oplus.patch"; do
+            echo "尝试下载 BORE 补丁: $u"
+            if curl -fSL --retry 3 --retry-delay 2 --connect-timeout 20 -o bore-6.8.0-oplus.patch "$u" 2> bore_download.log; then
+              if [ -s bore-6.8.0-oplus.patch ]; then
+                echo "下载成功: $(wc -c < bore-6.8.0-oplus.patch) 字节"; break
+              fi
+              echo "该源返回空文件, 尝试下一个源"
+            else
+              echo "该源不可用: $(tail -n 2 bore_download.log | tr '\n' ' ')"
+            fi
+          done
+          rm -f bore_download.log
+          [ -s bore-6.8.0-oplus.patch ] || { echo "BORE 补丁下载失败: 2 个源均不可用(见上方逐源诊断), 请检查仓库中 other_patch/bore-6.8.0-oplus.patch 是否存在"; exit 1; }
 
           # 一、严格零 fuzz 应用: 先 dry-run 探路, 任何 FAILED / fuzz / offset / 重复应用痕迹立即中止。
           #     旧版脚本用手写 fuzz + 就近定位"猜"位置, 补丁错位也能"成功", 是开机卡第一屏 logo 的根因之一。
@@ -650,11 +664,21 @@ jobs:
             "https://raw.githubusercontent.com/firelzrd/cambyses/main/patches/0001-6.12.74-cambyses-v0.6.0.patch"
             "https://cdn.jsdelivr.net/gh/firelzrd/cambyses@main/patches/0001-6.12.74-cambyses-v0.6.0.patch"
           )
-          # 逐源尝试并把失败原因落到日志: 避免 wget -q 静默失败 + set -e 直接退出, 导致失败点无法诊断
+          # 下载器自适应: 优先 curl(对 4xx/5xx 会返回非 0, --retry 抗弱网); 无 curl 时回退 wget。
+          # 注意: --show-error 是 curl 专有选项, 传给 GNU wget 会触发 usage 报错并立刻退出,
+          #       故 wget 分支只使用其自身合法选项(--tries/--timeout)。
+          fetch() { # $1=url $2=输出文件 $3=日志文件
+            if command -v curl >/dev/null 2>&1; then
+              curl -fSL --retry 3 --retry-delay 2 --connect-timeout 20 -o "$2" "$1" 2> "$3"
+            else
+              wget -O "$2" --tries=3 --timeout=20 "$1" 2> "$3"
+            fi
+          }
+          # 逐源尝试并把失败原因落到日志: 避免静默失败 + set -e 直接退出, 导致失败点无法诊断
           rm -f cambyses.patch
           for u in "${PATCH_URLS[@]}"; do
             echo "尝试下载 Cambyses 补丁: $u"
-            if wget -S --show-error -O cambyses.patch.tmp "$u" 2> wget_cambyses.log; then
+            if fetch "$u" cambyses.patch.tmp download_cambyses.log; then
               if [ -s cambyses.patch.tmp ]; then
                 mv cambyses.patch.tmp cambyses.patch
                 echo "下载成功: $(wc -c < cambyses.patch) 字节"
@@ -662,10 +686,10 @@ jobs:
               fi
               echo "该源返回空文件, 尝试下一个源"
             else
-              echo "该源不可用: $(tail -n 2 wget_cambyses.log | tr '\n' ' ')"
+              echo "该源不可用: $(tail -n 2 download_cambyses.log | tr '\n' ' ')"
             fi
           done
-          rm -f cambyses.patch.tmp wget_cambyses.log
+          rm -f cambyses.patch.tmp download_cambyses.log
           [ -s cambyses.patch ] || { echo "Cambyses 补丁下载失败: 3 个源均不可用(见上方逐源诊断)"; exit 1; }
 
           # 一、ABI 面静态审计: 补丁触碰导出符号 / KABI 保留区 / 非 sched 核心文件, 一律中止

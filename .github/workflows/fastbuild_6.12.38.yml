@@ -85,6 +85,11 @@ on:
         required: true
         type: boolean
         default: 'true'
+      bore_enable:
+        description: '是否集成 BORE 调度器(Burst-Oriented Response Enhancer, 按任务突发性区分调度权重, 提升前台交互响应; 不需要可关闭)'
+        required: true
+        type: boolean
+        default: 'true'
       ccache_update:
         description: '更新ccache缓存(将本次编译生成的ccache缓存覆盖至仓库缓存，在更改编译配置、源码或需要刷新缓存时开启)'
         required: true
@@ -563,6 +568,32 @@ jobs:
           echo "CONFIG_NOMOUNT=y" >> ./arch/arm64/configs/gki_defconfig
           echo "NoMount 集成完成！"
 
+      - name: 集成 BORE 调度器(Burst-Oriented Response Enhancer)
+        if: inputs.bore_enable
+        run: |
+          echo "正在集成 BORE 调度器(按任务突发性区分调度权重, 提升前台交互响应)…"
+          cd kernel_workspace/common
+          # 拉取 BORE 6.8.0 补丁(优先取本仓库 other_patch, 上游仓库兜底)
+          wget -q "https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/bore-6.8.0.patch" -O bore-6.8.0.patch \
+            || wget -q "https://github.com/EdMory/oplus_sm8850/raw/refs/heads/main/other_patch/bore-6.8.0.patch" -O bore-6.8.0.patch
+          [ -s bore-6.8.0.patch ] || { echo "BORE 补丁下载失败, 请检查仓库中 other_patch/bore-6.8.0.patch 是否存在"; exit 1; }
+          # 补丁基于 6.12.37 生成, 与 6.12.38 源码存在偏移, 以 fuzz 方式提升兼容性
+          patch -p1 -F 3 --no-backup-if-mismatch < bore-6.8.0.patch || { echo "BORE 补丁应用失败, 请检查上游源码是否变动"; exit 1; }
+          # 校验集成结果, 防止静默失败导致产出的内核不含 BORE
+          [ -f ./kernel/sched/bore.c ] || { echo "BORE 集成不完整: kernel/sched/bore.c 缺失"; exit 1; }
+          [ -f ./include/linux/sched/bore.h ] || { echo "BORE 集成不完整: include/linux/sched/bore.h 缺失"; exit 1; }
+          grep -q 'obj-$(CONFIG_SCHED_BORE) += bore.o' ./kernel/sched/Makefile || { echo "BORE 编译挂载失败: kernel/sched/Makefile 未挂载 bore.o"; exit 1; }
+          grep -q 'config SCHED_BORE' ./init/Kconfig || { echo "BORE 开关缺失: init/Kconfig 未写入 SCHED_BORE"; exit 1; }
+          grep -q 'config MIN_BASE_SLICE_NS' ./kernel/Kconfig.hz || { echo "BORE 开关缺失: kernel/Kconfig.hz 未写入 MIN_BASE_SLICE_NS"; exit 1; }
+          # BORE 的运行时调参接口(kernel.sched_bore、sched_burst_* 等)通过 sysctl 暴露, 依赖内核 CONFIG_SYSCTL 已开启
+          # CONFIG_SCHED_BORE 为 bool 型且 Kconfig 中默认 y, 此处仍显式写入, 避免 defconfig 合并差异导致未启用
+          echo "CONFIG_SCHED_BORE=y" >> ./arch/arm64/configs/gki_defconfig
+          # 基础时间片下限(单位 ns), 与 Kconfig 默认值保持一致; 显式写入便于后续按需调整
+          echo "CONFIG_MIN_BASE_SLICE_NS=2000000" >> ./arch/arm64/configs/gki_defconfig
+          # 开启调度器调试接口, 用于在 /sys/kernel/debug/sched/ 下运行时查看/调整 min_base_slice_ns、base_slice_ns
+          echo "CONFIG_SCHED_DEBUG=y" >> ./arch/arm64/configs/gki_defconfig
+          echo "BORE 集成完成！"
+
       - name: 添加制作名称
         run: |
           cd kernel_workspace
@@ -798,6 +829,7 @@ jobs:
           echo "Re-Kernel: ${{ github.event.inputs.rekernel_enable }}" >> ./ak3.log
           echo "BBG: ${{ github.event.inputs.baseband_guard }}" >> ./ak3.log
           echo "NoMount: ${{ github.event.inputs.nomount_enable }}" >> ./ak3.log
+          echo "BORE: ${{ github.event.inputs.bore_enable }}" >> ./ak3.log
           zip -z ../$AK3_NAME < ./ak3.log
 
       - name: 上传 Ccache 调试日志
@@ -883,6 +915,7 @@ jobs:
           - Re-Kernel支持：${{ github.event.inputs.rekernel_enable }}
           - 内核级基带保护支持：${{ github.event.inputs.baseband_guard }}
           - NoMount(VFS 路径重定向)支持：${{ github.event.inputs.nomount_enable }}
+          - BORE 调度器支持：${{ github.event.inputs.bore_enable }}
           - ReSukiSU管理器下载：[ReSukiSU_CI](https://github.com/cctv18/ReSukiSU_CI/releases)
           - SukiSU Ultra管理器下载：[SukiSU-Ultra](https://github.com/SukiSU-Ultra/SukiSU-Ultra/releases)
           - KernelSU Next管理器下载：[KernelSU-Next](https://github.com/KernelSU-Next/KernelSU-Next/releases)

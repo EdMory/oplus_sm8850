@@ -637,22 +637,44 @@ jobs:
         if: inputs.cambyses_enable
         run: |
           echo "正在集成 Cambyses 调度器(重构 CFS 负载均衡 detach_tasks 的扫描窗口与预算判定, 减少 rq_lock 下的链表操作与无效搬迁)…"
+          # 任何命令失败时打印出错行号: 避免 set -e 静默退出后失败点无法定位
+          trap 'echo "Cambyses 集成步骤在脚本第 $LINENO 行失败(退出码 $?)" >&2' ERR
           cd kernel_workspace/common
 
           # 上游补丁以 mainline 6.12.74 为基准, 只改写 kernel/sched/fair.c 与 kernel/sched/features.h;
           # 已逐行核对本 vendor 树(6.12.38): 9 处 hunk 上下文全部精确匹配(仅存在其它补丁造成的纯行号偏移),
           # 且补丁不新增/修改结构体成员、不新增导出符号、不触碰 KABI 保留区, 故不破坏内核 ABI。
           # 补丁优先取本仓库 other_patch 固定副本, 兜底取上游仓库与 CDN 镜像
-          wget -q "https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/cambyses-6.12.74-v0.6.0.patch" -O cambyses.patch \
-            || wget -q "https://raw.githubusercontent.com/firelzrd/cambyses/main/patches/0001-6.12.74-cambyses-v0.6.0.patch" -O cambyses.patch \
-            || wget -q "https://cdn.jsdelivr.net/gh/firelzrd/cambyses@main/patches/0001-6.12.74-cambyses-v0.6.0.patch" -O cambyses.patch
-          [ -s cambyses.patch ] || { echo "Cambyses 补丁下载失败, 请检查 other_patch/cambyses-6.12.74-v0.6.0.patch 或上游仓库"; exit 1; }
+          PATCH_URLS=(
+            "https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/cambyses-6.12.74-v0.6.0.patch"
+            "https://raw.githubusercontent.com/firelzrd/cambyses/main/patches/0001-6.12.74-cambyses-v0.6.0.patch"
+            "https://cdn.jsdelivr.net/gh/firelzrd/cambyses@main/patches/0001-6.12.74-cambyses-v0.6.0.patch"
+          )
+          # 逐源尝试并把失败原因落到日志: 避免 wget -q 静默失败 + set -e 直接退出, 导致失败点无法诊断
+          rm -f cambyses.patch
+          for u in "${PATCH_URLS[@]}"; do
+            echo "尝试下载 Cambyses 补丁: $u"
+            if wget -S --show-error -O cambyses.patch.tmp "$u" 2> wget_cambyses.log; then
+              if [ -s cambyses.patch.tmp ]; then
+                mv cambyses.patch.tmp cambyses.patch
+                echo "下载成功: $(wc -c < cambyses.patch) 字节"
+                break
+              fi
+              echo "该源返回空文件, 尝试下一个源"
+            else
+              echo "该源不可用: $(tail -n 2 wget_cambyses.log | tr '\n' ' ')"
+            fi
+          done
+          rm -f cambyses.patch.tmp wget_cambyses.log
+          [ -s cambyses.patch ] || { echo "Cambyses 补丁下载失败: 3 个源均不可用(见上方逐源诊断)"; exit 1; }
 
           # 一、ABI 面静态审计: 补丁触碰导出符号 / KABI 保留区 / 非 sched 核心文件, 一律中止
           if grep -nE 'EXPORT_SYMBOL|ANDROID_KABI|__kabi_reserved' cambyses.patch; then
             echo "Cambyses 补丁触碰 ABI 面(导出符号或 KABI 保留区), 已中止"; exit 1
           fi
-          OUT_OF_SCOPE="$(grep -E '^diff --git ' cambyses.patch | grep -vE ' b/kernel/sched/(fair\.c|features\.h)$')"
+          # 注意: 白名单全部命中时 grep -vE 无输出返回码为 1, 必须 || true 兜底,
+          # 否则 bash -e 下该赋值语句会静默退出(无任何报错, 步骤直接 exit 1)
+          OUT_OF_SCOPE="$(grep -E '^diff --git ' cambyses.patch | grep -vE ' b/kernel/sched/(fair\.c|features\.h)$' || true)"
           if [ -n "$OUT_OF_SCOPE" ]; then
             echo "Cambyses 补丁改动了 sched 核心以外的文件, 已中止:"; echo "$OUT_OF_SCOPE"; exit 1
           fi

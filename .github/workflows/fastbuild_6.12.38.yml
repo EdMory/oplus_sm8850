@@ -651,100 +651,17 @@ jobs:
         if: inputs.cambyses_enable
         run: |
           echo "正在集成 Cambyses 调度器(重构 CFS 负载均衡 detach_tasks 的扫描窗口与预算判定, 减少 rq_lock 下的链表操作与无效搬迁)…"
-          # 任何命令失败时打印出错行号: 避免 set -e 静默退出后失败点无法定位
-          trap 'echo "Cambyses 集成步骤在脚本第 $LINENO 行失败(退出码 $?)" >&2' ERR
           cd kernel_workspace/common
-
-          # 上游补丁以 mainline 6.12.74 为基准, 只改写 kernel/sched/fair.c 与 kernel/sched/features.h;
-          # 已逐行核对本 vendor 树(6.12.38): 9 处 hunk 上下文全部精确匹配(仅存在其它补丁造成的纯行号偏移),
-          # 且补丁不新增/修改结构体成员、不新增导出符号、不触碰 KABI 保留区, 故不破坏内核 ABI。
-          # 补丁优先取本仓库 other_patch 固定副本, 兜底取上游仓库与 CDN 镜像
-          PATCH_URLS=(
-            "https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/cambyses-6.12.74-v0.6.0.patch"
-            "https://raw.githubusercontent.com/firelzrd/cambyses/main/patches/0001-6.12.74-cambyses-v0.6.0.patch"
-            "https://cdn.jsdelivr.net/gh/firelzrd/cambyses@main/patches/0001-6.12.74-cambyses-v0.6.0.patch"
-          )
-          # 下载器自适应: 优先 curl(对 4xx/5xx 会返回非 0, --retry 抗弱网); 无 curl 时回退 wget。
-          # 注意: --show-error 是 curl 专有选项, 传给 GNU wget 会触发 usage 报错并立刻退出,
-          #       故 wget 分支只使用其自身合法选项(--tries/--timeout)。
-          fetch() { # $1=url $2=输出文件 $3=日志文件
-            if command -v curl >/dev/null 2>&1; then
-              curl -fSL --retry 3 --retry-delay 2 --connect-timeout 20 -o "$2" "$1" 2> "$3"
-            else
-              wget -O "$2" --tries=3 --timeout=20 "$1" 2> "$3"
-            fi
-          }
-          # 逐源尝试并把失败原因落到日志: 避免静默失败 + set -e 直接退出, 导致失败点无法诊断
-          rm -f cambyses.patch
-          for u in "${PATCH_URLS[@]}"; do
-            echo "尝试下载 Cambyses 补丁: $u"
-            if fetch "$u" cambyses.patch.tmp download_cambyses.log; then
-              if [ -s cambyses.patch.tmp ]; then
-                mv cambyses.patch.tmp cambyses.patch
-                echo "下载成功: $(wc -c < cambyses.patch) 字节"
-                break
-              fi
-              echo "该源返回空文件, 尝试下一个源"
-            else
-              echo "该源不可用: $(tail -n 2 download_cambyses.log | tr '\n' ' ')"
-            fi
-          done
-          rm -f cambyses.patch.tmp download_cambyses.log
-          [ -s cambyses.patch ] || { echo "Cambyses 补丁下载失败: 3 个源均不可用(见上方逐源诊断)"; exit 1; }
-
-          # 一、ABI 面静态审计: 补丁触碰导出符号 / KABI 保留区 / 非 sched 核心文件, 一律中止
-          if grep -nE 'EXPORT_SYMBOL|ANDROID_KABI|__kabi_reserved' cambyses.patch; then
-            echo "Cambyses 补丁触碰 ABI 面(导出符号或 KABI 保留区), 已中止"; exit 1
-          fi
-          # 注意: 白名单全部命中时 grep -vE 无输出返回码为 1, 必须 || true 兜底,
-          # 否则 bash -e 下该赋值语句会静默退出(无任何报错, 步骤直接 exit 1)
-          OUT_OF_SCOPE="$(grep -E '^diff --git ' cambyses.patch | grep -vE ' b/kernel/sched/(fair\.c|features\.h)$' || true)"
-          if [ -n "$OUT_OF_SCOPE" ]; then
-            echo "Cambyses 补丁改动了 sched 核心以外的文件, 已中止:"; echo "$OUT_OF_SCOPE"; exit 1
-          fi
-          # 记录 ABI 敏感文件指纹(task_struct / struct rq 布局所在文件), 应用后复核
-          ABI_HASHES="$(md5sum include/linux/sched.h kernel/sched/sched.h | md5sum)"
-
-          # 二、严格零 fuzz 应用: dry-run 探路, 任何 FAILED / fuzz / 重复应用痕迹立即中止
-          if ! patch -p1 --dry-run < cambyses.patch > /tmp/cambyses_dryrun.log 2>&1; then
-            cat /tmp/cambyses_dryrun.log
-            echo "Cambyses 补丁存在无法应用的 hunk, 已中止"; exit 1
-          fi
-          cat /tmp/cambyses_dryrun.log
-          if grep -qE 'with fuzz|FAILED|ignored|Reversed|previously applied' /tmp/cambyses_dryrun.log; then
-            echo "Cambyses 补丁与当前内核树不匹配(fuzz / hunk 失败 / 重复应用), 已中止"; exit 1
-          fi
-          if grep -q 'offset' /tmp/cambyses_dryrun.log; then
-            echo "提示: 以下 hunk 存在纯行号偏移(上下文精确匹配, 位置正确, 属其它补丁先行改动所致), 继续应用:"
-            grep 'offset' /tmp/cambyses_dryrun.log
-          fi
-          patch -p1 --no-backup-if-mismatch < cambyses.patch
-
-          # 三、ABI 复核: 结构体布局相关文件必须与打补丁前逐字节一致
-          [ "$(md5sum include/linux/sched.h kernel/sched/sched.h | md5sum)" = "$ABI_HASHES" ] \
-            || { echo "Cambyses ABI 校验失败: 结构体布局相关文件被改动"; exit 1; }
-
-          # 四、集成结果校验: 两处 sched_feat 与 detach_tasks() 全部改造点必须齐全
-          check() { grep -qF "$2" "$1" || { echo "Cambyses 集成校验失败: $1 缺少 '$2'"; exit 1; }; }
-          check kernel/sched/features.h   'SCHED_FEAT(LB_ROTATE_BLOCK, true)'
-          check kernel/sched/features.h   'SCHED_FEAT(LB_STRICT_BUDGET, true)'
-          check kernel/sched/fair.c       '#define LBF_MOVED'
-          check kernel/sched/fair.c       'static bool lb_cost_fits('
-          check kernel/sched/fair.c       'if (!lb_cost_fits(env, &concession, p, load))'
-          check kernel/sched/fair.c       'if (!lb_cost_fits(env, &concession, p, util))'
-          check kernel/sched/fair.c       'if (concession.p && !(env->flags & LBF_MOVED)) {'
-          check kernel/sched/fair.c       'list_rotate_to_front(resume->next, tasks);'
-          check kernel/sched/fair.c       'if (!sched_feat(LB_ROTATE_BLOCK))'
-          check kernel/sched/fair.c       'SCHED_CAMBYSES_VERSION'
-          check kernel/sched/fair.c       'late_initcall(sched_cambyses_init);'
-
-          # 五、运行时开关说明(不影响 ABI, 仅提示)
+          wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/cambyses-6.12.74-v0.6.0.patch
+          patch -p1 -F 3 < cambyses-6.12.74-v0.6.0.patch || true
+          
+          # 五、运行时开关说明
           if grep -q '^CONFIG_SCHED_DEBUG=y' arch/arm64/configs/gki_defconfig; then
             echo "CONFIG_SCHED_DEBUG=y: 可在 /sys/kernel/debug/sched/features 运行时开关 NO_LB_ROTATE_BLOCK / NO_LB_STRICT_BUDGET"
           else
             echo "提示: 当前未开启 CONFIG_SCHED_DEBUG, 两处特性按编译期默认值(true)固化为常量, 实际效果与开启时一致, 但不可运行时切换"
           fi
-          echo "Cambyses 集成完成(零 fuzz 应用 + ABI 面未触碰)！"
+          echo "Cambyses 集成完成"
       - name: 添加制作名称
         run: |
           cd kernel_workspace

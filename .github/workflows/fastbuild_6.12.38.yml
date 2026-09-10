@@ -80,6 +80,11 @@ on:
         required: true
         type: boolean
         default: 'true'
+      nomount_enable:
+        description: '是否按 GKI 方式将 NoMount 内置编译进内核(NoMount 为 VFS 层路径重定向框架, 用于替代传统挂载式模块注入; 不需要可关闭)'
+        required: true
+        type: boolean
+        default: 'true'
       ccache_update:
         description: '更新ccache缓存(将本次编译生成的ccache缓存覆盖至仓库缓存，在更改编译配置、源码或需要刷新缓存时开启)'
         required: true
@@ -540,6 +545,24 @@ jobs:
           curl -sSL https://github.com/cctv18/Baseband-guard/raw/master/setup.sh | bash
           sed -i '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/selinux/selinux,baseband_guard/ } }' security/Kconfig
 
+      - name: 集成 NoMount(按 GKI 方式内置编译)
+        if: inputs.nomount_enable
+        run: |
+          echo "正在按 GKI 方式集成 NoMount(内置编译进内核)…"
+          cd kernel_workspace/common
+          # NoMount 官方 setup 脚本可自动识别 GKI 的 common/fs 目录结构，完成源码拉取、fs/nomount 符号链接、fs/Makefile 与 fs/Kconfig 的挂载
+          curl -LSs "https://raw.githubusercontent.com/maxsteeel/nomount/refs/heads/dev/kernel/setup.sh" | bash -s dev
+          # 移除嵌套 Git 仓库，避免污染内核树版本信息
+          rm -rf ./NoMount/.git
+          # 校验集成结果，防止静默失败
+          [ -f ./fs/nomount/nomount.c ] || { echo "NoMount 源码集成失败"; exit 1; }
+          grep -q 'obj-$(CONFIG_NOMOUNT) += nomount/' ./fs/Makefile || { echo "fs/Makefile 挂载失败"; exit 1; }
+          grep -q 'source "fs/nomount/Kconfig"' ./fs/Kconfig || { echo "fs/Kconfig 挂载失败"; exit 1; }
+          # NoMount 通过内核 keyring 子系统与用户态通信，需确保 CONFIG_KEYS 开启；按 GKI 方式内置编译(=y)
+          echo "CONFIG_KEYS=y" >> ./arch/arm64/configs/gki_defconfig
+          echo "CONFIG_NOMOUNT=y" >> ./arch/arm64/configs/gki_defconfig
+          echo "NoMount 集成完成！"
+
       - name: 添加制作名称
         run: |
           cd kernel_workspace
@@ -774,6 +797,7 @@ jobs:
           echo "ADIOS: ${{ github.event.inputs.adios_enable }}" >> ./ak3.log
           echo "Re-Kernel: ${{ github.event.inputs.rekernel_enable }}" >> ./ak3.log
           echo "BBG: ${{ github.event.inputs.baseband_guard }}" >> ./ak3.log
+          echo "NoMount: ${{ github.event.inputs.nomount_enable }}" >> ./ak3.log
           zip -z ../$AK3_NAME < ./ak3.log
 
       - name: 上传 Ccache 调试日志
@@ -858,6 +882,7 @@ jobs:
           - ADIOS IO调度器支持：${{ github.event.inputs.adios_enable }}
           - Re-Kernel支持：${{ github.event.inputs.rekernel_enable }}
           - 内核级基带保护支持：${{ github.event.inputs.baseband_guard }}
+          - NoMount(VFS 路径重定向)支持：${{ github.event.inputs.nomount_enable }}
           - ReSukiSU管理器下载：[ReSukiSU_CI](https://github.com/cctv18/ReSukiSU_CI/releases)
           - SukiSU Ultra管理器下载：[SukiSU-Ultra](https://github.com/SukiSU-Ultra/SukiSU-Ultra/releases)
           - KernelSU Next管理器下载：[KernelSU-Next](https://github.com/KernelSU-Next/KernelSU-Next/releases)

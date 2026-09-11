@@ -51,6 +51,11 @@ on:
           - 'false'
           - 'true'
           - 'default'
+      bbr3_enable:
+        description: '是否集成 BBRv3 拥塞控制算法与 FQ_CODEL 队列规则并将默认拥塞控制设为 bbr3(在树内 BBR v1 之外新增独立 bbr3 算法; 不修改核心结构体布局/不新增导出符号/不触碰 KABI 保留区, 不破坏 ABI; 独立于上方 bbr_enable 开关)'
+        required: true
+        type: boolean
+        default: 'true'
       droidspaces_enable:
         description: '是否启用Droidspaces容器支持(轻量化的完整Linux容器支持;false关闭,standard开启容器+ntsync支持,extend开启更多测试支持项)'
         required: true
@@ -66,7 +71,7 @@ on:
         type: boolean
         default: 'true'
       adios_enable:
-        description: '是否集成 ADIOS 3.3.0 IO 调度器(截止时间优先 + 学习型自适应延迟控制, 提升IO读写性能; 以 core(block/adios.c 整文件重建) + glue(三个集成点) 两个补丁落地, 不新增导出符号、不触碰 KABI 保留区、不改动已导出结构体布局, 不破坏 ABI)'
+        description: '是否启用ADIOS IO调度器支持(提升IO读写性能)'
         required: true
         type: boolean
         default: 'true'
@@ -495,6 +500,136 @@ jobs:
             fi
           fi
 
+      - name: 集成 BBRv3 拥塞控制算法与 FQ_CODEL 队列规则并设为默认
+        run: |
+          if [[ "${{ github.event.inputs.bbr3_enable }}" == "false" ]]; then
+            echo "已按输入跳过 BBRv3 + FQ_CODEL 集成(bbr3_enable=false)"
+            exit 0
+          fi
+          echo "正在集成 BBRv3 拥塞控制算法 + FQ_CODEL 队列规则..."
+          # 任何命令失败时打印出错行号: 避免 set -e 静默退出后失败点无法定位
+          trap 'echo "BBRv3 集成步骤在脚本第 $LINENO 行失败(退出码 $?)" >&2' ERR
+          cd kernel_workspace/common
+
+          # 上游来源: omajili-manbu/Xiaomi_Rodin_Kernel_Enhance(commit a97816c1) 把 hrimfaxi/tcp_bbr_modules
+          # 整理的 Google BBRv3 回移以独立算法名 "bbr3" 注册; 本副本在其基础上适配 android16-6.12.38 GKI 树:
+          #   - tcp_bbr3_compat.h 探针块按本树重新烘焙: cong_control 为 4 参数(6.6 基线为 2 参数), icsk_ca_priv
+          #     104B, 无 tso_segs / skb_marked_lost / fast_ack_mode / ecn_low / ecn_ect_permanent 等
+          #     Google-tree 专属扩展(相应分支编译期关闭)。
+          # ABI 说明: 补丁不新增导出符号、不触碰 KABI 保留区、不改动任何核心结构体布局, 仅新增
+          #           net/ipv4/tcp_bbr3.c + net/ipv4/tcp_bbr3_compat.h 两个新文件与 net/ipv4/Kconfig /
+          #           net/ipv4/Makefile 两个集成点, 故不破坏内核 ABI(可与设备上 OPLUS 预编译 ko 共存)。
+          # 拆分: core = 两个新文件; glue = Kconfig / Makefile(树内已含集成点时自动跳过)
+          CORE_FILE="bbr3-core.patch"
+          GLUE_FILE="bbr3-glue.patch"
+          CORE_URL="https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/bbr3-oplus.patch"
+          GLUE_URL="https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/bbr3-glue-oplus.patch"
+          # 下载器自适应: 优先 curl(对 4xx/5xx 返回非 0, --retry 抗弱网); 无 curl 时回退 wget
+          fetch() { # $1=url $2=输出文件 $3=日志文件
+            if command -v curl >/dev/null 2>&1; then
+              curl -fSL --retry 3 --retry-delay 2 --connect-timeout 20 -o "$2" "$1" 2> "$3"
+            else
+              wget -O "$2" --tries=3 --timeout=20 "$1" 2> "$3"
+            fi
+          }
+          download() { # $1=url $2=输出文件 $3=日志前缀
+            rm -f "$2.tmp" "${3}.log"
+            if fetch "$1" "$2.tmp" "${3}.log" && [ -s "$2.tmp" ]; then
+              mv "$2.tmp" "$2"
+              echo "下载成功: $2 ($(wc -c < "$2") 字节)"
+            else
+              echo "该源不可用: $(tail -n 2 "${3}.log" | tr '\n' ' ')"
+              return 1
+            fi
+          }
+          download "$CORE_URL" "$CORE_FILE" download_bbr3_core \
+            || { echo "BBRv3 core 补丁下载失败: 仓库 other_patch/bbr3-oplus.patch 缺失或不可达"; exit 1; }
+          download "$GLUE_URL" "$GLUE_FILE" download_bbr3_glue \
+            || { echo "BBRv3 glue 补丁下载失败: 仓库 other_patch/bbr3-glue-oplus.patch 缺失或不可达"; exit 1; }
+
+          # 一、ABI 面静态审计: 补丁若"实际新增"导出符号 / 触碰 KABI 保留区, 一律中止
+          #     只审新增代码行(+), 并剔除注释行, 避免注释中提及符号名导致误判
+          ABI_TOUCH="$(grep -nE '^\+.*(EXPORT_SYMBOL|ANDROID_KABI|__kabi_reserved)' "$CORE_FILE" "$GLUE_FILE" \
+                      | grep -vE '^[^:]+:[0-9]+:\+[[:space:]]*(\*|/\*|//)' || true)"
+          if [ -n "$ABI_TOUCH" ]; then
+            echo "BBRv3 补丁触碰 ABI 面(导出符号或 KABI 保留区), 已中止:"; echo "$ABI_TOUCH"; exit 1
+          fi
+          # 注意: 白名单全部命中时 grep -vE 无输出返回码为 1, 必须 || true 兜底, 否则 bash -e 下静默退出
+          OUT_OF_SCOPE="$(grep -E '^diff --git ' "$CORE_FILE" | grep -vE ' b/net/ipv4/tcp_bbr3(_compat)?\.(c|h)$' || true)"
+          if [ -n "$OUT_OF_SCOPE" ]; then
+            echo "BBRv3 core 补丁改动了白名单以外的文件, 已中止:"; echo "$OUT_OF_SCOPE"; exit 1
+          fi
+          OUT_OF_SCOPE="$(grep -E '^diff --git ' "$GLUE_FILE" | grep -vE ' b/net/ipv4/(Kconfig|Makefile)$' || true)"
+          if [ -n "$OUT_OF_SCOPE" ]; then
+            echo "BBRv3 glue 补丁改动了白名单以外的文件, 已中止:"; echo "$OUT_OF_SCOPE"; exit 1
+          fi
+          # 记录 ABI 敏感文件指纹(TCP 核心头文件与 tcp.c), 应用后复核
+          ABI_HASHES="$(md5sum include/linux/tcp.h include/net/tcp.h include/net/inet_connection_sock.h net/ipv4/tcp.c | md5sum)"
+
+          # 二、集成点(glue): 树内已内置则跳过, 否则严格零 fuzz 应用
+          if grep -q 'config TCP_CONG_BBR3' net/ipv4/Kconfig \
+             && grep -q 'tcp_bbr3\.o' net/ipv4/Makefile; then
+            echo "BBRv3 集成点已存在于内核树(net/ipv4/Kconfig + Makefile), 跳过 glue 补丁"
+          else
+            if ! patch -p1 --dry-run -F 0 < "$GLUE_FILE" > /tmp/bbr3_glue_dryrun.log 2>&1; then
+              cat /tmp/bbr3_glue_dryrun.log
+              echo "BBRv3 glue 补丁存在无法应用的 hunk, 已中止"; exit 1
+            fi
+            cat /tmp/bbr3_glue_dryrun.log
+            if grep -qE 'with fuzz|FAILED|ignored|Reversed|previously applied' /tmp/bbr3_glue_dryrun.log; then
+              echo "BBRv3 glue 补丁与当前内核树不匹配(fuzz / hunk 失败 / 重复应用), 已中止"; exit 1
+            fi
+            patch -p1 --no-backup-if-mismatch -F 0 < "$GLUE_FILE"
+          fi
+
+          # 三、core: 落地两个新文件(树内若已有同名文件先删除, 否则 new-file 补丁会被拒绝)
+          rm -f net/ipv4/tcp_bbr3.c net/ipv4/tcp_bbr3_compat.h
+          if ! patch -p1 --dry-run -F 0 < "$CORE_FILE" > /tmp/bbr3_core_dryrun.log 2>&1; then
+            cat /tmp/bbr3_core_dryrun.log
+            echo "BBRv3 core 补丁存在无法应用的 hunk, 已中止"; exit 1
+          fi
+          cat /tmp/bbr3_core_dryrun.log
+          if grep -qE 'with fuzz|FAILED|ignored|Reversed|previously applied' /tmp/bbr3_core_dryrun.log; then
+            echo "BBRv3 core 补丁与当前内核树不匹配, 已中止"; exit 1
+          fi
+          patch -p1 --no-backup-if-mismatch -F 0 < "$CORE_FILE"
+
+          # 四、ABI 复核: TCP 核心头文件与 tcp.c 必须与打补丁前逐字节一致
+          [ "$(md5sum include/linux/tcp.h include/net/tcp.h include/net/inet_connection_sock.h net/ipv4/tcp.c | md5sum)" = "$ABI_HASHES" ] \
+            || { echo "BBRv3 ABI 校验失败: TCP 核心文件被改动"; exit 1; }
+
+          # 五、集成结果校验: 算法名/注册标志/关键实现/两个集成点必须齐全
+          check() { grep -qF "$2" "$1" || { echo "BBRv3 集成校验失败: $1 缺少 '$2'"; exit 1; }; }
+          checkre() { grep -qE "$2" "$1" || { echo "BBRv3 集成校验失败(正则): $1 缺少 '$2'"; exit 1; }; }
+          checkre net/ipv4/tcp_bbr3.c '\.name[[:space:]]*=[[:space:]]*"bbr3",'
+          checkre net/ipv4/tcp_bbr3.c 'tcp_register_congestion_control'
+          check net/ipv4/tcp_bbr3.c 'bbr_register'
+          check net/ipv4/tcp_bbr3_compat.h 'TCP_CONGESTION_OPS_CONG_CONTROL_HAS_4_ARGS'
+          check net/ipv4/Kconfig 'config TCP_CONG_BBR3'
+          check net/ipv4/Kconfig 'config DEFAULT_BBR3'
+          checkre net/ipv4/Kconfig 'default "bbr3" if DEFAULT_BBR3'
+          checkre net/ipv4/Makefile 'obj-\$\(CONFIG_TCP_CONG_BBR3\)[[:space:]]+\+= tcp_bbr3\.o'
+
+          # 六、显式写入开关: 算法本体 + 设为默认拥塞控制 + 默认队列规则 fq_codel
+          DEFCONFIG=arch/arm64/configs/gki_defconfig
+          # 幂等: 先移除同名/同义项(含上方 BBR 步骤可能写入的 DEFAULT_TCP_CONG / DEFAULT_BBR), 再统一追加,
+          #       保证默认拥塞算法唯一确定, 重复执行本步骤也不会产生重复项
+          #   注意 NET_SCH_DEFAULT 必须为 y, 否则 choice 里的 DEFAULT_FQ_CODEL 不生效(Kconfig 中它没有 default y)
+          sed -i -E '/^CONFIG_(TCP_CONG_ADVANCED|TCP_CONG_BBR3|DEFAULT_BBR3|DEFAULT_TCP_CONG|DEFAULT_BBR|NET_SCH_DEFAULT|NET_SCH_FQ_CODEL|DEFAULT_FQ_CODEL)=/d' "$DEFCONFIG"
+          {
+            echo "CONFIG_TCP_CONG_ADVANCED=y"
+            echo "CONFIG_TCP_CONG_BBR3=y"
+            echo "CONFIG_DEFAULT_BBR3=y"
+            echo 'CONFIG_DEFAULT_TCP_CONG="bbr3"'
+            echo "CONFIG_NET_SCH_DEFAULT=y"
+            echo "CONFIG_NET_SCH_FQ_CODEL=y"
+            echo "CONFIG_DEFAULT_FQ_CODEL=y"
+          } >> "$DEFCONFIG"
+          echo "BBRv3 + FQ_CODEL 集成完成(零 fuzz 应用 + ABI 面未触碰)！"
+          echo "提示: bbr3 与树内 bbr(v1)/cubic 并存, 运行期可用 sysctl net.ipv4.tcp_congestion_control 查看/切换;"
+          echo "      BBRv3 的 pacing 依赖 fq 类 qdisc, FQ-CODEL 已设为默认队列规则(隔离流 + AQM 低延迟)。"
+          grep -E '^CONFIG_(DEFAULT_TCP_CONG|DEFAULT_BBR3|DEFAULT_FQ_CODEL|TCP_CONG_BBR3|NET_SCH_DEFAULT|NET_SCH_FQ_CODEL)=' "$DEFCONFIG"
+
       - name: 启用 Droidspaces 容器支持
         run: |
           if [[ "${{ github.event.inputs.droidspaces_enable }}" != "false" ]]; then
@@ -544,140 +679,13 @@ jobs:
             fi
           fi
 
-      - name: 集成 ADIOS 3.3.0 IO 调度器
+      - name: 启用ADIOS IO调度器
         if: inputs.adios_enable
         run: |
-          echo "正在集成 ADIOS 3.3.0 IO 调度器(截止时间优先 + 学习型自适应延迟控制; 3.3.0 以快照-增量方式聚合延迟样本并改用 mempool 分配请求描述符)…"
-          # 任何命令失败时打印出错行号: 避免 set -e 静默退出后失败点无法定位
-          trap 'echo "ADIOS 集成步骤在脚本第 $LINENO 行失败(退出码 $?)" >&2' ERR
-          cd kernel_workspace/common
-
-          # 上游补丁以 mainline 6.12.44 为基准, 共改动 4 个文件; 本副本已对 6.12.38 vendor 树逐 hunk 对位,
-          # 并按 "core + glue" 拆分落地:
-          #   core = block/adios.c 整文件重建版(3.3.0 全量实现, 以 new file 形式覆盖树内旧版实现)
-          #   glue = 三个集成点 block/Kconfig.iosched / block/Makefile / block/elevator.c
-          #          (树内已内置同款 ADIOS 集成点时自动跳过, 保证任何分支状态下都能收敛到同一结果)
-          # ABI 说明: 补丁不新增任何导出符号、不触碰 KABI 保留区、不改动已导出结构体布局, 仅替换 block/ 内部调度实现,
-          #          故不破坏内核 ABI(可与设备上的 OPLUS 预编译 ko 共存)。
-          # 本副本已适配 vendor 树, 故仅从本仓库 other_patch 取用, 不设上游兜底源(避免上游 raw 补丁在已含集成点的树上误判)。
-          GLUE_FILE="adios-glue.patch"
-          CORE_FILE="adios-core.patch"
-          GLUE_URLS=(
-            "https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/adios-3.3.0-glue-oplus.patch"
-          )
-          CORE_URLS=(
-            "https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/adios-3.3.0-oplus.patch"
-          )
-          # 下载器自适应: 优先 curl(对 4xx/5xx 返回非 0, --retry 抗弱网); 无 curl 时回退 wget(只用其自身合法选项)
-          fetch() { # $1=url $2=输出文件 $3=日志文件
-            if command -v curl >/dev/null 2>&1; then
-              curl -fSL --retry 3 --retry-delay 2 --connect-timeout 20 -o "$2" "$1" 2> "$3"
-            else
-              wget -O "$2" --tries=3 --timeout=20 "$1" 2> "$3"
-            fi
-          }
-          rm -f "$GLUE_FILE"
-          for u in "${GLUE_URLS[@]}"; do
-            echo "尝试下载 ADIOS glue 补丁: $u"
-            if fetch "$u" "$GLUE_FILE.tmp" download_adios_glue.log; then
-              if [ -s "$GLUE_FILE.tmp" ]; then
-                mv "$GLUE_FILE.tmp" "$GLUE_FILE"
-                echo "下载成功: $GLUE_FILE $(wc -c < "$GLUE_FILE") 字节"
-                break
-              fi
-              echo "该源返回空文件, 尝试下一个源"
-            else
-              echo "该源不可用: $(tail -n 2 download_adios_glue.log | tr '\n' ' ')"
-            fi
-          done
-          rm -f "$GLUE_FILE.tmp" download_adios_glue.log
-          [ -s "$GLUE_FILE" ] || { echo "ADIOS glue 补丁下载失败: 仓库 other_patch/adios-3.3.0-glue-oplus.patch 缺失或不可达(见上方诊断)"; exit 1; }
-          rm -f "$CORE_FILE"
-          for u in "${CORE_URLS[@]}"; do
-            echo "尝试下载 ADIOS core 补丁: $u"
-            if fetch "$u" "$CORE_FILE.tmp" download_adios_core.log; then
-              if [ -s "$CORE_FILE.tmp" ]; then
-                mv "$CORE_FILE.tmp" "$CORE_FILE"
-                echo "下载成功: $CORE_FILE $(wc -c < "$CORE_FILE") 字节"
-                break
-              fi
-              echo "该源返回空文件, 尝试下一个源"
-            else
-              echo "该源不可用: $(tail -n 2 download_adios_core.log | tr '\n' ' ')"
-            fi
-          done
-          rm -f "$CORE_FILE.tmp" download_adios_core.log
-          [ -s "$CORE_FILE" ] || { echo "ADIOS core 补丁下载失败: 仓库 other_patch/adios-3.3.0-oplus.patch 缺失或不可达(见上方诊断)"; exit 1; }
-
-          # 一、ABI 面静态审计: 补丁触碰导出符号 / KABI 保留区, 一律中止
-          if grep -nE 'EXPORT_SYMBOL|ANDROID_KABI|__kabi_reserved' "$CORE_FILE" "$GLUE_FILE"; then
-            echo "ADIOS 补丁触碰 ABI 面(导出符号或 KABI 保留区), 已中止"; exit 1
-          fi
-          # 注意: 白名单全部命中时 grep -vE 无输出返回码为 1, 必须 || true 兜底, 否则 bash -e 下静默退出
-          OUT_OF_SCOPE="$(grep -E '^diff --git ' "$CORE_FILE" | grep -vE ' b/block/adios\.c$' || true)"
-          if [ -n "$OUT_OF_SCOPE" ]; then
-            echo "ADIOS core 补丁改动了 block/adios.c 以外的文件, 已中止:"; echo "$OUT_OF_SCOPE"; exit 1
-          fi
-          OUT_OF_SCOPE="$(grep -E '^diff --git ' "$GLUE_FILE" | grep -vE ' b/block/(Kconfig\.iosched|Makefile|elevator\.c)$' || true)"
-          if [ -n "$OUT_OF_SCOPE" ]; then
-            echo "ADIOS glue 补丁改动了白名单以外的文件, 已中止:"; echo "$OUT_OF_SCOPE"; exit 1
-          fi
-          # 记录 ABI 敏感文件指纹(task_struct / struct rq 布局所在文件), 应用后复核
-          ABI_HASHES="$(md5sum include/linux/sched.h kernel/sched/sched.h | md5sum)"
-
-          # 二、集成点(glue): 树内已内置则跳过, 否则严格零 fuzz 应用
-          if grep -q 'config MQ_IOSCHED_ADIOS' block/Kconfig.iosched \
-             && grep -q 'obj-$(CONFIG_MQ_IOSCHED_ADIOS)' block/Makefile \
-             && grep -q 'CONFIG_MQ_IOSCHED_DEFAULT_ADIOS' block/elevator.c; then
-            echo "ADIOS 集成点已存在于内核树(Kconfig/Makefile/elevator), 跳过 glue 补丁"
-          else
-            if ! patch -p1 --dry-run < "$GLUE_FILE" > /tmp/adios_glue_dryrun.log 2>&1; then
-              cat /tmp/adios_glue_dryrun.log
-              echo "ADIOS glue 补丁存在无法应用的 hunk, 已中止"; exit 1
-            fi
-            cat /tmp/adios_glue_dryrun.log
-            if grep -qE 'with fuzz|FAILED|ignored|Reversed|previously applied' /tmp/adios_glue_dryrun.log; then
-              echo "ADIOS glue 补丁与当前内核树不匹配(fuzz / hunk 失败 / 重复应用), 已中止"; exit 1
-            fi
-            patch -p1 --no-backup-if-mismatch < "$GLUE_FILE"
-          fi
-
-          # 三、core: 整文件重建 block/adios.c(树内旧实现必须先删除, 否则 new-file 补丁会被拒绝)
-          rm -f block/adios.c
-          if ! patch -p1 --dry-run < "$CORE_FILE" > /tmp/adios_core_dryrun.log 2>&1; then
-            cat /tmp/adios_core_dryrun.log
-            echo "ADIOS core 补丁存在无法应用的 hunk, 已中止"; exit 1
-          fi
-          cat /tmp/adios_core_dryrun.log
-          if grep -qE 'with fuzz|FAILED|ignored|Reversed|previously applied' /tmp/adios_core_dryrun.log; then
-            echo "ADIOS core 补丁与当前内核树不匹配, 已中止"; exit 1
-          fi
-          patch -p1 --no-backup-if-mismatch < "$CORE_FILE"
-
-          # 四、ABI 复核: 结构体布局相关文件必须与打补丁前逐字节一致
-          [ "$(md5sum include/linux/sched.h kernel/sched/sched.h | md5sum)" = "$ABI_HASHES" ] \
-            || { echo "ADIOS ABI 校验失败: 结构体布局相关文件被改动"; exit 1; }
-
-          # 五、集成结果校验: 版本号、elevator 注册、3.3.0 特征实现与三个集成点必须齐全
-          check() { grep -qF "$2" "$1" || { echo "ADIOS 集成校验失败: $1 缺少 '$2'"; exit 1; }; }
-          checkre() { grep -qE "$2" "$1" || { echo "ADIOS 集成校验失败(正则): $1 缺少 '$2'"; exit 1; }; }
-          check block/adios.c '#define ADIOS_VERSION "3.3.0"'
-          checkre block/adios.c 'elevator_name[[:space:]]*=[[:space:]]*"adios"'
-          check block/adios.c 'mempool_create_slab_pool'
-          checkre block/adios.c 'mempool_alloc|mempool_free'
-          check block/Kconfig.iosched 'config MQ_IOSCHED_ADIOS'
-          check block/Kconfig.iosched 'config MQ_IOSCHED_DEFAULT_ADIOS'
-          checkre block/Makefile 'obj-\$\(CONFIG_MQ_IOSCHED_ADIOS\)[[:space:]]+\+= adios\.o'
-          checkre block/elevator.c 'CONFIG_MQ_IOSCHED_DEFAULT_ADIOS'
-
-          # 六、显式写入开关: ADIOS 本体与"设为默认电梯"两项必须同时为 y(Kconfig 中后者 depends on 前者=y)
-          grep -q '^CONFIG_MQ_IOSCHED_ADIOS=' arch/arm64/configs/gki_defconfig \
-            || echo "CONFIG_MQ_IOSCHED_ADIOS=y" >> arch/arm64/configs/gki_defconfig
-          grep -q '^CONFIG_MQ_IOSCHED_DEFAULT_ADIOS=' arch/arm64/configs/gki_defconfig \
-            || echo "CONFIG_MQ_IOSCHED_DEFAULT_ADIOS=y" >> arch/arm64/configs/gki_defconfig
-          echo "提示: ADIOS 与 mq-deadline/kyber/bfq 同为 mq 电梯可选实现, 运行时可用 /sys/block/<dev>/queue/scheduler 查看"
-          echo "      本构建已将其设为默认电梯(CONFIG_MQ_IOSCHED_DEFAULT_ADIOS=y): 未显式指定调度器的块设备默认走 ADIOS"
-          echo "ADIOS 3.3.0 集成完成(零 fuzz 应用 + ABI 面未触碰)！"
+          echo "正在启用ADIOS IO调度器(将截止时间优先调度算法与基于自主学习的自适应延迟控制算法相结合, 降低I/O延迟)…"
+          cd kernel_workspace
+          echo "CONFIG_MQ_IOSCHED_ADIOS=y" >> ./common/arch/arm64/configs/gki_defconfig
+          echo "CONFIG_MQ_IOSCHED_DEFAULT_ADIOS=y" >> ./common/arch/arm64/configs/gki_defconfig
 
       - name: 启用Re-Kernel支持
         if: inputs.rekernel_enable
@@ -1410,7 +1418,7 @@ jobs:
           echo "IPset: ${{ github.event.inputs.better_net }}" >> ./ak3.log
           echo "BBR&Brutal: ${{ github.event.inputs.bbr_enable }}" >> ./ak3.log
           echo "Droidspaces: ${{ github.event.inputs.droidspaces_enable }}" >> ./ak3.log
-          echo "ADIOS: ${{ github.event.inputs.adios_enable }} (v3.3.0)" >> ./ak3.log
+          echo "ADIOS: ${{ github.event.inputs.adios_enable }}" >> ./ak3.log
           echo "Re-Kernel: ${{ github.event.inputs.rekernel_enable }}" >> ./ak3.log
           echo "BBG: ${{ github.event.inputs.baseband_guard }}" >> ./ak3.log
           echo "NoMount: ${{ github.event.inputs.nomount_enable }}" >> ./ak3.log
@@ -1500,7 +1508,7 @@ jobs:
           - 网络功能增强：${{ github.event.inputs.better_net }}
           - BBR/Brutal 等拥塞控制算法支持：${{ github.event.inputs.bbr_enable }}
           - Droidspaces 容器支持：${{ github.event.inputs.droidspaces_enable }}
-          - ADIOS IO调度器支持：${{ github.event.inputs.adios_enable }}（3.3.0 版：截止时间优先 + 学习型自适应延迟控制，快照-增量延迟聚合 + mempool 化请求分配；仅替换 block/ 内部调度实现，不新增导出符号、不触碰 KABI 保留区，不破坏 ABI）
+          - ADIOS IO调度器支持：${{ github.event.inputs.adios_enable }}
           - Re-Kernel支持：${{ github.event.inputs.rekernel_enable }}
           - 内核级基带保护支持：${{ github.event.inputs.baseband_guard }}
           - NoMount(VFS 路径重定向)支持：${{ github.event.inputs.nomount_enable }}

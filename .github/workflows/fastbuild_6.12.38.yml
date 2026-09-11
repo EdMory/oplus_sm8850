@@ -52,7 +52,7 @@ on:
           - 'true'
           - 'default'
       bbr3_enable:
-        description: '是否集成 BBRv3 拥塞控制算法与 FQ_CODEL 队列规则并将默认拥塞控制设为 bbr3(在树内 BBR v1 之外新增独立 bbr3 算法; 不修改核心结构体布局/不新增导出符号/不触碰 KABI 保留区, 不破坏 ABI; 独立于上方 bbr_enable 开关)'
+        description: '是否集成 BBRv3 拥塞控制算法与 FQ_CODEL 队列规则并将默认拥塞控制设为 bbr3(在树内 BBR v1 之外新增独立 bbr3 算法;)'
         required: true
         type: boolean
         default: 'true'
@@ -86,32 +86,32 @@ on:
         type: boolean
         default: 'true'
       nomount_enable:
-        description: '是否按 GKI 方式将 NoMount 内置编译进内核(NoMount 为 VFS 层路径重定向框架, 用于替代传统挂载式模块注入; 不需要可关闭)'
+        description: '是否按 GKI 方式将 NoMount 内置编译进内核(NoMount 为 VFS 层路径重定向框架, 用于替代传统挂载式模块注入)'
         required: true
         type: boolean
         default: 'true'
       bore_enable:
-        description: '是否集成 BORE 调度器(Burst-Oriented Response Enhancer), 已知会造成Bootloop，暂时关闭'
+        description: '是否集成 BORE 调度器(Burst-Oriented Response Enhancer)'
         required: true
         type: boolean
         default: 'false'
       cambyses_enable:
-        description: '是否集成 Cambyses 调度器(优化 CFS 负载均衡: detach_tasks 扫描窗口块旋转 + 严格预算判定; 仅改 fair.c/features.h, 不触碰结构体布局与导出符号, 不破坏 ABI)'
+        description: '是否集成 Cambyses 调度器'
         required: true
         type: boolean
         default: 'flase'
       zram_ir_enable:
-        description: '是否集成 ZRAM-IR 立即重压缩(zram 多级压缩的同一写入内逐级尝试: 前级压缩不达标立即换下一级压缩流重压, 减少延迟 kcomp 造成的额外内存占用; 只改 zram_drv.c, 不新增导出符号、不触碰 KABI 保留区; 依赖内核树的 CONFIG_ZRAM_MULTI_COMP, 不支持时步骤会主动中止)'
+        description: '是否集成 ZRAM-IR 立即重压缩(zram 多级压缩的同一写入内逐级尝试: 前级压缩不达标立即换下一级压缩流重压, 减少延迟 kcomp 造成的额外内存占用)'
         required: true
         type: boolean
         default: 'true'
       kcompressd_enable:
-        description: '是否集成 Kcompressd(把 kswapd 路径的页压缩/换出卸载到每 NUMA 节点独立内核线程, 降低内存回收阻塞时间; 只改 mm/ 内部结构与 kswapd 路径, 不新增导出符号、不触碰 KABI 保留区; 属实验特性, 运行时可用 /proc/sys/vm/kcompressd 关闭)'
+        description: '是否集成 Kcompressd(把 kswapd 路径的页压缩/换出卸载到每 NUMA 节点独立内核线程, 降低内存回收阻塞时间)'
         required: true
         type: boolean
         default: 'false'
       lz4kdr_enable:
-        description: '是否集成 LZ4KDR 压缩算法（LZ4KD 的高速衍生实现: 线格式与 LZ4KD 兼容、重写编码器搜索循环; 新增 backend_lz4kdr 后端与 lib/lz4kdr/ 独立实现, 导出符号均为 lz4kdr_* 新符号, 不改动既有 KABI, 可与已集成的 LZ4KD 并存; 需 lz4kd_enable 同时开启以匹配适配位置)'
+        description: '是否集成 LZ4KDR 压缩算法（LZ4KD 的高速衍生实现, 可与已集成的 LZ4KD 并存; 需 lz4kd_enable 同时开启以匹配适配位置)'
         required: true
         type: boolean
         default: 'true'

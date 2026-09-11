@@ -1,0 +1,59 @@
+diff --git a/net/ipv4/Kconfig b/net/ipv4/Kconfig
+--- a/net/ipv4/Kconfig
++++ b/net/ipv4/Kconfig
+@@ -679,6 +679,26 @@
+ 	  AQM schemes that do not provide a delay signal. It requires the fq
+ 	  ("Fair Queue") pacing packet scheduler.
+ 
++config TCP_CONG_BBR3
++	tristate "BBRv3 TCP (bbr3)"
++	default n
++	help
++
++	  BBRv3 (Bottleneck Bandwidth and RTT, v3) congestion control,
++	  backported from the Google TCP BBR v3 release (github.com/google/bbr)
++	  through hrimfaxi/tcp_bbr_modules and adapted for in-tree build on
++	  this android16-6.12 GKI base. It registers as an independent "bbr3"
++	  algorithm next to the in-kernel BBR v1, so both remain selectable
++	  at runtime through net.ipv4.tcp_congestion_control.
++
++	  No kernel struct layout is changed: the per-connection state block
++	  (~200 bytes) is heap allocated, because mainline icsk_ca_priv
++	  (104 bytes) cannot hold it. Google-tree-only extras (per-skb loss
++	  tracking, TLP recovery events, custom TSO sizing, the ecn_low
++	  per-route attribute) do not exist here and are compiled out; ECN
++	  negotiation can still be enabled at boot with the parameter
++	  tcp_bbr3.ecn_low=1.
++
+ config TCP_CONG_BRUTAL
+ 	tristate "Brutal TCP congestion control"
+ 	default n
+@@ -728,6 +748,9 @@
+ 
+ 	config DEFAULT_BBR
+ 		bool "BBR" if TCP_CONG_BBR=y
++
++	config DEFAULT_BBR3
++		bool "BBRv3" if TCP_CONG_BBR3=y
+ 
+ 	config DEFAULT_BRUTAL
+ 		bool "brutal" if TCP_CONG_BRUTAL=y
+@@ -757,6 +780,7 @@
+ 	default "cdg" if DEFAULT_CDG
+ 	default "brutal" if DEFAULT_BRUTAL
+ 	default "bbr" if DEFAULT_BBR
++	default "bbr3" if DEFAULT_BBR3
+ 	default "cubic"
+ 
+ config TCP_SIGPOOL
+diff --git a/net/ipv4/Makefile b/net/ipv4/Makefile
+--- a/net/ipv4/Makefile
++++ b/net/ipv4/Makefile
+@@ -45,6 +45,7 @@
+ obj-$(CONFIG_INET_UDP_DIAG) += udp_diag.o
+ obj-$(CONFIG_INET_RAW_DIAG) += raw_diag.o
+ obj-$(CONFIG_TCP_CONG_BBR) += tcp_bbr.o
++obj-$(CONFIG_TCP_CONG_BBR3) += tcp_bbr3.o
+ obj-$(CONFIG_TCP_CONG_BIC) += tcp_bic.o
+ obj-$(CONFIG_TCP_CONG_BRUTAL) += tcp_brutal.o
+ obj-$(CONFIG_TCP_CONG_CDG) += tcp_cdg.o

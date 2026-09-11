@@ -1,0 +1,71 @@
+diff --git a/block/Kconfig.iosched b/block/Kconfig.iosched
+index 27f11320b8..e98585dd83 100644
+--- a/block/Kconfig.iosched
++++ b/block/Kconfig.iosched
+@@ -16,6 +16,20 @@ config MQ_IOSCHED_KYBER
+ 	  synchronous writes, it will self-tune queue depths to achieve that
+ 	  goal.
+ 
++config MQ_IOSCHED_ADIOS
++	tristate "Adaptive Deadline I/O scheduler"
++	default m
++	help
++	  The Adaptive Deadline I/O Scheduler (ADIOS) is a multi-queue I/O
++	  scheduler with learning-based adaptive latency control.
++
++config MQ_IOSCHED_DEFAULT_ADIOS
++	bool "Enable ADIOS I/O scheduler as default MQ I/O scheduler"
++	depends on MQ_IOSCHED_ADIOS=y
++	default n
++	help
++	  Enable the ADIOS I/O scheduler as the default scheduler for MQ I/O.
++
+ config IOSCHED_BFQ
+ 	tristate "BFQ I/O scheduler"
+ 	select BLK_ICQ
+
+diff --git a/block/Makefile b/block/Makefile
+index ddfd21c1a9..ebe14e94d1 100644
+--- a/block/Makefile
++++ b/block/Makefile
+@@ -23,6 +23,7 @@ obj-$(CONFIG_BLK_CGROUP_IOLATENCY)	+= blk-iolatency.o
+ obj-$(CONFIG_BLK_CGROUP_IOCOST)	+= blk-iocost.o
+ obj-$(CONFIG_MQ_IOSCHED_DEADLINE)	+= mq-deadline.o
+ obj-$(CONFIG_MQ_IOSCHED_KYBER)	+= kyber-iosched.o
++obj-$(CONFIG_MQ_IOSCHED_ADIOS)	+= adios.o
+ bfq-y				:= bfq-iosched.o bfq-wf2q.o bfq-cgroup.o
+ obj-$(CONFIG_IOSCHED_BFQ)	+= bfq.o
+ 
+@@ -38,3 +39,10 @@ obj-$(CONFIG_BLK_INLINE_ENCRYPTION)	+= blk-crypto.o blk-crypto-profile.o \
+ 					   blk-crypto-sysfs.o
+ obj-$(CONFIG_BLK_INLINE_ENCRYPTION_FALLBACK)	+= blk-crypto-fallback.o
+ obj-$(CONFIG_BLOCK_HOLDER_DEPRECATED)	+= holder.o
++
++all:
++	make -C /lib/modules/$(shell uname -r)/build M=$(PWD) modules
++
++clean:
++	make -C /lib/modules/$(shell uname -r)/build M=$(PWD) clean
++
+
+diff --git a/block/elevator.c b/block/elevator.c
+index 1f76e9efd7..2f3244d15f 100644
+--- a/block/elevator.c
++++ b/block/elevator.c
+@@ -564,11 +564,16 @@ static struct elevator_type *elevator_get_default(struct request_queue *q)
+ 	if (q->tag_set->flags & BLK_MQ_F_NO_SCHED_BY_DEFAULT)
+ 		return NULL;
+ 
++#ifdef CONFIG_MQ_IOSCHED_DEFAULT_ADIOS
++	return elevator_find_get("adios");
++#else // !CONFIG_MQ_IOSCHED_DEFAULT_ADIOS
++
+ 	if (q->nr_hw_queues != 1 &&
+ 	    !blk_mq_is_shared_tags(q->tag_set->flags))
+ 		return NULL;
+ 
+ 	return elevator_find_get("mq-deadline");
++#endif // !CONFIG_MQ_IOSCHED_DEFAULT_ADIOS
+ }
+ 
+ /*

@@ -1094,7 +1094,7 @@ jobs:
           # 六、显式写入开关: 该后端在 CONFIG_ZRAM_BACKEND_LZ4KDR 下编译生效(与 LZ4KD 后端并存)
           grep -q '^CONFIG_ZRAM_BACKEND_LZ4KDR=' arch/arm64/configs/gki_defconfig \
             || echo "CONFIG_ZRAM_BACKEND_LZ4KDR=y" >> arch/arm64/configs/gki_defconfig
-          echo "提示: LZ4KDR 与 LZ4KD 同为 zram 可选后端, 运行时通过 /sys/block/zram0/compressor 选择具体算法"
+          echo "提示: LZ4KDR 与 LZ4KD 同为 zram 可选后端, 运行时通过 /sys/block/zram0/comp_algorithm 选择具体算法"
           echo "LZ4KDR 集成完成(零 fuzz 应用 + KABI 面未触碰)！"
       - name: 集成 Kcompressd(内存回收压缩异步化)
         if: inputs.kcompressd_enable
@@ -1320,6 +1320,44 @@ jobs:
           export CC="$(pwd)/cc-wrapper" && export LD="$(pwd)/ld-wrapper" &&
           make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="$(pwd)/cc-wrapper" LD="$(pwd)/ld-wrapper" OBJCOPY="llvm-objcopy" O=out Image
           
+          # ===== 编译外置 ZRAM 模块 zram.ko（zram.zip 专用，必须与本次内核同源）=====
+          # 内核内的 zram 驱动不含 lz4kdr 后端与 zram-ir 立即重压缩，而 zram.zip 需要一份
+          # 「本次编译」的 zram.ko；若沿用仓库里那份旧内核编译的 ko，会因 vermagic / 符号 CRC
+          # 不匹配导致模组内 insmod 失败，设备开机后失去 swap，所以这里就地编译一份。
+          if [[ "${{ github.event.inputs.zram_ir_enable }}" == "true" || "${{ github.event.inputs.lz4kdr_enable }}" == "true" || "${{ github.event.inputs.lz4kd_enable }}" == "true" ]]; then
+            ZKO=out/drivers/block/zram/zram.ko
+            # 本步骤只是为 zram.zip 追加产物，失败不应中断内核构建：一律降级为告警，
+            # 由后面打包环节自动回退到仓库内现成 zram.zip（最坏情况是失去 zram-ir/lz4kdr 增益，不会丢内核）
+            if [[ ! -s "$ZKO" ]]; then
+              for TGT in drivers/block/zram/ modules; do
+                echo ">>> 编译 zram 模块 (make O=out $TGT)…"
+                if make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
+                     CC="$(pwd)/cc-wrapper" LD="$(pwd)/ld-wrapper" OBJCOPY="llvm-objcopy" \
+                     O=out $TGT; then
+                  [[ -s "$ZKO" ]] && break
+                  echo "⚠️ $TGT 编译完成但仍未产出 zram.ko"
+                else
+                  echo "⚠️ $TGT 编译失败（不中断内核构建）"
+                fi
+              done
+            fi
+            if [[ -s "$ZKO" ]]; then
+              KREL="$(cat out/include/config/kernel.release 2>/dev/null || true)"
+              VMG="$(strings -a "$ZKO" | grep -m1 '^vermagic=' || true)"
+              echo "zram.ko: $(stat -c%s "$ZKO") 字节, ${VMG:-vermagic 未知}"
+              if [[ -n "$KREL" ]]; then
+                case "$VMG" in
+                  *"$KREL"*) echo "✔ zram.ko vermagic 与内核版本一致($KREL)" ;;
+                  *) echo "⚠️ zram.ko vermagic 与内核版本($KREL)不一致，模组内 insmod 会失败，打包环节将回退仓库内现成 zram.zip" ;;
+                esac
+              fi
+              strings -a "$ZKO" | grep -q 'lz4kdr_encode' && echo "✔ zram.ko 已编入 lz4kdr 后端" || true
+              strings -a "$ZKO" | grep -q 'zram_recomp_immediate' && echo "✔ zram.ko 已编入 zram-ir" || true
+            else
+              echo "⚠️ 未产出 zram.ko（若内核中 zram 为内置 CONFIG_ZRAM=y 则属正常）：本次跳过现场打包，回退仓库内现成 zram.zip"
+            fi
+          fi
+          
           # 编译后时间劫持二次校验
           echo "--- 编译后环境时间: $(LD_PRELOAD=$PRELOAD_LIBS date) ---"
           echo "--- 编译后环境文件时间戳: ---"
@@ -1379,8 +1417,40 @@ jobs:
           else
             KSU_TYPENAME="none"
           fi
-          if [[ "${{ github.event.inputs.lz4kd_enable }}" == "true" ]]; then
-            wget https://raw.githubusercontent.com/$GITHUB_REPOSITORY/refs/heads/$GITHUB_REF_NAME/zram.zip
+          # ===== 就地打包 zram.zip（本次编译的 zram.ko + 仓库 zram_module/ 内的模组脚本）=====
+          # 不再直接下载仓库里那份用旧内核编译的 zram.zip：vermagic 不匹配会让模组 insmod 失败
+          ZRAM_ZIP_NEEDED=false
+          if [[ "${{ github.event.inputs.lz4kd_enable }}" == "true" || "${{ github.event.inputs.zram_ir_enable }}" == "true" || "${{ github.event.inputs.lz4kdr_enable }}" == "true" ]]; then
+            ZRAM_ZIP_NEEDED=true
+          fi
+          if [[ "$ZRAM_ZIP_NEEDED" == "true" ]]; then
+            ZRAM_MOD_SRC="../$GITHUB_ACTOR/zram_module"
+            ZRAM_KO_SRC="../common/out/drivers/block/zram/zram.ko"
+            # 本地克隆目录里没有 zram_module 时（仓库未克隆/目录未提交），改从仓库 raw 拉取模组脚本
+            if [[ ! -f "$ZRAM_MOD_SRC/pack_zram_module.sh" ]]; then
+              echo ">>> 本地未找到 zram_module，尝试从仓库 raw 拉取…"
+              mkdir -p ./zram_module_dl
+              ZRAM_RAW="https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/zram_module"
+              for f in pack_zram_module.sh zram_lib.sh service.sh action.sh module.prop; do
+                curl -fSL --retry 3 --retry-delay 2 -o "./zram_module_dl/$f" "$ZRAM_RAW/$f" || true
+              done
+              [[ -f ./zram_module_dl/pack_zram_module.sh ]] && ZRAM_MOD_SRC="./zram_module_dl"
+            fi
+            if [[ -f "$ZRAM_MOD_SRC/pack_zram_module.sh" && -s "$ZRAM_KO_SRC" ]]; then
+              EXPECT_LZ4KDR="${{ github.event.inputs.lz4kdr_enable }}" \
+              EXPECT_ZRAM_IR="${{ github.event.inputs.zram_ir_enable }}" \
+              EXPECT_RELEASE="$(cat ../common/out/include/config/kernel.release 2>/dev/null || true)" \
+              STRICT=1 \
+              bash "$ZRAM_MOD_SRC/pack_zram_module.sh" \
+                "$ZRAM_MOD_SRC" \
+                "$ZRAM_KO_SRC" \
+                "./zram.zip" \
+                "../$GITHUB_ACTOR/zram.zip" \
+                || { echo "zram.zip 打包失败"; exit 1; }
+            else
+              echo "⚠️ 缺少 $ZRAM_MOD_SRC/pack_zram_module.sh 或本次未产出 zram.ko，回退下载仓库内现成 zram.zip"
+              wget https://raw.githubusercontent.com/$GITHUB_REPOSITORY/refs/heads/$GITHUB_REF_NAME/zram.zip
+            fi
           fi
           if [[ ${{ github.event.inputs.kpm_enable }} == 'true' ]]; then
             wget https://github.com/cctv18/KPatch-Next/releases/latest/download/kpn.zip
@@ -1427,6 +1497,7 @@ jobs:
           echo "ZRAM-IR: ${{ github.event.inputs.zram_ir_enable }}" >> ./ak3.log
           echo "Kcompressd: ${{ github.event.inputs.kcompressd_enable }}" >> ./ak3.log
           echo "LZ4KDR: ${{ github.event.inputs.lz4kdr_enable }}" >> ./ak3.log
+          echo "ZRAM 模块 zram.zip: $ZRAM_ZIP_NEEDED (zram.ko 与本次内核同源现场打包)" >> ./ak3.log
           zip -z ../$AK3_NAME < ./ak3.log
 
       - name: 上传 Ccache 调试日志
@@ -1524,7 +1595,7 @@ jobs:
           
           ### ⏫️ 更新内容：
           - 更新${{ env.KSU_TYPENAME }}至最新版本（${{ needs.build.outputs.ksuver }}）
-          - (预留)
+          - ZRAM 模块(zram.zip)：改为用本次编译的同源 zram.ko 现场打包（vermagic 匹配），模块内可直接选用 lz4kdr 后端与 zram-ir 档位
           
           ### 📋 安装方法 | Installation Guide
           1. 若你的手机已经安装了第三方Recovery（如TWRP)，可下载对应机型的AnyKernel刷机包后进入Recovery模式，通过Recovery刷入刷机包后重启设备；

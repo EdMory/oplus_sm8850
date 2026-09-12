@@ -1326,35 +1326,100 @@ jobs:
           # 不匹配导致模组内 insmod 失败，设备开机后失去 swap，所以这里就地编译一份。
           if [[ "${{ github.event.inputs.zram_ir_enable }}" == "true" || "${{ github.event.inputs.lz4kdr_enable }}" == "true" || "${{ github.event.inputs.lz4kd_enable }}" == "true" ]]; then
             ZKO=out/drivers/block/zram/zram.ko
-            # 本步骤只是为 zram.zip 追加产物，失败不应中断内核构建：一律降级为告警，
-            # 由后面打包环节自动回退到仓库内现成 zram.zip（最坏情况是失去 zram-ir/lz4kdr 增益，不会丢内核）
-            if [[ ! -s "$ZKO" ]]; then
-              for TGT in drivers/block/zram/ modules; do
-                echo ">>> 编译 zram 模块 (make O=out $TGT)…"
-                if make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
-                     CC="$(pwd)/cc-wrapper" LD="$(pwd)/ld-wrapper" OBJCOPY="llvm-objcopy" \
-                     O=out $TGT; then
-                  [[ -s "$ZKO" ]] && break
-                  echo "⚠️ $TGT 编译完成但仍未产出 zram.ko"
-                else
-                  echo "⚠️ $TGT 编译失败（不中断内核构建）"
+            ZLOG=../zram_ko_build.log   # = kernel_workspace/zram_ko_build.log，供后面的打包环节读取诊断
+            # 内核内的 zram 为 CONFIG_ZRAM=m，模块构建必须显式走 kbuild 的模块目标；
+            # 「make O=out drivers/block/zram/」这种目录目标不会置 KBUILD_MODULES，产不出 zram.ko，
+            # 因此改为三种可靠方式依次尝试，任一成功即停止。
+            ZMAKE=(make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu-
+                   CC="$(pwd)/cc-wrapper" LD="$(pwd)/ld-wrapper" OBJCOPY="llvm-objcopy")
+            : > "$ZLOG"
+
+            {
+              echo "===== zram.ko 构建诊断 $(date -u +%FT%TZ) ====="
+              echo "-- 关键 Kconfig（out/.config）--"
+              grep -E '^CONFIG_(MODULES|ZRAM|ZRAM_BACKEND|ZSMALLOC|LZ4KDR|LZ4K)' out/.config 2>/dev/null || echo "(读取 out/.config 失败)"
+              echo "-- kernel.release: $(cat out/include/config/kernel.release 2>/dev/null || echo 未知)"
+              echo "-- 构建前 out/drivers/block/zram/ 内容："
+              ls -l out/drivers/block/zram/ 2>/dev/null || echo "(目录不存在)"
+              echo "-- 构建前已存在的 zram.ko 指纹（用于排除旧产物）："
+              find out ../common/drivers -name 'zram.ko' 2>/dev/null | xargs -r sha256sum 2>/dev/null || true
+              echo
+            } >> "$ZLOG"
+
+            # 前置就绪（幂等）：保证 Module.symvers / scripts 等模块构建前置产物可用
+            "${ZMAKE[@]}" O=out modules_prepare >> "$ZLOG" 2>&1 || true
+
+            PRE_KO="$(find out ../common/drivers -name 'zram.ko' 2>/dev/null | xargs -r sha256sum 2>/dev/null | sort || true)"
+            # 本次新产出的 zram.ko（排除构建前就存在的旧产物，避免误用旧包）
+            locate_ko() {
+              local f h
+              while IFS= read -r f; do
+                if [[ -z "$f" ]]; then continue; fi
+                h="$(sha256sum "$f" 2>/dev/null || true)"
+                if [[ -n "$h" ]]; then
+                  if grep -qF "$h" <<< "$PRE_KO"; then continue; fi
                 fi
-              done
-            fi
+                echo "$f"
+                return 0
+              done < <(find out ../common/drivers -name 'zram.ko' 2>/dev/null)
+              return 1
+            }
+            run_make() {
+              local tag="$1"; shift
+              local rc f
+              echo ">>> [$tag] make $*" | tee -a "$ZLOG"
+              "${ZMAKE[@]}" "$@" >> "$ZLOG" 2>&1
+              rc=$?
+              echo "<<< [$tag] exit=$rc" >> "$ZLOG"
+              if [[ -s "$ZKO" ]]; then return 0; fi
+              f="$(locate_ko || true)"
+              if [[ -n "$f" ]]; then
+                mkdir -p "$(dirname "$ZKO")"
+                cp -f "$f" "$ZKO"
+                echo "（本次构建的 zram.ko 生成于 $f，已复制到 $ZKO）" >> "$ZLOG"
+                return 0
+              fi
+              return 1
+            }
+
+            ZOK=false
             if [[ -s "$ZKO" ]]; then
+              ZOK=true
+            fi
+            # 方式1：kbuild 原生单模块目标（规范做法，直接产出 out/drivers/block/zram/zram.ko）
+            if [[ "$ZOK" != "true" ]]; then
+              if run_make "方式1 kbuild 单模块目标" O=out drivers/block/zram/zram.ko; then ZOK=true; fi
+            fi
+            # 方式2：外部模块方式（只读该目录 Makefile，不受其它模块编译失败影响）
+            if [[ "$ZOK" != "true" ]]; then
+              if run_make "方式2 M= 外部模块方式" -C "$(pwd)/out" M="$(pwd)/drivers/block/zram" modules; then ZOK=true; fi
+            fi
+            # 方式3：全树模块构建（-k，不因无关模块报错而中断）
+            if [[ "$ZOK" != "true" ]]; then
+              if run_make "方式3 全树 modules(-k)" O=out -k modules; then ZOK=true; fi
+            fi
+
+            if [[ "$ZOK" == "true" ]]; then
               KREL="$(cat out/include/config/kernel.release 2>/dev/null || true)"
               VMG="$(strings -a "$ZKO" | grep -m1 '^vermagic=' || true)"
-              echo "zram.ko: $(stat -c%s "$ZKO") 字节, ${VMG:-vermagic 未知}"
-              if [[ -n "$KREL" ]]; then
-                case "$VMG" in
-                  *"$KREL"*) echo "✔ zram.ko vermagic 与内核版本一致($KREL)" ;;
-                  *) echo "⚠️ zram.ko vermagic 与内核版本($KREL)不一致，模组内 insmod 会失败，打包环节将回退仓库内现成 zram.zip" ;;
-                esac
+              echo "zram.ko: $(stat -c%s "$ZKO") 字节, ${VMG:-vermagic 未知}" | tee -a "$ZLOG"
+              echo "kernel.release: ${KREL:-未知}" >> "$ZLOG"
+              if [[ -n "$KREL" && "$VMG" == *"$KREL"* ]]; then
+                echo "✔ zram.ko vermagic 与本次内核一致($KREL)，可用于现场打包 zram.zip"
+                echo "状态=OK" >> "$ZLOG"
+              else
+                echo "::error::zram.ko vermagic($VMG) 与本次内核($KREL) 不一致，模组内 insmod 会失败"
+                echo "状态=VMAGIC_MISMATCH" >> "$ZLOG"
               fi
-              strings -a "$ZKO" | grep -q 'lz4kdr_encode' && echo "✔ zram.ko 已编入 lz4kdr 后端" || true
-              strings -a "$ZKO" | grep -q 'zram_recomp_immediate' && echo "✔ zram.ko 已编入 zram-ir" || true
+              strings -a "$ZKO" | grep -q 'lz4kdr_encode' && echo "✔ zram.ko 已编入 lz4kdr 后端" || echo "::warning::zram.ko 未编入 lz4kdr 后端"
+              strings -a "$ZKO" | grep -q 'zram_recomp_immediate' && echo "✔ zram.ko 已编入 zram-ir" || echo "::warning::zram.ko 未编入 zram-ir"
             else
-              echo "⚠️ 未产出 zram.ko（若内核中 zram 为内置 CONFIG_ZRAM=y 则属正常）：本次跳过现场打包，回退仓库内现成 zram.zip"
+              echo "::error::未编译出 zram.ko（三种构建方式均失败），回退仓库内旧 zram.zip；该旧包由旧内核编译，模组内 insmod 会失败"
+              echo "状态=KO_MISSING" >> "$ZLOG"
+              echo "===== zram.ko 未产出：真实报错摘要（完整日志见 kernel_workspace/zram_ko_build.log）====="
+              grep -nE 'error:|Error [0-9]|No rule|Stop\.|fatal|undefined!|No such file|not found' "$ZLOG" | tail -n 40 || true
+              echo "----- 日志尾部 -----"
+              tail -n 30 "$ZLOG" || true
             fi
           fi
           
@@ -1420,26 +1485,39 @@ jobs:
           # ===== 就地打包 zram.zip（本次编译的 zram.ko + 仓库 zram_module/ 内的模组脚本）=====
           # 不再直接下载仓库里那份用旧内核编译的 zram.zip：vermagic 不匹配会让模组 insmod 失败
           ZRAM_ZIP_NEEDED=false
+          ZRAM_ZIP_STATE="未启用"
           if [[ "${{ github.event.inputs.lz4kd_enable }}" == "true" || "${{ github.event.inputs.zram_ir_enable }}" == "true" || "${{ github.event.inputs.lz4kdr_enable }}" == "true" ]]; then
             ZRAM_ZIP_NEEDED=true
           fi
           if [[ "$ZRAM_ZIP_NEEDED" == "true" ]]; then
-            ZRAM_MOD_SRC="../$GITHUB_ACTOR/zram_module"
-            ZRAM_KO_SRC="../common/out/drivers/block/zram/zram.ko"
-            # 本地克隆目录里没有 zram_module 时（仓库未克隆/目录未提交），改从仓库 raw 拉取模组脚本
+            # 全部以 $GITHUB_WORKSPACE 锚定绝对路径，避免本步骤 cwd 与预期不一致时把「路径写错」误判成「文件缺失」
+            KW="$GITHUB_WORKSPACE/kernel_workspace"
+            ZRAM_MOD_SRC="$KW/$GITHUB_ACTOR/zram_module"
+            ZRAM_KO_SRC="$KW/common/out/drivers/block/zram/zram.ko"
+            ZRAM_KO_LOG="$KW/zram_ko_build.log"
+            # 本地克隆目录里没有 zram_module 时（目录未提交/未克隆），改从仓库 raw 拉取模组脚本
             if [[ ! -f "$ZRAM_MOD_SRC/pack_zram_module.sh" ]]; then
-              echo ">>> 本地未找到 zram_module，尝试从仓库 raw 拉取…"
-              mkdir -p ./zram_module_dl
-              ZRAM_RAW="https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/zram_module"
-              for f in pack_zram_module.sh zram_lib.sh service.sh action.sh module.prop; do
-                curl -fSL --retry 3 --retry-delay 2 -o "./zram_module_dl/$f" "$ZRAM_RAW/$f" || true
+              echo ">>> $ZRAM_MOD_SRC/pack_zram_module.sh 不存在，尝试从仓库 raw 拉取…"
+              mkdir -p "$KW/zram_module_dl"
+              for REFNAME in "$GITHUB_REF_NAME" main master; do
+                ZRAM_RAW="https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$REFNAME/zram_module"
+                for f in pack_zram_module.sh zram_lib.sh service.sh action.sh module.prop; do
+                  curl -fSL --retry 3 --retry-delay 2 -o "$KW/zram_module_dl/$f" "$ZRAM_RAW/$f" || true
+                done
+                if [[ -f "$KW/zram_module_dl/pack_zram_module.sh" ]]; then
+                  echo "✔ 已从分支 $REFNAME 拉取 zram_module 脚本"
+                  ZRAM_MOD_SRC="$KW/zram_module_dl"
+                  break
+                fi
               done
-              [[ -f ./zram_module_dl/pack_zram_module.sh ]] && ZRAM_MOD_SRC="./zram_module_dl"
+              if [[ ! -f "$ZRAM_MOD_SRC/pack_zram_module.sh" ]]; then
+                echo "::error::取不到 zram_module/pack_zram_module.sh：请确认该目录(pack_zram_module.sh、zram_lib.sh、service.sh、action.sh、module.prop)已提交到 $GITHUB_REPOSITORY 的 $GITHUB_REF_NAME 分支"
+              fi
             fi
             if [[ -f "$ZRAM_MOD_SRC/pack_zram_module.sh" && -s "$ZRAM_KO_SRC" ]]; then
               EXPECT_LZ4KDR="${{ github.event.inputs.lz4kdr_enable }}" \
               EXPECT_ZRAM_IR="${{ github.event.inputs.zram_ir_enable }}" \
-              EXPECT_RELEASE="$(cat ../common/out/include/config/kernel.release 2>/dev/null || true)" \
+              EXPECT_RELEASE="$(cat "$KW/common/out/include/config/kernel.release" 2>/dev/null || true)" \
               STRICT=1 \
               bash "$ZRAM_MOD_SRC/pack_zram_module.sh" \
                 "$ZRAM_MOD_SRC" \
@@ -1447,9 +1525,22 @@ jobs:
                 "./zram.zip" \
                 "../$GITHUB_ACTOR/zram.zip" \
                 || { echo "zram.zip 打包失败"; exit 1; }
+              ZRAM_ZIP_STATE="本次内核同源现场打包"
             else
-              echo "⚠️ 缺少 $ZRAM_MOD_SRC/pack_zram_module.sh 或本次未产出 zram.ko，回退下载仓库内现成 zram.zip"
+              # 精确说明缺的是什么，并把编译阶段的诊断摘要打出来，避免只留一句含糊的告警
+              MISS=""
+              [[ -f "$ZRAM_MOD_SRC/pack_zram_module.sh" ]] || MISS="$MISS 缺 pack_zram_module.sh;"
+              [[ -s "$ZRAM_KO_SRC" ]] || MISS="$MISS 本次未产出 zram.ko($ZRAM_KO_SRC);"
+              echo "::warning::zram.zip 无法现场打包（$MISS）→ 回退下载仓库内现成 zram.zip"
+              echo "该回退包由旧内核编译，vermagic 与本次内核不一致，模组内 insmod 会失败（设备将失去 zram swap）"
+              if [[ -f "$ZRAM_KO_LOG" ]]; then
+                echo "--- zram.ko 编译阶段诊断摘要 ---"
+                grep -E '^(状态=|>>>|<<<|zram\.ko:|kernel\.release:)' "$ZRAM_KO_LOG" | tail -n 20 || true
+                echo "--- 编译日志尾部（真实报错）---"
+                tail -n 20 "$ZRAM_KO_LOG" || true
+              fi
               wget https://raw.githubusercontent.com/$GITHUB_REPOSITORY/refs/heads/$GITHUB_REF_NAME/zram.zip
+              ZRAM_ZIP_STATE="回退仓库旧包(vermagic 与本次内核不一致，insmod 会失败)"
             fi
           fi
           if [[ ${{ github.event.inputs.kpm_enable }} == 'true' ]]; then
@@ -1497,7 +1588,14 @@ jobs:
           echo "ZRAM-IR: ${{ github.event.inputs.zram_ir_enable }}" >> ./ak3.log
           echo "Kcompressd: ${{ github.event.inputs.kcompressd_enable }}" >> ./ak3.log
           echo "LZ4KDR: ${{ github.event.inputs.lz4kdr_enable }}" >> ./ak3.log
-          echo "ZRAM 模块 zram.zip: $ZRAM_ZIP_NEEDED (zram.ko 与本次内核同源现场打包)" >> ./ak3.log
+          echo "ZRAM 模块 zram.zip: $ZRAM_ZIP_NEEDED ($ZRAM_ZIP_STATE)" >> ./ak3.log
+          # 把 zram.ko 编译结论与关键 Kconfig 写进 AK3 注释，跑完直接从产物即可确认是否现场打包成功
+          if [[ -f ../zram_ko_build.log ]]; then
+            grep -E '^(状态=|zram\.ko:|kernel\.release:)' ../zram_ko_build.log | tail -n 5 >> ./ak3.log 2>/dev/null || true
+          fi
+          if [[ -f ../common/out/.config ]]; then
+            grep -E '^CONFIG_(MODULES|ZRAM|ZRAM_BACKEND_LZ4KDR|ZRAM_BACKEND_LZ4KD|LZ4KDR_COMPRESS)=' ../common/out/.config >> ./ak3.log 2>/dev/null || true
+          fi
           zip -z ../$AK3_NAME < ./ak3.log
 
       - name: 上传 Ccache 调试日志

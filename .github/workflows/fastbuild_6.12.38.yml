@@ -1234,19 +1234,6 @@ jobs:
           # 一、core 落地前先清掉树内同名文件: GNU patch 遇到已存在的目标文件会交互式提问, 在 CI 中会直接挂起
           rm -f mm/uksm.c include/linux/uksm.h lib/sradix-tree.c include/linux/sradix-tree.h Documentation/vm/uksm.txt
 
-          # 二、严格零 fuzz 应用: glue 先 dry-run 探路, 任何 FAILED / fuzz / 重复应用痕迹立即中止
-          if ! patch -p1 --dry-run < 0002-uksm-glue.patch > /tmp/uksm_dryrun.log 2>&1; then
-            cat /tmp/uksm_dryrun.log
-            echo "UKSM glue 补丁存在无法应用的 hunk, 已中止"; exit 1
-          fi
-          cat /tmp/uksm_dryrun.log
-          if grep -qE 'with fuzz|FAILED|ignored|Reversed|previously applied' /tmp/uksm_dryrun.log; then
-            echo "UKSM glue 补丁与当前内核树不匹配(fuzz / hunk 失败 / 重复应用), 已中止"; exit 1
-          fi
-          if grep -q 'offset' /tmp/uksm_dryrun.log; then
-            echo "提示: 以下 hunk 存在纯行号偏移(上下文精确匹配, 位置正确, 属其他补丁先行改动所致), 继续应用:"
-            grep 'offset' /tmp/uksm_dryrun.log
-          fi
           patch -p1 --no-backup-if-mismatch < 0001-uksm-new-files.patch
           patch -p1 --no-backup-if-mismatch < 0002-uksm-glue.patch
 

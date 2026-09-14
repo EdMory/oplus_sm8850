@@ -90,38 +90,18 @@ on:
         required: true
         type: boolean
         default: 'true'
-      bore_enable:
-        description: '是否集成 BORE 调度器(Burst-Oriented Response Enhancer), 已知会造成Bootloop，暂时关闭'
-        required: true
-        type: boolean
-        default: 'false'
-      cambyses_enable:
-        description: '是否集成 Cambyses 调度器(优化 CFS 负载均衡: detach_tasks 扫描窗口块旋转 + 严格预算判定; 仅改 fair.c/features.h, 不触碰结构体布局与导出符号, 不破坏 ABI)'
-        required: true
-        type: boolean
-        default: 'flase'
       zram_ir_enable:
-        description: '是否集成 ZRAM-IR 立即重压缩(zram 多级压缩的同一写入内逐级尝试: 前级压缩不达标立即换下一级压缩流重压, 减少延迟 kcomp 造成的额外内存占用; 只改 zram_drv.c, 不新增导出符号、不触碰 KABI 保留区; 依赖内核树的 CONFIG_ZRAM_MULTI_COMP, 不支持时步骤会主动中止)'
+        description: '是否集成 ZRAM-IR 立即重压缩(zram 多级压缩的同一写入内逐级尝试: 前级压缩不达标立即换下一级压缩流重压, 减少延迟 kcomp 造成的额外内存占用)'
         required: true
         type: boolean
         default: 'true'
-      kcompressd_enable:
-        description: '是否集成 Kcompressd(把 kswapd 路径的页压缩/换出卸载到每 NUMA 节点独立内核线程, 降低内存回收阻塞时间; 只改 mm/ 内部结构与 kswapd 路径, 不新增导出符号、不触碰 KABI 保留区; 属实验特性, 运行时可用 /proc/sys/vm/kcompressd 关闭)'
-        required: true
-        type: boolean
-        default: 'false'
       lz4kdr_enable:
-        description: '是否集成 LZ4KDR 压缩算法（LZ4KD 的高速衍生实现: 线格式与 LZ4KD 兼容、重写编码器搜索循环; 新增 backend_lz4kdr 后端与 lib/lz4kdr/ 独立实现, 导出符号均为 lz4kdr_* 新符号, 不改动既有 KABI, 可与已集成的 LZ4KD 并存; 需 lz4kd_enable 同时开启以匹配适配位置)'
-        required: true
-        type: boolean
-        default: 'true'
-      uksm_enable:
-        description: '是否集成 UKSM 内存页去重(Ultra KSM: 以更激进的扫描频率与共享粒度合并同内容匿名页, 替代 KSM 降低内存占用; 复用 KABI 保留槽 #1 挂载 vma_slot, 结构体尺寸与成员偏移不变, 不破坏 ABI; 与 KSM 互斥, 开启后自动写入 CONFIG_KSM=y + CONFIG_UKSM=y)'
+        description: '是否集成 LZ4KDR 压缩算法（LZ4KD 的高速衍生实现)'
         required: true
         type: boolean
         default: 'true'
       le9uo_enable:
-        description: '是否集成 LE9UO 工作集保护(内存压力下按活跃度保护匿名页与干净文件页, 缓解低内存抖动与前台进程被杀; 仅新增 sysctl 与 mm/ 内部位域, 不新增导出符号、不触碰 KABI 保留区, 不破坏 ABI; 运行时开关 /proc/sys/vm/workingset_protection, 上游默认关闭)'
+        description: '是否集成 LE9UO 工作集保护(内存压力下按活跃度保护匿名页与干净文件页, 缓解低内存抖动与前台进程被杀)'
         required: true
         type: boolean
         default: 'true'
@@ -733,178 +713,6 @@ jobs:
           echo "CONFIG_NOMOUNT=y" >> ./arch/arm64/configs/gki_defconfig
           echo "NoMount 集成完成！"
 
-      - name: 集成 BORE 调度器(Burst-Oriented Response Enhancer)
-        if: inputs.bore_enable
-        run: |
-          echo "正在集成 BORE 调度器(按任务突发性区分调度权重, 提升前台交互响应)…"
-          cd kernel_workspace/common
-          # 拉取与本 vendor 树(6.12.38)逐行对位重写的 BORE 补丁(优先取本仓库 other_patch, 兜底取上游仓库)
-          # 逐源尝试并把失败原因落到日志: 避免 wget -q 静默失败 + bash -e 直接退出, 导致失败点无法定位
-          rm -f bore-6.8.0-oplus.patch
-          for u in \
-            "https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/bore-6.8.0-oplus.patch" \
-            "https://github.com/EdMory/oplus_sm8850/raw/refs/heads/main/other_patch/bore-6.8.0-oplus.patch"; do
-            echo "尝试下载 BORE 补丁: $u"
-            if curl -fSL --retry 3 --retry-delay 2 --connect-timeout 20 -o bore-6.8.0-oplus.patch "$u" 2> bore_download.log; then
-              if [ -s bore-6.8.0-oplus.patch ]; then
-                echo "下载成功: $(wc -c < bore-6.8.0-oplus.patch) 字节"; break
-              fi
-              echo "该源返回空文件, 尝试下一个源"
-            else
-              echo "该源不可用: $(tail -n 2 bore_download.log | tr '\n' ' ')"
-            fi
-          done
-          rm -f bore_download.log
-          [ -s bore-6.8.0-oplus.patch ] || { echo "BORE 补丁下载失败: 2 个源均不可用(见上方逐源诊断), 请检查仓库中 other_patch/bore-6.8.0-oplus.patch 是否存在"; exit 1; }
-
-          # 一、严格零 fuzz 应用: 先 dry-run 探路, 任何 FAILED / fuzz / offset / 重复应用痕迹立即中止。
-          #     旧版脚本用手写 fuzz + 就近定位"猜"位置, 补丁错位也能"成功", 是开机卡第一屏 logo 的根因之一。
-          if ! patch -p1 --dry-run < bore-6.8.0-oplus.patch > /tmp/bore_dryrun.log 2>&1; then
-            cat /tmp/bore_dryrun.log
-            echo "BORE 补丁存在无法应用的 hunk, 已中止"; exit 1
-          fi
-          cat /tmp/bore_dryrun.log
-          # 硬失败(fuzz / hunk 失败 / 重复应用)必须中止; 纯行号偏移不阻塞:
-          # 本 workflow 中 droidspaces 等补丁会先改 include/linux/sched.h, 使行号平移,
-          # 但 hunk 上下文仍精确匹配, 位置正确, 且应用后有 check/ABI 校验兜底
-          if grep -qE 'with fuzz|FAILED|ignored|Reversed|previously applied' /tmp/bore_dryrun.log; then
-            echo "BORE 补丁与当前内核树不匹配(fuzz / hunk 失败 / 重复应用), 已中止"; exit 1
-          fi
-          if grep -q 'offset' /tmp/bore_dryrun.log; then
-            echo "提示: 以下 hunk 存在纯行号偏移(上下文精确匹配, 位置正确, 属其他补丁先行改动所致), 继续应用:"
-            grep 'offset' /tmp/bore_dryrun.log
-          fi
-          patch -p1 --no-backup-if-mismatch < bore-6.8.0-oplus.patch
-
-          # 二、集成结果校验: 调度热路径挂钩必须齐全
-          check() { grep -qF "$2" "$1" || { echo "BORE 集成校验失败: $1 缺少 '$2'"; exit 1; }; }
-          check include/linux/sched.h      'struct bore_ctx {'
-          check include/linux/sched/bore.h 'extern void update_curr_bore'
-          check kernel/sched/bore.c        'void update_curr_bore'
-          check kernel/sched/Makefile      'obj-$(CONFIG_SCHED_BORE) += bore.o'
-          check kernel/sched/fair.c        'update_curr_bore(task_of(curr), delta_exec);'
-          check kernel/sched/fair.c        'sched_bore_key'
-          check kernel/sched/core.c        'sched_init_bore();'
-          check kernel/fork.c              'task_fork_bore(p, current, clone_flags, p->start_time);'
-          check kernel/futex/waitwake.c    'current->bore.futex_waiting = true;'
-          check include/linux/sched.h      'ANDROID_KABI_RESERVE(8);'
-
-          # 三、ABI 校验: bore_ctx 必须复用 task_struct 的 KABI reserve 5~8(4 x u64 = 32B) 且与原始
-          #     reserve 区等长, task_struct 尺寸与后续成员偏移保持不变; 一旦改成"在 task_struct 尾部
-          #     追加新字段", 结构体变大, 与 OPLUS 预编译 ko 的 ABI 冲突 -> 设备卡第一屏 logo
-          grep -q 'static_assert(sizeof(struct bore_ctx) == 4 \* sizeof(u64)' kernel/sched/bore.c \
-            || { echo "BORE ABI 校验失败: bore.c 缺少 sizeof(bore_ctx)==32 的编译期断言"; exit 1; }
-          grep -q 'struct bore_ctx bore;' include/linux/sched.h \
-            || { echo "BORE ABI 校验失败: task_struct 未挂载 bore_ctx"; exit 1; }
-          grep -q '} __kabi_reserved_bore;' include/linux/sched.h \
-            || { echo "BORE ABI 校验失败: 缺少 KABI reserve 备份成员, ABI 不安全"; exit 1; }
-          [ "$(grep -c 'ANDROID_KABI_RESERVE(5);' include/linux/sched.h)" = "2" ] \
-            || { echo "BORE ABI 校验失败: task_struct 尾部布局异常(reserve 5~8 未按 union 方式复用)"; exit 1; }
-          grep -A3 'ANDROID_KABI_RESERVE(4);' include/linux/sched.h | grep -q '#ifdef CONFIG_SCHED_BORE' \
-            || { echo "BORE ABI 校验失败: reserve(4) 之后未紧跟 BORE 分支"; exit 1; }
-
-          # 四、显式写入开关与参数, 避免 defconfig 合并差异导致未启用
-          echo "CONFIG_SCHED_BORE=y" >> ./arch/arm64/configs/gki_defconfig
-          echo "CONFIG_MIN_BASE_SLICE_NS=2000000" >> ./arch/arm64/configs/gki_defconfig
-          echo "BORE 集成完成(零 fuzz 应用 + ABI 校验通过)！"
-      - name: 集成 Cambyses 调度器(CFS 负载均衡优化)
-        if: inputs.cambyses_enable
-        run: |
-          echo "正在集成 Cambyses 调度器(重构 CFS 负载均衡 detach_tasks 的扫描窗口与预算判定, 减少 rq_lock 下的链表操作与无效搬迁)…"
-          # 任何命令失败时打印出错行号: 避免 set -e 静默退出后失败点无法定位
-          trap 'echo "Cambyses 集成步骤在脚本第 $LINENO 行失败(退出码 $?)" >&2' ERR
-          cd kernel_workspace/common
-
-          # 上游补丁以 mainline 6.12.74 为基准, 只改写 kernel/sched/fair.c 与 kernel/sched/features.h;
-          # 已逐行核对本 vendor 树(6.12.38): 9 处 hunk 上下文全部精确匹配(仅存在其它补丁造成的纯行号偏移),
-          # 且补丁不新增/修改结构体成员、不新增导出符号、不触碰 KABI 保留区, 故不破坏内核 ABI。
-          # 补丁优先取本仓库 other_patch 固定副本, 兜底取上游仓库与 CDN 镜像
-          PATCH_URLS=(
-            "https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/cambyses-6.12.74-v0.6.0.patch"
-            "https://raw.githubusercontent.com/firelzrd/cambyses/main/patches/0001-6.12.74-cambyses-v0.6.0.patch"
-            "https://cdn.jsdelivr.net/gh/firelzrd/cambyses@main/patches/0001-6.12.74-cambyses-v0.6.0.patch"
-          )
-          # 下载器自适应: 优先 curl(对 4xx/5xx 会返回非 0, --retry 抗弱网); 无 curl 时回退 wget。
-          # 注意: --show-error 是 curl 专有选项, 传给 GNU wget 会触发 usage 报错并立刻退出,
-          #       故 wget 分支只使用其自身合法选项(--tries/--timeout)。
-          fetch() { # $1=url $2=输出文件 $3=日志文件
-            if command -v curl >/dev/null 2>&1; then
-              curl -fSL --retry 3 --retry-delay 2 --connect-timeout 20 -o "$2" "$1" 2> "$3"
-            else
-              wget -O "$2" --tries=3 --timeout=20 "$1" 2> "$3"
-            fi
-          }
-          # 逐源尝试并把失败原因落到日志: 避免静默失败 + set -e 直接退出, 导致失败点无法诊断
-          rm -f cambyses.patch
-          for u in "${PATCH_URLS[@]}"; do
-            echo "尝试下载 Cambyses 补丁: $u"
-            if fetch "$u" cambyses.patch.tmp download_cambyses.log; then
-              if [ -s cambyses.patch.tmp ]; then
-                mv cambyses.patch.tmp cambyses.patch
-                echo "下载成功: $(wc -c < cambyses.patch) 字节"
-                break
-              fi
-              echo "该源返回空文件, 尝试下一个源"
-            else
-              echo "该源不可用: $(tail -n 2 download_cambyses.log | tr '\n' ' ')"
-            fi
-          done
-          rm -f cambyses.patch.tmp download_cambyses.log
-          [ -s cambyses.patch ] || { echo "Cambyses 补丁下载失败: 3 个源均不可用(见上方逐源诊断)"; exit 1; }
-
-          # 一、ABI 面静态审计: 补丁触碰导出符号 / KABI 保留区 / 非 sched 核心文件, 一律中止
-          if grep -nE 'EXPORT_SYMBOL|ANDROID_KABI|__kabi_reserved' cambyses.patch; then
-            echo "Cambyses 补丁触碰 ABI 面(导出符号或 KABI 保留区), 已中止"; exit 1
-          fi
-          # 注意: 白名单全部命中时 grep -vE 无输出返回码为 1, 必须 || true 兜底,
-          # 否则 bash -e 下该赋值语句会静默退出(无任何报错, 步骤直接 exit 1)
-          OUT_OF_SCOPE="$(grep -E '^diff --git ' cambyses.patch | grep -vE ' b/kernel/sched/(fair\.c|features\.h)$' || true)"
-          if [ -n "$OUT_OF_SCOPE" ]; then
-            echo "Cambyses 补丁改动了 sched 核心以外的文件, 已中止:"; echo "$OUT_OF_SCOPE"; exit 1
-          fi
-          # 记录 ABI 敏感文件指纹(task_struct / struct rq 布局所在文件), 应用后复核
-          ABI_HASHES="$(md5sum include/linux/sched.h kernel/sched/sched.h | md5sum)"
-
-          # 二、严格零 fuzz 应用: dry-run 探路, 任何 FAILED / fuzz / 重复应用痕迹立即中止
-          if ! patch -p1 --dry-run < cambyses.patch > /tmp/cambyses_dryrun.log 2>&1; then
-            cat /tmp/cambyses_dryrun.log
-            echo "Cambyses 补丁存在无法应用的 hunk, 已中止"; exit 1
-          fi
-          cat /tmp/cambyses_dryrun.log
-          if grep -qE 'with fuzz|FAILED|ignored|Reversed|previously applied' /tmp/cambyses_dryrun.log; then
-            echo "Cambyses 补丁与当前内核树不匹配(fuzz / hunk 失败 / 重复应用), 已中止"; exit 1
-          fi
-          if grep -q 'offset' /tmp/cambyses_dryrun.log; then
-            echo "提示: 以下 hunk 存在纯行号偏移(上下文精确匹配, 位置正确, 属其它补丁先行改动所致), 继续应用:"
-            grep 'offset' /tmp/cambyses_dryrun.log
-          fi
-          patch -p1 --no-backup-if-mismatch < cambyses.patch
-
-          # 三、ABI 复核: 结构体布局相关文件必须与打补丁前逐字节一致
-          [ "$(md5sum include/linux/sched.h kernel/sched/sched.h | md5sum)" = "$ABI_HASHES" ] \
-            || { echo "Cambyses ABI 校验失败: 结构体布局相关文件被改动"; exit 1; }
-
-          # 四、集成结果校验: 两处 sched_feat 与 detach_tasks() 全部改造点必须齐全
-          check() { grep -qF "$2" "$1" || { echo "Cambyses 集成校验失败: $1 缺少 '$2'"; exit 1; }; }
-          check kernel/sched/features.h   'SCHED_FEAT(LB_ROTATE_BLOCK, true)'
-          check kernel/sched/features.h   'SCHED_FEAT(LB_STRICT_BUDGET, true)'
-          check kernel/sched/fair.c       '#define LBF_MOVED'
-          check kernel/sched/fair.c       'static bool lb_cost_fits('
-          check kernel/sched/fair.c       'if (!lb_cost_fits(env, &concession, p, load))'
-          check kernel/sched/fair.c       'if (!lb_cost_fits(env, &concession, p, util))'
-          check kernel/sched/fair.c       'if (concession.p && !(env->flags & LBF_MOVED)) {'
-          check kernel/sched/fair.c       'list_rotate_to_front(resume->next, tasks);'
-          check kernel/sched/fair.c       'if (!sched_feat(LB_ROTATE_BLOCK))'
-          check kernel/sched/fair.c       'SCHED_CAMBYSES_VERSION'
-          check kernel/sched/fair.c       'late_initcall(sched_cambyses_init);'
-
-          # 五、运行时开关说明(不影响 ABI, 仅提示)
-          if grep -q '^CONFIG_SCHED_DEBUG=y' arch/arm64/configs/gki_defconfig; then
-            echo "CONFIG_SCHED_DEBUG=y: 可在 /sys/kernel/debug/sched/features 运行时开关 NO_LB_ROTATE_BLOCK / NO_LB_STRICT_BUDGET"
-          else
-            echo "提示: 当前未开启 CONFIG_SCHED_DEBUG, 两处特性按编译期默认值(true)固化为常量, 实际效果与开启时一致, 但不可运行时切换"
-          fi
-          echo "Cambyses 集成完成(零 fuzz 应用 + ABI 面未触碰)！"
       - name: 集成 ZRAM-IR 立即重压缩(ZRAM Immediate Recompression)
         if: inputs.zram_ir_enable
         run: |
@@ -1106,169 +914,7 @@ jobs:
             || echo "CONFIG_ZRAM_BACKEND_LZ4KDR=y" >> arch/arm64/configs/gki_defconfig
           echo "提示: LZ4KDR 与 LZ4KD 同为 zram 可选后端, 运行时通过 /sys/block/zram0/compressor 选择具体算法"
           echo "LZ4KDR 集成完成(零 fuzz 应用 + KABI 面未触碰)！"
-      - name: 集成 Kcompressd(内存回收压缩异步化)
-        if: inputs.kcompressd_enable
-        run: |
-          echo "正在集成 Kcompressd(把 kswapd 路径的页压缩/换出卸载到每 NUMA 节点独立内核线程, 降低内存回收阻塞时间)…"
-          trap 'echo "Kcompressd 集成步骤在脚本第 $LINENO 行失败(退出码 $?)" >&2' ERR
-          cd kernel_workspace/common
-
-          # 上游补丁以 mainline 6.12.44 为基准, 改动 7 个文件(均为 mm/ 内部结构与 kswapd 路径);
-          # 不新增导出符号、不触碰 KABI 保留区, 不破坏内核 ABI; 与 lru_marie 设计互斥(本项目未集成 lru_marie)。
-          # 本副本已对 6.12.38 vendor 树逐 hunk 对位(适配 mmzone.h 成员布局、page_io.c 换出路径与
-          # vmscan.c 中已重构的 kswapd_stop/kthread_stop 上下文), 故仅从本仓库 other_patch 取用, 不再设上游兜底源。
-          PATCH_URLS=(
-            "https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/kcompressd-6.12.44-unofficial-0.5-oplus.patch"
-          )
-          fetch() { # $1=url $2=输出文件 $3=日志文件
-            if command -v curl >/dev/null 2>&1; then
-              curl -fSL --retry 3 --retry-delay 2 --connect-timeout 20 -o "$2" "$1" 2> "$3"
-            else
-              wget -O "$2" --tries=3 --timeout=20 "$1" 2> "$3"
-            fi
-          }
-          rm -f kcompressd.patch
-          for u in "${PATCH_URLS[@]}"; do
-            echo "尝试下载 Kcompressd 补丁: $u"
-            if fetch "$u" kcompressd.patch.tmp download_kcompressd.log; then
-              if [ -s kcompressd.patch.tmp ]; then
-                mv kcompressd.patch.tmp kcompressd.patch
-                echo "下载成功: $(wc -c < kcompressd.patch) 字节"
-                break
-              fi
-              echo "该源返回空文件, 尝试下一个源"
-            else
-              echo "该源不可用: $(tail -n 2 download_kcompressd.log | tr '\n' ' ')"
-            fi
-          done
-          rm -f kcompressd.patch.tmp download_kcompressd.log
-          [ -s kcompressd.patch ] || { echo "Kcompressd 补丁下载失败: 仓库 other_patch/kcompressd-6.12.44-unofficial-0.5-oplus.patch 缺失或不可达(见上方诊断)"; exit 1; }
-
-          # 一、ABI 面静态审计: 补丁触碰导出符号 / KABI 保留区, 一律中止
-          if grep -nE 'EXPORT_SYMBOL|ANDROID_KABI|__kabi_reserved' kcompressd.patch; then
-            echo "Kcompressd 补丁触碰 ABI 面(导出符号或 KABI 保留区), 已中止"; exit 1
-          fi
-          OUT_OF_SCOPE="$(grep -E '^diff --git ' kcompressd.patch | grep -vE ' b/(include/linux/mmzone\.h|include/linux/swap\.h|kernel/sysctl\.c|mm/mm_init\.c|mm/page_io\.c|mm/swap\.h|mm/vmscan\.c)$' || true)"
-          if [ -n "$OUT_OF_SCOPE" ]; then
-            echo "Kcompressd 补丁改动了白名单以外的文件, 已中止:"; echo "$OUT_OF_SCOPE"; exit 1
-          fi
-          ABI_HASHES="$(md5sum include/linux/sched.h kernel/sched/sched.h | md5sum)"
-
-          # 二、严格零 fuzz 应用: dry-run 探路, 任何 FAILED / fuzz / 重复应用痕迹立即中止
-          if ! patch -p1 --dry-run < kcompressd.patch > /tmp/kcompressd_dryrun.log 2>&1; then
-            cat /tmp/kcompressd_dryrun.log
-            echo "Kcompressd 补丁存在无法应用的 hunk, 已中止"; exit 1
-          fi
-          cat /tmp/kcompressd_dryrun.log
-          if grep -qE 'with fuzz|FAILED|ignored|Reversed|previously applied' /tmp/kcompressd_dryrun.log; then
-            echo "Kcompressd 补丁与当前内核树不匹配(fuzz / hunk 失败 / 重复应用), 已中止"; exit 1
-          fi
-          if grep -q 'offset' /tmp/kcompressd_dryrun.log; then
-            echo "提示: 以下 hunk 存在纯行号偏移(上下文精确匹配, 位置正确, 属其它补丁先行改动所致), 继续应用:"
-            grep 'offset' /tmp/kcompressd_dryrun.log
-          fi
-          patch -p1 --no-backup-if-mismatch < kcompressd.patch
-
-          # 三、ABI 复核: 结构体布局相关文件必须与打补丁前逐字节一致
-          [ "$(md5sum include/linux/sched.h kernel/sched/sched.h | md5sum)" = "$ABI_HASHES" ] \
-            || { echo "Kcompressd ABI 校验失败: 结构体布局相关文件被改动"; exit 1; }
-
-          # 四、集成结果校验: pg_data_t 成员、线程创建/销毁、FIFO 与 sysctl 节点必须齐全
-          check() { grep -qF "$2" "$1" || { echo "Kcompressd 集成校验失败: $1 缺少 '$2'"; exit 1; }; }
-          checkre() { grep -qE "$2" "$1" || { echo "Kcompressd 集成校验失败(正则): $1 缺少 '$2'"; exit 1; }; }
-          check include/linux/mmzone.h '#define KCOMPRESS_FIFO_SIZE 256'
-          check include/linux/mmzone.h 'struct task_struct *kcompressd;'
-          check include/linux/mmzone.h 'kcompress_fifo_lock'
-          check include/linux/swap.h   'extern int vm_kcompressd'
-          checkre kernel/sysctl.c      'procname[[:space:]]*= "kcompressd"'
-          check kernel/sysctl.c        'int vm_kcompressd = 24;'
-          check mm/mm_init.c           'init_waitqueue_head(&pgdat->kcompressd_wait)'
-          check mm/swap.h              'int kcompressd(void *p)'
-          check mm/page_io.c           'static bool kcompressd_store(struct folio *folio)'
-          check mm/page_io.c           'int kcompressd(void *p)'
-          check mm/vmscan.c            'kthread_create_on_node(kcompressd'
-          check mm/vmscan.c            'Kcompressd-Unofficial 0.5'
-
-          # 五、运行时说明(不影响 ABI 与构建): 队列上限由 /proc/sys/vm/kcompressd 控制, 0 即关闭
-          if grep -q '^CONFIG_ZSWAP=y' arch/arm64/configs/gki_defconfig; then
-            echo "CONFIG_ZSWAP=y: kcompressd 将在 kswapd 路径异步压缩 zswap 回写, 收益最明显"
-          else
-            echo "提示: 当前未开启 CONFIG_ZSWAP, kcompressd 仅在存在同步 swap 设备(SWP_SYNCHRONOUS_IO)时生效"
-          fi
-          echo "提示: 运行时可通过 /proc/sys/vm/kcompressd(取值 0~256, 默认 24)调节队列上限, 0 即关闭"
-          echo "Kcompressd 集成完成(零 fuzz 应用 + ABI 面未触碰)！"
-      - name: 集成 UKSM 内存页去重(零 fuzz 应用 core+glue 双补丁)
-        if: inputs.uksm_enable
-        run: |
-          echo "正在集成 UKSM(Ultra KSM: 提高扫描频率与共享粒度做匿名页去重, 替代 KSM 降低内存占用)…"
-          trap 'echo "UKSM 集成步骤在脚本第 $LINENO 行失败(退出码 $?)" >&2' ERR
-          cd kernel_workspace/common
-
-          # 上游 uksm-v6.12.patch 以 mainline 6.12 为基准, 与本 6.12.38 vendor 树存在多处上下文差异;
-          # 本副本已逐 hunk 对位重写并拆为两个补丁:
-          #   0001 = core(5 个新增文件: mm/uksm.c / include/linux/uksm.h / lib/sradix-tree.c /
-          #          include/linux/sradix-tree.h / Documentation/vm/uksm.txt), 全部为 new-file;
-          #   0002 = glue(既有文件集成点: mm/Makefile / lib/Makefile / mm/Kconfig / include/linux/ksm.h /
-          #          include/linux/mm_types.h / include/linux/mmzone.h / include/linux/pgtable.h /
-          #          mm/memory.c / mm/mmap.c / mm/vma.c / mm/vmstat.c / fs/proc/meminfo.c / kernel/fork.c)。
-          # ABI 安全: vm_area_struct 用 ANDROID_KABI_USE(1, struct vma_slot *) 复用 KABI 保留槽 #1,
-          #          结构体尺寸与后续成员偏移完全不变(不以裸字段追加)。
-          fetch() { # $1=文件名
-            rm -f "$1"
-            for b in \
-              "https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch" \
-              "https://github.com/EdMory/oplus_sm8850/raw/refs/heads/main/other_patch"; do
-              echo "尝试下载 UKSM 补丁: $b/$1"
-              if curl -fSL --retry 3 --retry-delay 2 --connect-timeout 20 -o "$1" "$b/$1" 2> uksm_dl.log && [ -s "$1" ]; then
-                echo "下载成功: $(wc -c < "$1") 字节"; rm -f uksm_dl.log; return 0
-              fi
-              echo "该源不可用: $(tail -n 2 uksm_dl.log | tr '\n' ' ')"
-            done
-            rm -f uksm_dl.log
-            echo "UKSM 补丁下载失败: $1 在两个源均不可用"
-            return 1
-          }
-          fetch 0001-uksm-new-files.patch || exit 1
-          fetch 0002-uksm-glue.patch || exit 1
-
-          # 一、core 落地前先清掉树内同名文件: GNU patch 遇到已存在的目标文件会交互式提问, 在 CI 中会直接挂起
-          rm -f mm/uksm.c include/linux/uksm.h lib/sradix-tree.c include/linux/sradix-tree.h Documentation/vm/uksm.txt
-
-          patch -p1 --no-backup-if-mismatch < 0001-uksm-new-files.patch
-          patch -p1 --no-backup-if-mismatch < 0002-uksm-glue.patch
-
-          # 三、ABI 校验: vm_area_struct 必须复用 KABI 保留槽 #1 挂载 uksm_vma_slot, 保留槽 2~4 原样保留
-          grep -qF 'ANDROID_KABI_USE(1, struct vma_slot *uksm_vma_slot);' include/linux/mm_types.h \
-            || { echo "UKSM ABI 校验失败: vm_area_struct 未复用 ANDROID_KABI_RESERVE(1) 挂载 uksm_vma_slot"; exit 1; }
-          for r in 2 3 4; do
-            grep -qF "ANDROID_KABI_RESERVE($r);" include/linux/mm_types.h \
-              || { echo "UKSM ABI 校验失败: vm_area_struct 的 KABI 保留槽 $r 丢失"; exit 1; }
-          done
-
-          # 四、集成结果校验: core 文件落地、KSM 分支切换、调用点、计数项与内存信息项必须齐全
-          check() { grep -qF "$2" "$1" || { echo "UKSM 集成校验失败: $1 缺少 '$2'"; exit 1; }; }
-          check mm/uksm.c                 'void uksm_add_vma_new(struct vm_area_struct *vma, const char *where)'
-          check mm/uksm.c                 'void uksm_remove_vma(struct vm_area_struct *vma, const char *where)'
-          check include/linux/uksm.h      'struct vma_slot {'
-          check include/linux/ksm.h       '#elif defined(CONFIG_UKSM)'
-          check include/linux/ksm.h       '#include <linux/uksm.h>'
-          check mm/Makefile               'obj-$(CONFIG_UKSM) += uksm.o'
-          check mm/Makefile               'obj-$(CONFIG_KSM_LEGACY) += ksm.o'
-          check lib/Makefile              'sradix-tree.o'
-          check mm/Kconfig                'config UKSM'
-          check mm/vma.c                  'uksm_add_vma_new(vma,'
-          check mm/vma.c                  'uksm_remove_vma(vma,'
-          check kernel/fork.c             'uksm_add_vma_new(tmp, "dup_mmap");'
-          check kernel/fork.c             'uksm_vma_slot = NULL;'
-          check mm/memory.c               'uksm_zero_pfn'
-          check mm/vmstat.c               'nr_uksm_zero_pages'
-          check fs/proc/meminfo.c         'KsmZeroPages'
-
-          # 五、显式写入开关: UKSM 复用 KSM 框架, 故 KSM 必须同时开启, 并在 KSM 家族 choice 中选定 UKSM
-          echo "CONFIG_KSM=y" >> ./arch/arm64/configs/gki_defconfig
-          echo "CONFIG_UKSM=y" >> ./arch/arm64/configs/gki_defconfig
-          echo "# CONFIG_KSM_LEGACY is not set" >> ./arch/arm64/configs/gki_defconfig
-          echo "UKSM 集成完成(零 fuzz 应用 + ABI 保留槽复用校验通过)！"
+    
       - name: 集成 LE9UO 工作集保护(零 fuzz 应用 glue 补丁)
         if: inputs.le9uo_enable
         run: |
@@ -1550,7 +1196,7 @@ jobs:
           else
             KSU_TYPENAME="none"
           fi
-          if [[ "${{ github.event.inputs.lz4kd_enable }}" == "true" ]]; then
+          if [[ "${{ github.event.inputs.lz4kd_enable }}" == "false" ]]; then
             wget https://raw.githubusercontent.com/$GITHUB_REPOSITORY/refs/heads/$GITHUB_REF_NAME/zram.zip
           fi
           if [[ ${{ github.event.inputs.kpm_enable }} == 'true' ]]; then
@@ -1593,10 +1239,7 @@ jobs:
           echo "Re-Kernel: ${{ github.event.inputs.rekernel_enable }}" >> ./ak3.log
           echo "BBG: ${{ github.event.inputs.baseband_guard }}" >> ./ak3.log
           echo "NoMount: ${{ github.event.inputs.nomount_enable }}" >> ./ak3.log
-          echo "BORE: ${{ github.event.inputs.bore_enable }}" >> ./ak3.log
-          echo "Cambyses: ${{ github.event.inputs.cambyses_enable }}" >> ./ak3.log
           echo "ZRAM-IR: ${{ github.event.inputs.zram_ir_enable }}" >> ./ak3.log
-          echo "Kcompressd: ${{ github.event.inputs.kcompressd_enable }}" >> ./ak3.log
           echo "LZ4KDR: ${{ github.event.inputs.lz4kdr_enable }}" >> ./ak3.log
           zip -z ../$AK3_NAME < ./ak3.log
 
@@ -1683,10 +1326,7 @@ jobs:
           - Re-Kernel支持：${{ github.event.inputs.rekernel_enable }}
           - 内核级基带保护支持：${{ github.event.inputs.baseband_guard }}
           - NoMount(VFS 路径重定向)支持：${{ github.event.inputs.nomount_enable }}
-          - BORE 调度器支持：${{ github.event.inputs.bore_enable }}（Burst-Oriented Response Enhancer，按任务突发性区分调度权重）
-          - Cambyses 调度器支持：${{ github.event.inputs.cambyses_enable }}（CFS 负载均衡优化：detach_tasks 扫描窗口块旋转 + 严格预算判定，不改变 ABI）
           - ZRAM-IR 立即重压缩支持：${{ github.event.inputs.zram_ir_enable }}（zram 多级压缩同一写入内逐级尝试，达标即停）
-          - Kcompressd 支持：${{ github.event.inputs.kcompressd_enable }}（kswapd 页压缩/换出卸载至独立内核线程，降低回收阻塞）
           - LZ4KDR 支持：${{ github.event.inputs.lz4kdr_enable }}（LZ4KD 的高速衍生实现，线格式兼容、重写编码器搜索循环，与 LZ4KD 后端并存）
           - ReSukiSU管理器下载：[ReSukiSU_CI](https://github.com/cctv18/ReSukiSU_CI/releases)
           - SukiSU Ultra管理器下载：[SukiSU-Ultra](https://github.com/SukiSU-Ultra/SukiSU-Ultra/releases)

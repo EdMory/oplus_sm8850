@@ -115,6 +115,16 @@ on:
         required: true
         type: boolean
         default: 'true'
+      uksm_enable:
+        description: '是否集成 UKSM 内存页去重(Ultra KSM: 以更激进的扫描频率与共享粒度合并同内容匿名页, 替代 KSM 降低内存占用; 复用 KABI 保留槽 #1 挂载 vma_slot, 结构体尺寸与成员偏移不变, 不破坏 ABI; 与 KSM 互斥, 开启后自动写入 CONFIG_KSM=y + CONFIG_UKSM=y)'
+        required: true
+        type: boolean
+        default: 'true'
+      le9uo_enable:
+        description: '是否集成 LE9UO 工作集保护(内存压力下按活跃度保护匿名页与干净文件页, 缓解低内存抖动与前台进程被杀; 仅新增 sysctl 与 mm/ 内部位域, 不新增导出符号、不触碰 KABI 保留区, 不破坏 ABI; 运行时开关 /proc/sys/vm/workingset_protection, 上游默认关闭)'
+        required: true
+        type: boolean
+        default: 'true'
       ccache_update:
         description: '更新ccache缓存(将本次编译生成的ccache缓存覆盖至仓库缓存，在更改编译配置、源码或需要刷新缓存时开启)'
         required: true
@@ -1187,6 +1197,180 @@ jobs:
           fi
           echo "提示: 运行时可通过 /proc/sys/vm/kcompressd(取值 0~256, 默认 24)调节队列上限, 0 即关闭"
           echo "Kcompressd 集成完成(零 fuzz 应用 + ABI 面未触碰)！"
+      - name: 集成 UKSM 内存页去重(零 fuzz 应用 core+glue 双补丁)
+        if: inputs.uksm_enable
+        run: |
+          echo "正在集成 UKSM(Ultra KSM: 提高扫描频率与共享粒度做匿名页去重, 替代 KSM 降低内存占用)…"
+          trap 'echo "UKSM 集成步骤在脚本第 $LINENO 行失败(退出码 $?)" >&2' ERR
+          cd kernel_workspace/common
+
+          # 上游 uksm-v6.12.patch 以 mainline 6.12 为基准, 与本 6.12.38 vendor 树存在多处上下文差异;
+          # 本副本已逐 hunk 对位重写并拆为两个补丁:
+          #   0001 = core(5 个新增文件: mm/uksm.c / include/linux/uksm.h / lib/sradix-tree.c /
+          #          include/linux/sradix-tree.h / Documentation/vm/uksm.txt), 全部为 new-file;
+          #   0002 = glue(既有文件集成点: mm/Makefile / lib/Makefile / mm/Kconfig / include/linux/ksm.h /
+          #          include/linux/mm_types.h / include/linux/mmzone.h / include/linux/pgtable.h /
+          #          mm/memory.c / mm/mmap.c / mm/vma.c / mm/vmstat.c / fs/proc/meminfo.c / kernel/fork.c)。
+          # ABI 安全: vm_area_struct 用 ANDROID_KABI_USE(1, struct vma_slot *) 复用 KABI 保留槽 #1,
+          #          结构体尺寸与后续成员偏移完全不变(不以裸字段追加)。
+          fetch() { # $1=文件名
+            rm -f "$1"
+            for b in \
+              "https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch" \
+              "https://github.com/EdMory/oplus_sm8850/raw/refs/heads/main/other_patch"; do
+              echo "尝试下载 UKSM 补丁: $b/$1"
+              if curl -fSL --retry 3 --retry-delay 2 --connect-timeout 20 -o "$1" "$b/$1" 2> uksm_dl.log && [ -s "$1" ]; then
+                echo "下载成功: $(wc -c < "$1") 字节"; rm -f uksm_dl.log; return 0
+              fi
+              echo "该源不可用: $(tail -n 2 uksm_dl.log | tr '\n' ' ')"
+            done
+            rm -f uksm_dl.log
+            echo "UKSM 补丁下载失败: $1 在两个源均不可用"
+            return 1
+          }
+          fetch 0001-uksm-new-files.patch || exit 1
+          fetch 0002-uksm-glue.patch || exit 1
+
+          # 一、core 落地前先清掉树内同名文件: GNU patch 遇到已存在的目标文件会交互式提问, 在 CI 中会直接挂起
+          rm -f mm/uksm.c include/linux/uksm.h lib/sradix-tree.c include/linux/sradix-tree.h Documentation/vm/uksm.txt
+
+          # 二、严格零 fuzz 应用: glue 先 dry-run 探路, 任何 FAILED / fuzz / 重复应用痕迹立即中止
+          if ! patch -p1 --dry-run < 0002-uksm-glue.patch > /tmp/uksm_dryrun.log 2>&1; then
+            cat /tmp/uksm_dryrun.log
+            echo "UKSM glue 补丁存在无法应用的 hunk, 已中止"; exit 1
+          fi
+          cat /tmp/uksm_dryrun.log
+          if grep -qE 'with fuzz|FAILED|ignored|Reversed|previously applied' /tmp/uksm_dryrun.log; then
+            echo "UKSM glue 补丁与当前内核树不匹配(fuzz / hunk 失败 / 重复应用), 已中止"; exit 1
+          fi
+          if grep -q 'offset' /tmp/uksm_dryrun.log; then
+            echo "提示: 以下 hunk 存在纯行号偏移(上下文精确匹配, 位置正确, 属其他补丁先行改动所致), 继续应用:"
+            grep 'offset' /tmp/uksm_dryrun.log
+          fi
+          patch -p1 --no-backup-if-mismatch < 0001-uksm-new-files.patch
+          patch -p1 --no-backup-if-mismatch < 0002-uksm-glue.patch
+
+          # 三、ABI 校验: vm_area_struct 必须复用 KABI 保留槽 #1 挂载 uksm_vma_slot, 保留槽 2~4 原样保留
+          grep -qF 'ANDROID_KABI_USE(1, struct vma_slot *uksm_vma_slot);' include/linux/mm_types.h \
+            || { echo "UKSM ABI 校验失败: vm_area_struct 未复用 ANDROID_KABI_RESERVE(1) 挂载 uksm_vma_slot"; exit 1; }
+          for r in 2 3 4; do
+            grep -qF "ANDROID_KABI_RESERVE($r);" include/linux/mm_types.h \
+              || { echo "UKSM ABI 校验失败: vm_area_struct 的 KABI 保留槽 $r 丢失"; exit 1; }
+          done
+
+          # 四、集成结果校验: core 文件落地、KSM 分支切换、调用点、计数项与内存信息项必须齐全
+          check() { grep -qF "$2" "$1" || { echo "UKSM 集成校验失败: $1 缺少 '$2'"; exit 1; }; }
+          check mm/uksm.c                 'void uksm_add_vma_new(struct vm_area_struct *vma, const char *where)'
+          check mm/uksm.c                 'void uksm_remove_vma(struct vm_area_struct *vma, const char *where)'
+          check include/linux/uksm.h      'struct vma_slot {'
+          check include/linux/ksm.h       '#elif defined(CONFIG_UKSM)'
+          check include/linux/ksm.h       '#include <linux/uksm.h>'
+          check mm/Makefile               'obj-$(CONFIG_UKSM) += uksm.o'
+          check mm/Makefile               'obj-$(CONFIG_KSM_LEGACY) += ksm.o'
+          check lib/Makefile              'sradix-tree.o'
+          check mm/Kconfig                'config UKSM'
+          check mm/vma.c                  'uksm_add_vma_new(vma,'
+          check mm/vma.c                  'uksm_remove_vma(vma,'
+          check kernel/fork.c             'uksm_add_vma_new(tmp, "dup_mmap");'
+          check kernel/fork.c             'uksm_vma_slot = NULL;'
+          check mm/memory.c               'uksm_zero_pfn'
+          check mm/vmstat.c               'nr_uksm_zero_pages'
+          check fs/proc/meminfo.c         'KsmZeroPages'
+
+          # 五、显式写入开关: UKSM 复用 KSM 框架, 故 KSM 必须同时开启, 并在 KSM 家族 choice 中选定 UKSM
+          echo "CONFIG_KSM=y" >> ./arch/arm64/configs/gki_defconfig
+          echo "CONFIG_UKSM=y" >> ./arch/arm64/configs/gki_defconfig
+          echo "# CONFIG_KSM_LEGACY is not set" >> ./arch/arm64/configs/gki_defconfig
+          echo "UKSM 集成完成(零 fuzz 应用 + ABI 保留槽复用校验通过)！"
+      - name: 集成 LE9UO 工作集保护(零 fuzz 应用 glue 补丁)
+        if: inputs.le9uo_enable
+        run: |
+          echo "正在集成 LE9UO(内存压力下保护活跃工作集与干净文件页, 缓解低内存卡顿与前台进程被杀)…"
+          trap 'echo "LE9UO 集成步骤在脚本第 $LINENO 行失败(退出码 $?)" >&2' ERR
+          cd kernel_workspace/common
+
+          # 上游 le9uo 1.15 以 linux 6.15.y 为基准, 与本 6.12.38 vendor 树差异集中在 vmscan.c 的
+          # shrink 路径重构与 sysctl 表位置; 本副本已逐 hunk 对位重写为单一 glue 补丁(无新增文件),
+          # 改动白名单仅 6 个文件: mm/Kconfig / Documentation/admin-guide/sysctl/vm.rst /
+          # include/linux/mm.h / mm/mm_init.c / mm/vmscan.c / kernel/sysctl.c。
+          # ABI: 只新增 sysctl 变量与 mm/ 内部的 u8/位域, 不新增导出符号、不触碰 KABI 保留区。
+          fetch() { # $1=文件名
+            rm -f "$1"
+            for b in \
+              "https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch" \
+              "https://github.com/EdMory/oplus_sm8850/raw/refs/heads/main/other_patch"; do
+              echo "尝试下载 LE9UO 补丁: $b/$1"
+              if curl -fSL --retry 3 --retry-delay 2 --connect-timeout 20 -o "$1" "$b/$1" 2> le9uo_dl.log && [ -s "$1" ]; then
+                echo "下载成功: $(wc -c < "$1") 字节"; rm -f le9uo_dl.log; return 0
+              fi
+              echo "该源不可用: $(tail -n 2 le9uo_dl.log | tr '\n' ' ')"
+            done
+            rm -f le9uo_dl.log
+            echo "LE9UO 补丁下载失败: $1 在两个源均不可用"
+            return 1
+          }
+          fetch 0003-le9uo-glue.patch || exit 1
+
+          # 一、ABI 面静态审计: 补丁一旦触碰导出符号 / KABI 保留区, 一律中止
+          if grep -nE 'EXPORT_SYMBOL|ANDROID_KABI|__kabi_reserved' 0003-le9uo-glue.patch; then
+            echo "LE9UO 补丁触碰 ABI 面(导出符号或 KABI 保留区), 已中止"; exit 1
+          fi
+          OUT_OF_SCOPE="$(grep -E '^diff --git ' 0003-le9uo-glue.patch | grep -vE ' b/(mm/Kconfig|Documentation/admin-guide/sysctl/vm\.rst|include/linux/mm\.h|mm/mm_init\.c|mm/vmscan\.c|kernel/sysctl\.c)$' || true)"
+          if [ -n "$OUT_OF_SCOPE" ]; then
+            echo "LE9UO 补丁改动了白名单以外的文件, 已中止:"; echo "$OUT_OF_SCOPE"; exit 1
+          fi
+          KABI_BEFORE="$(grep -c 'ANDROID_KABI_' include/linux/mm.h)"
+
+          # 二、严格零 fuzz 应用: dry-run 探路, 任何 FAILED / fuzz / 重复应用痕迹立即中止
+          if ! patch -p1 --dry-run < 0003-le9uo-glue.patch > /tmp/le9uo_dryrun.log 2>&1; then
+            cat /tmp/le9uo_dryrun.log
+            echo "LE9UO 补丁存在无法应用的 hunk, 已中止"; exit 1
+          fi
+          cat /tmp/le9uo_dryrun.log
+          if grep -qE 'with fuzz|FAILED|ignored|Reversed|previously applied' /tmp/le9uo_dryrun.log; then
+            echo "LE9UO 补丁与当前内核树不匹配(fuzz / hunk 失败 / 重复应用), 已中止"; exit 1
+          fi
+          if grep -q 'offset' /tmp/le9uo_dryrun.log; then
+            echo "提示: 以下 hunk 存在纯行号偏移(上下文精确匹配, 位置正确, 属其他补丁先行改动所致), 继续应用:"
+            grep 'offset' /tmp/le9uo_dryrun.log
+          fi
+          patch -p1 --no-backup-if-mismatch < 0003-le9uo-glue.patch
+
+          # 三、ABI 复核: include/linux/mm.h 的 KABI 保留区数量必须与打补丁前一致
+          KABI_AFTER="$(grep -c 'ANDROID_KABI_' include/linux/mm.h)"
+          [ "$KABI_BEFORE" = "$KABI_AFTER" ] \
+            || { echo "LE9UO ABI 校验失败: include/linux/mm.h 的 KABI 保留区发生变动($KABI_BEFORE -> $KABI_AFTER)"; exit 1; }
+
+          # 四、集成结果校验: sysctl 节点、mm/ 内部变量位域、初始化与工作集保护挂钩必须齐全
+          check() { grep -qF "$2" "$1" || { echo "LE9UO 集成校验失败: $1 缺少 '$2'"; exit 1; }; }
+          check mm/Kconfig                        'config ANON_MIN_RATIO'
+          check mm/Kconfig                        'config CLEAN_LOW_RATIO'
+          check mm/Kconfig                        'config CLEAN_MIN_RATIO'
+          check mm/vmscan.c                       'u8 sysctl_anon_min_ratio'
+          check mm/vmscan.c                       'u8 sysctl_clean_low_ratio'
+          check mm/vmscan.c                       'u8 sysctl_clean_min_ratio'
+          check mm/vmscan.c                       'unsigned int clean_below_low:1;'
+          check mm/vmscan.c                       'static void prepare_workingset_protection(pg_data_t *pgdat, struct scan_control *sc)'
+          check mm/vmscan.c                       'prepare_workingset_protection(pgdat, sc);'
+          check mm/vmscan.c                       'sysctl_workingset_protection'
+          check mm/mm_init.c                      'le9 Unofficial (le9uo) working set protection'
+          check include/linux/mm.h                'extern u8 sysctl_anon_min_ratio;'
+          check include/linux/mm.h                'int vm_workingset_protection_update_handler('
+          check kernel/sysctl.c                   '"anon_min_ratio"'
+          check kernel/sysctl.c                   '"clean_low_ratio"'
+          check kernel/sysctl.c                   '"clean_min_ratio"'
+          check kernel/sysctl.c                   '"workingset_protection"'
+          check kernel/sysctl.c                   '&vm_workingset_protection_update_handler'
+          check Documentation/admin-guide/sysctl/vm.rst 'anon_min_ratio'
+
+          # 五、显式写入阈值(与 mm/Kconfig 的 default 一致, 避免 defconfig 合并差异导致未生效)
+          echo "CONFIG_ANON_MIN_RATIO=15" >> ./arch/arm64/configs/gki_defconfig
+          echo "CONFIG_CLEAN_LOW_RATIO=0" >> ./arch/arm64/configs/gki_defconfig
+          echo "CONFIG_CLEAN_MIN_RATIO=15" >> ./arch/arm64/configs/gki_defconfig
+          echo "提示: 运行时可用 /proc/sys/vm/workingset_protection(0/1, 默认 0)、/proc/sys/vm/anon_min_ratio、"
+          echo "      /proc/sys/vm/clean_low_ratio、/proc/sys/vm/clean_min_ratio 调节工作集保护强度"
+          echo "LE9UO 集成完成(零 fuzz 应用 + ABI 面未触碰)！"
+
       - name: 添加制作名称
         run: |
           cd kernel_workspace

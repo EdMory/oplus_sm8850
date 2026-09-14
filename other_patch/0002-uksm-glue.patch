@@ -1,0 +1,508 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+diff --git a/fs/proc/meminfo.c b/fs/proc/meminfo.c
+--- a/fs/proc/meminfo.c
++++ b/fs/proc/meminfo.c
+@@ -121,6 +121,10 @@
+ 		    global_node_page_state(NR_PAGETABLE));
+ 	show_val_kb(m, "SecPageTables:  ",
+ 		    global_node_page_state(NR_SECONDARY_PAGETABLE));
++#ifdef CONFIG_UKSM
++	show_val_kb(m, "KsmZeroPages:     ",
++		    global_zone_page_state(NR_UKSM_ZERO_PAGES));
++#endif
+ 
+ 	show_val_kb(m, "NFS_Unstable:   ", 0);
+ 	show_val_kb(m, "Bounce:         ",
+diff --git a/include/linux/ksm.h b/include/linux/ksm.h
+--- a/include/linux/ksm.h
++++ b/include/linux/ksm.h
+@@ -40,6 +40,13 @@
+ 	atomic_long_inc(&ksm_zero_pages);
+ 	atomic_long_inc(&mm->ksm_zero_pages);
+ }
++
++void rmap_walk_ksm(struct folio *folio, struct rmap_walk_control *rwc);
++void folio_migrate_ksm(struct folio *newfolio, struct folio *folio);
++
++#ifdef CONFIG_KSM_LEGACY
++int __ksm_enter(struct mm_struct *mm);
++void __ksm_exit(struct mm_struct *mm);
+ 
+ static inline void ksm_might_unmap_zero_page(struct mm_struct *mm, pte_t pte)
+ {
+@@ -94,6 +101,41 @@
+ void collect_procs_ksm(struct folio *folio, struct page *page,
+ 		struct list_head *to_kill, int force_early);
+ long ksm_process_profit(struct mm_struct *);
++
++#elif defined(CONFIG_UKSM)
++
++struct folio *ksm_might_need_to_copy(struct folio *folio,
++			struct vm_area_struct *vma, unsigned long addr);
++
++void collect_procs_ksm(struct folio *folio, struct page *page,
++		struct list_head *to_kill, int force_early);
++
++long ksm_process_profit(struct mm_struct *);
++
++static inline void ksm_might_unmap_zero_page(struct mm_struct *mm, pte_t pte)
++{
++}
++
++static inline long mm_ksm_zero_pages(struct mm_struct *mm)
++{
++	return 0;
++}
++
++static inline int ksm_fork(struct mm_struct *mm, struct mm_struct *oldmm)
++{
++	return 0;
++}
++
++static inline int ksm_execve(struct mm_struct *mm)
++{
++	return 0;
++}
++
++static inline void ksm_exit(struct mm_struct *mm)
++{
++}
++#endif /* !CONFIG_UKSM */
++
+ 
+ #else  /* !CONFIG_KSM */
+ 
+@@ -152,5 +194,7 @@
+ #endif /* CONFIG_MMU */
+ #endif /* !CONFIG_KSM */
+ 
++#include <linux/uksm.h>
++
+ #endif /* __LINUX_KSM_H */
+ 
+diff --git a/include/linux/mm_types.h b/include/linux/mm_types.h
+--- a/include/linux/mm_types.h
++++ b/include/linux/mm_types.h
+@@ -806,7 +806,15 @@
+ #endif
+ 	struct vm_userfaultfd_ctx vm_userfaultfd_ctx;
+ 
++#ifdef CONFIG_UKSM
++	/*
++	 * UKSM takes over KABI reserved slot #1 so that the size and the
++	 * field layout of struct vm_area_struct stay unchanged (GKI safe).
++	 */
++	ANDROID_KABI_USE(1, struct vma_slot *uksm_vma_slot);
++#else
+ 	ANDROID_KABI_RESERVE(1);
++#endif
+ 	ANDROID_KABI_RESERVE(2);
+ 	ANDROID_KABI_RESERVE(3);
+ 	ANDROID_KABI_RESERVE(4);
+diff --git a/include/linux/mmzone.h b/include/linux/mmzone.h
+--- a/include/linux/mmzone.h
++++ b/include/linux/mmzone.h
+@@ -177,6 +177,9 @@
+ 	NR_FREE_CMA_PAGES,
+ #ifdef CONFIG_UNACCEPTED_MEMORY
+ 	NR_UNACCEPTED,
++#endif
++#ifdef CONFIG_UKSM
++	NR_UKSM_ZERO_PAGES,
+ #endif
+ 	NR_VM_ZONE_STAT_ITEMS };
+ 
+diff --git a/include/linux/pgtable.h b/include/linux/pgtable.h
+--- a/include/linux/pgtable.h
++++ b/include/linux/pgtable.h
+@@ -1574,13 +1574,26 @@
+ extern void untrack_pfn_clear(struct vm_area_struct *vma);
+ #endif
+ 
++#ifdef CONFIG_UKSM
++static inline int is_uksm_zero_pfn(unsigned long pfn)
++{
++	extern unsigned long uksm_zero_pfn;
++	return pfn == uksm_zero_pfn;
++}
++#else
++static inline int is_uksm_zero_pfn(unsigned long pfn)
++{
++	return 0;
++}
++#endif
++
+ #ifdef CONFIG_MMU
+ #ifdef __HAVE_COLOR_ZERO_PAGE
+ static inline int is_zero_pfn(unsigned long pfn)
+ {
+ 	extern unsigned long zero_pfn;
+ 	unsigned long offset_from_zero_pfn = pfn - zero_pfn;
+-	return offset_from_zero_pfn <= (zero_page_mask >> PAGE_SHIFT);
++	return offset_from_zero_pfn <= (zero_page_mask >> PAGE_SHIFT) || is_uksm_zero_pfn(pfn);
+ }
+ 
+ #define my_zero_pfn(addr)	page_to_pfn(ZERO_PAGE(addr))
+@@ -1589,7 +1602,7 @@
+ static inline int is_zero_pfn(unsigned long pfn)
+ {
+ 	extern unsigned long zero_pfn;
+-	return pfn == zero_pfn;
++	return (pfn == zero_pfn) || (is_uksm_zero_pfn(pfn));
+ }
+ 
+ static inline unsigned long my_zero_pfn(unsigned long addr)
+diff --git a/kernel/fork.c b/kernel/fork.c
+--- a/kernel/fork.c
++++ b/kernel/fork.c
+@@ -513,6 +513,15 @@
+ 
+ void vm_area_free(struct vm_area_struct *vma)
+ {
++#ifdef CONFIG_UKSM
++	/*
++	 * UKSM: the vma slot must have been detached by uksm_remove_vma().
++	 * WARN instead of BUG_ON() so that a rare leak cannot panic a real
++	 * device; clear the stale pointer defensively.
++	 */
++	if (WARN_ON_ONCE(vma->uksm_vma_slot != NULL))
++		vma->uksm_vma_slot = NULL;
++#endif
+ 	/* The vma should be detached while being destroyed. */
+ 	vma_assert_detached(vma);
+ 	vma_numab_state_free(vma);
+@@ -714,6 +723,7 @@
+ 		 */
+ 		vma_iter_bulk_store(&vmi, tmp);
+ 
++		uksm_add_vma_new(tmp, "dup_mmap");
+ 		mm->map_count++;
+ 
+ 		if (tmp->vm_ops && tmp->vm_ops->open)
+diff --git a/lib/Makefile b/lib/Makefile
+--- a/lib/Makefile
++++ b/lib/Makefile
+@@ -29,7 +29,7 @@
+ endif
+ 
+ lib-y := ctype.o string.o vsprintf.o cmdline.o \
+-	 rbtree.o radix-tree.o timerqueue.o xarray.o \
++	 rbtree.o radix-tree.o sradix-tree.o timerqueue.o xarray.o \
+ 	 maple_tree.o idr.o extable.o irq_regs.o argv_split.o \
+ 	 flex_proportions.o ratelimit.o \
+ 	 is_single_threaded.o plist.o decompress.o kobject_uevent.o \
+diff --git a/mm/Kconfig b/mm/Kconfig
+--- a/mm/Kconfig
++++ b/mm/Kconfig
+@@ -739,6 +739,32 @@
+ 	  See Documentation/mm/ksm.rst for more information: KSM is inactive
+ 	  until a program has madvised that an area is MADV_MERGEABLE, and
+ 	  root has set /sys/kernel/mm/ksm/run to 1 (if CONFIG_SYSFS is set).
++choice
++	prompt "Choose UKSM/KSM strategy"
++	default UKSM
++	depends on KSM
++	help
++	  This option allows to select a UKSM/KSM stragety.
++
++config UKSM
++	bool "Ultra-KSM for page merging"
++	depends on KSM
++	help
++	UKSM is inspired by the Linux kernel project \u2014 KSM(Kernel Same
++	page Merging), but with a fundamentally rewritten core algorithm. With
++	an advanced algorithm, UKSM now can transparently scans all anonymously
++	mapped user space applications with an significantly improved scan speed
++	and CPU efficiency. Since KVM is friendly to KSM, KVM can also benefit from
++	UKSM. Now UKSM has its first stable release and first real world enterprise user.
++	For more information, please goto its project page.
++	(github.com/dolohow/uksm)
++
++config KSM_LEGACY
++	bool "Legacy KSM implementation"
++	depends on KSM
++	help
++	The legacy KSM implementation from Red Hat.
++endchoice
+ 
+ config DEFAULT_MMAP_MIN_ADDR
+ 	int "Low address space to protect from user allocation"
+diff --git a/mm/Makefile b/mm/Makefile
+--- a/mm/Makefile
++++ b/mm/Makefile
+@@ -84,7 +84,8 @@
+ obj-$(CONFIG_SPARSEMEM)	+= sparse.o
+ obj-$(CONFIG_SPARSEMEM_VMEMMAP) += sparse-vmemmap.o
+ obj-$(CONFIG_MMU_NOTIFIER) += mmu_notifier.o
+-obj-$(CONFIG_KSM) += ksm.o
++obj-$(CONFIG_KSM_LEGACY) += ksm.o
++obj-$(CONFIG_UKSM) += uksm.o
+ obj-$(CONFIG_PAGE_POISONING) += page_poison.o
+ obj-$(CONFIG_KASAN)	+= kasan/
+ obj-$(CONFIG_KFENCE) += kfence/
+diff --git a/mm/memory.c b/mm/memory.c
+--- a/mm/memory.c
++++ b/mm/memory.c
+@@ -168,6 +168,25 @@
+ EXPORT_SYMBOL(zero_pfn);
+ 
+ unsigned long highest_memmap_pfn __read_mostly;
++
++#ifdef CONFIG_UKSM
++unsigned long uksm_zero_pfn __read_mostly;
++EXPORT_SYMBOL_GPL(uksm_zero_pfn);
++struct page *empty_uksm_zero_page;
++
++static int __init setup_uksm_zero_page(void)
++{
++	empty_uksm_zero_page = alloc_pages(__GFP_ZERO & ~__GFP_MOVABLE, 0);
++	if (!empty_uksm_zero_page)
++		panic("Oh boy, that early out of memory?");
++
++	SetPageReserved(empty_uksm_zero_page);
++	uksm_zero_pfn = page_to_pfn(empty_uksm_zero_page);
++
++	return 0;
++}
++core_initcall(setup_uksm_zero_page);
++#endif
+ 
+ /*
+  * CONFIG_MMU architectures set up ZERO_PAGE in their paging_init()
+@@ -993,8 +1012,10 @@
+ 	int err, nr;
+ 
+ 	page = vm_normal_page(src_vma, addr, pte);
+-	if (unlikely(!page))
++	if (unlikely(!page)) {
++		uksm_map_zero_page(pte);
+ 		goto copy_pte;
++	}
+ 
+ 	folio = page_folio(page);
+ 
+@@ -1051,6 +1072,7 @@
+ 	} else {
+ 		folio_dup_file_rmap_pte(folio, page);
+ 		rss[mm_counter_file(folio)]++;
++		uksm_bugon_zeropage(pte);
+ 	}
+ 
+ copy_pte:
+@@ -1567,6 +1589,7 @@
+ 			zap_install_uffd_wp_if_needed(vma, addr, pte, 1,
+ 						      details, ptent);
+ 		ksm_might_unmap_zero_page(mm, ptent);
++		uksm_unmap_zero_page(ptent);
+ 		return 1;
+ 	}
+ 
+@@ -3120,6 +3143,7 @@
+ 	if (likely(src)) {
+ 		if (copy_mc_user_highpage(dst, src, addr, vma))
+ 			return -EHWPOISON;
++		uksm_cow_page(vma, src);
+ 		return 0;
+ 	}
+ 
+@@ -3462,6 +3486,8 @@
+ 			return err == -EHWPOISON ? VM_FAULT_HWPOISON : 0;
+ 		}
+ 		kmsan_copy_page_meta(&new_folio->page, vmf->page);
++	} else {
++		uksm_cow_pte(vma, vmf->orig_pte);
+ 	}
+ 
+ 	__folio_mark_uptodate(new_folio);
+@@ -3481,8 +3507,10 @@
+ 				dec_mm_counter(mm, mm_counter_file(old_folio));
+ 				inc_mm_counter(mm, MM_ANONPAGES);
+ 			}
++			uksm_bugon_zeropage(vmf->orig_pte);
+ 		} else {
+ 			ksm_might_unmap_zero_page(mm, vmf->orig_pte);
++			uksm_unmap_zero_page(vmf->orig_pte);
+ 			inc_mm_counter(mm, MM_ANONPAGES);
+ 		}
+ 		flush_cache_page(vma, vmf->address, pte_pfn(vmf->orig_pte));
+diff --git a/mm/mmap.c b/mm/mmap.c
+--- a/mm/mmap.c
++++ b/mm/mmap.c
+@@ -353,6 +353,8 @@
+ 	 */
+ 	vm_flags |= calc_vm_prot_bits(prot, pkey) | calc_vm_flag_bits(file, flags) |
+ 			mm->def_flags | VM_MAYREAD | VM_MAYWRITE | VM_MAYEXEC;
++	/* If uksm is enabled, we add VM_MERGEABLE to new VMAs. */
++	uksm_vm_flags_mod(&vm_flags);
+ 
+ 	/* Obtain the address to map to. we verify (or select) it and ensure
+ 	 * that it represents a valid section of the address space.
+@@ -1540,6 +1542,7 @@
+ 	/* Lock the VMA since it is modified after insertion into VMA tree */
+ 	vma_start_write(vma);
+ 	vma_iter_store_new(&vmi, vma);
++	uksm_add_vma_new(vma, "mmap_region");
+ 	mm->map_count++;
+ 	vma_link_file(vma);
+ 
+@@ -1596,6 +1599,7 @@
+ free_iter_vma:
+ 	vma_iter_free(&vmi);
+ free_vma:
++	uksm_remove_vma(vma, "mmap_region");
+ 	vm_area_free(vma);
+ unacct_error:
+ 	if (charged)
+@@ -1823,6 +1827,7 @@
+ 	 * Note: This happens *after* clearing old mappings in some code paths.
+ 	 */
+ 	flags |= VM_DATA_DEFAULT_FLAGS | VM_ACCOUNT | mm->def_flags;
++	uksm_vm_flags_mod(&flags);
+ 	if (!may_expand_vm(mm, flags, len >> PAGE_SHIFT))
+ 		return -ENOMEM;
+ 
+@@ -1837,12 +1842,14 @@
+ 	 * occur after forking, so the expand will only happen on new VMAs.
+ 	 */
+ 	if (vma && vma->vm_end == addr) {
++		uksm_remove_vma(vma, "do_brk_flags_1");
+ 		VMG_STATE(vmg, mm, vmi, addr, addr + len, flags, PHYS_PFN(addr));
+ 
+ 		vmg.prev = vma;
+ 		/* vmi is positioned at prev, which this mode expects. */
+ 		vmg.merge_flags = VMG_FLAG_JUST_EXPAND;
+ 
++		uksm_add_vma_new(vma, "do_brk_flags_1");
+ 		if (vma_merge_new_range(&vmg))
+ 			goto out;
+ 		else if (vmg_nomem(&vmg))
+@@ -1867,6 +1874,8 @@
+ 	mm->map_count++;
+ 	validate_mm(mm);
+ 	ksm_add_vma(vma);
++	uksm_add_vma_new(vma, "do_brk_flags_2");
++
+ out:
+ 	perf_event_mmap(vma);
+ 	mm->total_vm += len >> PAGE_SHIFT;
+@@ -1996,6 +2005,7 @@
+ 	trace_exit_mmap(mm);
+ destroy:
+ 	__mt_destroy(&mm->mm_mt);
++
+ 	mmap_write_unlock(mm);
+ 	vm_unacct_memory(nr_accounted);
+ }
+@@ -2195,6 +2205,7 @@
+ 	vm_stat_account(mm, vma->vm_flags, len >> PAGE_SHIFT);
+ 
+ 	perf_event_mmap(vma);
++	uksm_add_vma_new(vma, "__install_special_mapping");
+ 
+ 	return vma;
+ 
+diff --git a/mm/vma.c b/mm/vma.c
+--- a/mm/vma.c
++++ b/mm/vma.c
+@@ -8,6 +8,7 @@
+ 
+ #include "vma_internal.h"
+ #include "vma.h"
++#include <linux/ksm.h>
+ 
+ static inline bool is_mergeable_vma(struct vma_merge_struct *vmg, bool merge_next)
+ {
+@@ -260,6 +261,7 @@
+ 		mpol_put(vma_policy(vp->remove));
+ 		if (!vp->remove2)
+ 			WARN_ON_ONCE(vp->vma->vm_end < vp->remove->vm_end);
++		uksm_remove_vma(vp->remove, "vma_complete");
+ 		vm_area_free(vp->remove);
+ 
+ 		/*
+@@ -334,6 +336,7 @@
+ 	if (vma->vm_file)
+ 		fput(vma->vm_file);
+ 	mpol_put(vma_policy(vma));
++	uksm_remove_vma(vma, "remove vma");
+ 	vm_area_free(vma);
+ }
+ 
+@@ -426,6 +429,7 @@
+ 	if (is_vm_hugetlb_page(vma))
+ 		hugetlb_split(vma, addr);
+ 
++	uksm_remove_vma(vma, "__split_vma");
+ 	if (new_below) {
+ 		vma->vm_start = addr;
+ 		vma->vm_pgoff += (addr - new->vm_start) >> PAGE_SHIFT;
+@@ -435,6 +439,8 @@
+ 
+ 	/* vma_complete stores the new vma */
+ 	vma_complete(&vp, vmi, vma->vm_mm);
++	uksm_add_vma_new(vma, "__split_vma_1");
++	uksm_add_vma_new(new, "__split_vma_2");
+ 	validate_mm(vma->vm_mm);
+ 
+ 	/* Success. */
+@@ -611,19 +617,23 @@
+ 
+ 	vma_prepare(&vp);
+ 	vma_adjust_trans_huge(vmg->vma, vmg->start, vmg->end, adj_start);
++	uksm_remove_vma(vmg->vma, "vma_expand");
+ 	vma_set_range(vmg->vma, vmg->start, vmg->end, vmg->pgoff);
+ 
+ 	if (expanded)
+ 		vma_iter_store_overwrite(vmg->vmi, vmg->vma);
+ 
+ 	if (adj_start) {
++		uksm_remove_vma(adjust, "commit_merge_2");
+ 		adjust->vm_start += adj_start;
+ 		adjust->vm_pgoff += PHYS_PFN(adj_start);
++		uksm_add_vma_new(adjust, "commit_merge_2");
+ 		if (adj_start < 0) {
+ 			WARN_ON(expanded);
+ 			vma_iter_store_overwrite(vmg->vmi, adjust);
+ 		}
+ 	}
++	uksm_add_vma_new(vmg->vma, "vma_expand");
+ 
+ 	vma_complete(&vp, vmg->vmi, vmg->vma->vm_mm);
+ 
+@@ -1081,6 +1091,7 @@
+ 	if (vma_iter_prealloc(vmi, NULL))
+ 		return -ENOMEM;
+ 
++	uksm_remove_vma(vma, "vma_shrink");
+ 	vma_start_write(vma);
+ 
+ 	init_vma_prep(&vp, vma);
+@@ -1090,6 +1101,7 @@
+ 	vma_iter_clear(vmi);
+ 	vma_set_range(vma, start, end, pgoff);
+ 	vma_complete(&vp, vmi, vma->vm_mm);
++	uksm_add_vma_new(vma, "vma_shrink");
+ 	validate_mm(vma->vm_mm);
+ 	return 0;
+ }
+@@ -1709,6 +1721,7 @@
+ 		if (vma_link(mm, new_vma))
+ 			goto out_vma_link;
+ 		*need_rmap_locks = false;
++		uksm_add_vma_new(new_vma, "copy_vma");
+ 	}
+ 	return new_vma;
+ 
+diff --git a/mm/vmstat.c b/mm/vmstat.c
+--- a/mm/vmstat.c
++++ b/mm/vmstat.c
+@@ -1272,6 +1272,9 @@
+ 	"pgdemote_kswapd",
+ 	"pgdemote_direct",
+ 	"pgdemote_khugepaged",
++#ifdef CONFIG_UKSM
++	"nr_uksm_zero_pages",
++#endif
+ 	/* system-wide enum vm_stat_item counters */
+ 	"nr_dirty_threshold",
+ 	"nr_dirty_background_threshold",

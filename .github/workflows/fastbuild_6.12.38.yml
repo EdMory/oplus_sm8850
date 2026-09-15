@@ -110,6 +110,11 @@ on:
         required: true
         type: boolean
         default: 'true'
+      hybridswap_disable:
+        description: '是否禁用 ColorOS 自带 hybridswap(内核加载期拒绝携带 hybridswap 的 zram 模块)'
+        required: false
+        default: 'true'
+        type: boolean
       ccache_update:
         description: '更新ccache缓存(将本次编译生成的ccache缓存覆盖至仓库缓存，在更改编译配置、源码或需要刷新缓存时开启)'
         required: true
@@ -1223,6 +1228,64 @@ jobs:
           # echo "CONFIG_ZSWAP=y" >> ./arch/arm64/configs/gki_defconfig
           echo "提示: 运行时用 'cat /proc/sys/vm/kcompressd' 查看队列深度(默认 24, 0 表示关闭 kcompressd),"
           echo "      dmesg 可看到 'Kcompressd-Unofficial' 启动日志与 'kcompressd started successfully on node 0'"
+
+      - name: 禁用 ColorOS hybridswap(模块名黑名单 + zram.ko 镜像标记扫描)
+        if: inputs.hybridswap_disable
+        run: |
+          cd kernel_workspace
+          trap 'echo "hybridswap 黑名单步骤在脚本第 $LINENO 行失败(退出码 $?)" >&2' ERR
+
+          # 补丁只改 kernel/module/main.c 的模块加载黑名单，不新增导出符号、不触碰 KABI 保留区
+          wget -q https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/hybridswap-blacklist-6.12.patch
+
+          if [ ! -s hybridswap-blacklist-6.12.patch ]; then
+            echo "hybridswap 黑名单补丁下载失败: other_patch/hybridswap-blacklist-6.12.patch 缺失或不可达"; exit 1
+          fi
+
+          # 一、作用域校验：只允许改 kernel/module/main.c
+          OUT_OF_SCOPE="$(grep -E '^diff --git ' hybridswap-blacklist-6.12.patch | grep -vE ' b/kernel/module/main\.c$' || true)"
+          if [ -n "$OUT_OF_SCOPE" ]; then
+            echo "hybridswap 黑名单补丁改动了 main.c 以外的文件, 已中止:"
+            echo "$OUT_OF_SCOPE"
+            exit 1
+          fi
+
+          # 二、ABI 面校验：不得触碰导出符号 / KABI 保留区
+          if grep -nE 'EXPORT_SYMBOL|ANDROID_KABI|__kabi_reserved' hybridswap-blacklist-6.12.patch; then
+            echo "hybridswap 黑名单补丁触碰 ABI 面(导出符号或 KABI 保留区), 已中止"; exit 1
+          fi
+
+          # 三、内容校验：关键符号必须存在
+          for s in oplus_hybridswap_module_list oplus_hybridswap_blacklisted 'info->hdr, info->len'; do
+            grep -qF "$s" hybridswap-blacklist-6.12.patch \
+              || { echo "hybridswap 黑名单补丁内容异常: 缺少 '$s'"; exit 1; }
+          done
+
+          # 四、dry-run + 零 fuzz 应用
+          cd common
+          if ! patch -p1 --dry-run < ../hybridswap-blacklist-6.12.patch > /tmp/hybridswap_dryrun.log 2>&1; then
+            cat /tmp/hybridswap_dryrun.log
+            echo "hybridswap 黑名单补丁存在无法应用的 hunk, 已中止"; exit 1
+          fi
+          cat /tmp/hybridswap_dryrun.log
+          if grep -qE 'with fuzz|FAILED|ignored|Reversed|previously applied' /tmp/hybridswap_dryrun.log; then
+            echo "hybridswap 黑名单补丁与当前内核树不匹配(fuzz / hunk 失败 / 重复应用), 已中止"; exit 1
+          fi
+          if grep -q 'offset' /tmp/hybridswap_dryrun.log; then
+            echo "提示: 补丁以 offset 方式应用, 上游 main.c 有漂移, 请核对上下文:"
+            grep 'offset' /tmp/hybridswap_dryrun.log
+          fi
+          patch -p1 --no-backup-if-mismatch < ../hybridswap-blacklist-6.12.patch
+
+          # 五、集成校验
+          check() { grep -qF "$2" "$1" || { echo "hybridswap 黑名单集成校验失败: $1 缺少 '$2'"; exit 1; }; }
+          check kernel/module/main.c 'oplus_hybridswap_module_list'
+          check kernel/module/main.c 'oplus_hybridswap_blacklisted'
+          check kernel/module/main.c 'oplus_hybridswap_blacklisted(info->name, info->hdr, info->len)'
+
+          echo "hybridswap 黑名单集成完成: 加载期拒绝 hybridswap 模块(精确名称名单 + zram.ko 镜像标记扫描)"
+          echo "设备侧验证: dmesg 出现 'Module zram is blacklisted' 即表示 vendor hybridswap 版 zram.ko 已被拒绝"
+
 
       - name: 添加制作名称
         run: |

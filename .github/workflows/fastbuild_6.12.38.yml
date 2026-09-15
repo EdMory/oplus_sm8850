@@ -105,6 +105,11 @@ on:
         required: true
         type: boolean
         default: 'true'
+      kcompress_enable:
+        description: '是否集成 Kcompressd 异步压缩换出 + 大页 zswpout 统计(kcompressd 把 zswap/zram 的压缩与回写从 kswapd 解耦到专用内核线程, 缓解内存回收上下文被同步压缩阻塞造成的卡顿与分配停滞; 附带 MTHP 大页 zswap 换出统计)'
+        required: true
+        type: boolean
+        default: 'true'
       ccache_update:
         description: '更新ccache缓存(将本次编译生成的ccache缓存覆盖至仓库缓存，在更改编译配置、源码或需要刷新缓存时开启)'
         required: true
@@ -1103,6 +1108,122 @@ jobs:
           echo "      /proc/sys/vm/clean_low_ratio、/proc/sys/vm/clean_min_ratio 调节工作集保护强度"
           echo "LE9UO 集成完成(零 fuzz 应用 + ABI 面未触碰)！"
 
+      - name: 集成 Kcompressd 异步压缩换出 + 大页 zswpout 统计(零 fuzz 应用)
+        if: inputs.kcompress_enable
+        run: |
+          echo "正在集成 Kcompressd-Unofficial(把压缩/回写从 kswapd 解耦到专用 kcompressd 线程, 缓解内存压力下 kswapd 被同步压缩阻塞造成的卡顿与分配停滞)…"
+          trap 'echo "Kcompressd 集成步骤在脚本第 $LINENO 行失败(退出码 $?)" >&2' ERR
+          cd kernel_workspace/common
+
+          # 参考上游 brokestar233/android_kernel_common_sm8850 的两个提交:
+          #   3b87471f90a4944fd3706ee5c7f94f0d3d21967c  mm: swap: count successful large folio zswap stores in hugepage zswpout stats
+          #   499028f58165535fd1072d134143f09a717dc665  mm: introduce Kcompressd-Unofficial for asynchronous swapout offloading
+          # 两者已逐 hunk 对位重写为本 6.12.38 欧加 vendor 树可直接应用的两个补丁:
+          #   mthp-zswpout-stat-6.12.patch : 新增 MTHP_STAT_ZSWPOUT 大页 zswap 换出统计(交换统计优化, 同时是 Kcompressd 的前置)
+          #   kcompressd-6.12.patch        : Kcompressd 异步换出(新增 include/linux/kcompress.h, 挂载 vmscan.c / page_io.c / mm_init.c / kernel/sysctl.c / mmzone.h / swap.h)
+          # ABI: pg_data_t 新字段以 ANDROID_KABI_USE(1, ...) 占用一个 KABI 保留槽(下方有静态校验与 before/after 兜底),
+          #      不新增导出符号、不改动既有结构体成员布局。
+          KCOMPRESS_KABI_SLOT=1
+          fetch() { # $1=文件名
+            rm -f "$1"
+            for b in \
+              "https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch" \
+              "https://github.com/EdMory/oplus_sm8850/raw/refs/heads/main/other_patch"; do
+              echo "尝试下载 Kcompressd 补丁: $b/$1"
+              # 下载器自适应: 优先 curl(对 4xx/5xx 返回非 0, --retry 抗弱网); 无 curl 时回退 wget(只用其自身合法选项)
+              if command -v curl >/dev/null 2>&1; then
+                curl -fSL --retry 3 --retry-delay 2 --connect-timeout 20 -o "$1" "$b/$1" 2> kcompress_dl.log
+              else
+                wget -O "$1" --tries=3 --timeout=20 "$b/$1" 2> kcompress_dl.log
+              fi
+              if [ -s "$1" ]; then
+                echo "下载成功: $(wc -c < "$1") 字节"; rm -f kcompress_dl.log; return 0
+              fi
+              echo "该源不可用: $(tail -n 2 kcompress_dl.log | tr '\n' ' ')"
+            done
+            rm -f kcompress_dl.log
+            echo "Kcompressd 补丁下载失败: $1 在两个源均不可用"
+            return 1
+          }
+          fetch mthp-zswpout-stat-6.12.patch || exit 1
+          fetch kcompressd-6.12.patch || exit 1
+
+          # 一、ABI 面静态审计: 不得出现导出符号 / __kabi_reserved 直接改动; KABI 保留槽占用必须唯一且为槽 ${KCOMPRESS_KABI_SLOT}
+          if grep -nE '^\+.*EXPORT_SYMBOL|^\+.*__kabi_reserved' mthp-zswpout-stat-6.12.patch kcompressd-6.12.patch; then
+            echo "Kcompressd 补丁出现导出符号或 __kabi_reserved 直接改动, 已中止"; exit 1
+          fi
+          if [ "$(grep -c '^+.*ANDROID_KABI_USE' kcompressd-6.12.patch)" -ne 1 ] \
+            || ! grep -q "^+.*ANDROID_KABI_USE(${KCOMPRESS_KABI_SLOT}," kcompressd-6.12.patch; then
+            echo "Kcompressd 补丁的 KABI 保留槽占用与预期不符(应仅占用槽 ${KCOMPRESS_KABI_SLOT}), 已中止"; exit 1
+          fi
+          KABI_SLOT_BUSY="$(grep -c "ANDROID_KABI_USE(${KCOMPRESS_KABI_SLOT}," include/linux/mmzone.h || true)"
+          if [ "$KABI_SLOT_BUSY" != "0" ]; then
+            echo "KABI 槽 ${KCOMPRESS_KABI_SLOT} 已被当前内核树占用($KABI_SLOT_BUSY 处), 与 Kcompressd 冲突, 已中止"; exit 1
+          fi
+          OUT_OF_SCOPE="$(grep -E '^diff --git ' mthp-zswpout-stat-6.12.patch | grep -vE ' b/(Documentation/admin-guide/mm/transhuge\.rst|include/linux/huge_mm\.h|mm/huge_memory\.c|mm/page_io\.c)$' || true)"
+          if [ -n "$OUT_OF_SCOPE" ]; then
+            echo "大页 zswpout 统计补丁改动了白名单以外的文件, 已中止:"; echo "$OUT_OF_SCOPE"; exit 1
+          fi
+          OUT_OF_SCOPE="$(grep -E '^diff --git ' kcompressd-6.12.patch | grep -vE ' b/(include/linux/kcompress\.h|include/linux/mmzone\.h|include/linux/swap\.h|kernel/sysctl\.c|mm/mm_init\.c|mm/page_io\.c|mm/swap\.h|mm/vmscan\.c)$' || true)"
+          if [ -n "$OUT_OF_SCOPE" ]; then
+            echo "Kcompressd 补丁改动了白名单以外的文件, 已中止:"; echo "$OUT_OF_SCOPE"; exit 1
+          fi
+          KABI_RESERVE_BEFORE="$(grep -c 'ANDROID_KABI_RESERVE' include/linux/mmzone.h || true)"
+          echo "ABI 审计通过: 仅占用 KABI 槽 ${KCOMPRESS_KABI_SLOT}(mmzone.h 现有保留槽 ${KABI_RESERVE_BEFORE} 个), 无导出符号改动, 改动文件均在白名单内"
+
+          # 二、严格零 fuzz 应用(先统计补丁, 再 Kcompressd 本体)
+          for p in mthp-zswpout-stat-6.12.patch kcompressd-6.12.patch; do
+            echo "===== 应用 $p ====="
+            if ! patch -p1 --batch --dry-run < "$p" > "/tmp/kcompress_${p}.dryrun.log" 2>&1; then
+              cat "/tmp/kcompress_${p}.dryrun.log"
+              echo "$p 存在无法应用的 hunk, 已中止"; exit 1
+            fi
+            cat "/tmp/kcompress_${p}.dryrun.log"
+            if grep -qE 'with fuzz|FAILED|ignored|Reversed|previously applied' "/tmp/kcompress_${p}.dryrun.log"; then
+              echo "$p 与当前内核树不匹配(fuzz / hunk 失败 / 重复应用), 已中止"; exit 1
+            fi
+            if grep -q 'offset' "/tmp/kcompress_${p}.dryrun.log"; then
+              echo "提示: $p 以下 hunk 仅有行号偏移(上下文精确命中, 系其他补丁先行改动所致), 继续应用:"
+              grep 'offset' "/tmp/kcompress_${p}.dryrun.log"
+            fi
+            patch -p1 --batch --no-backup-if-mismatch < "$p"
+          done
+          echo "两个补丁均以零 fuzz 应用完成"
+
+          # 三、ABI 兜底复核: mmzone.h 的 KABI 保留槽应恰好减少 1 个(即被 kcompress 指针占用)
+          KABI_RESERVE_AFTER="$(grep -c 'ANDROID_KABI_RESERVE' include/linux/mmzone.h || true)"
+          [ "$((KABI_RESERVE_BEFORE - KABI_RESERVE_AFTER))" -eq 1 ] \
+            || { echo "Kcompressd ABI 校验失败: mmzone.h 的 KABI 保留槽变动数不为 1($KABI_RESERVE_BEFORE -> $KABI_RESERVE_AFTER)"; exit 1; }
+
+          # 四、集成结果校验: 统计项 / KABI 槽 / kcompressd 线程与 kfifo 队列 / 各挂载点必须齐全
+          check() { grep -qF "$2" "$1" || { echo "Kcompressd 集成校验失败: $1 缺少 '$2'"; exit 1; }; }
+          check include/linux/huge_mm.h   'MTHP_STAT_ZSWPOUT,'
+          check mm/huge_memory.c          'DEFINE_MTHP_STAT_ATTR(zswpout, MTHP_STAT_ZSWPOUT);'
+          check mm/page_io.c              'count_mthp_stat(folio_order(folio), MTHP_STAT_ZSWPOUT);'
+          check include/linux/kcompress.h '#define KCOMPRESS_FIFO_SIZE 256'
+          check include/linux/kcompress.h 'struct kcompress_data {'
+          check include/linux/mmzone.h    'ANDROID_KABI_USE(1, struct kcompress_data *kcompress);'
+          check include/linux/swap.h      'extern int vm_kcompressd;'
+          check kernel/sysctl.c           '"kcompressd",'
+          check kernel/sysctl.c           '&SYSCTL_KCOMPRESS_FIFO_SIZE'
+          check mm/mm_init.c              'pgdat->kcompress = NULL;'
+          check mm/swap.h                 'int kcompressd(void *p);'
+          check mm/page_io.c              'kcompressd_store(folio)'
+          check mm/page_io.c              'int kcompressd(void *p)'
+          check mm/page_io.c              '#include <linux/cleanup.h>'
+          check mm/vmscan.c               'static int kcompress_init_for_node(pg_data_t *pgdat, int nid)'
+          check mm/vmscan.c               'kthread_create_on_node('
+          check mm/vmscan.c               'static void kcompress_cleanup(pg_data_t *pgdat)'
+          echo "Kcompressd 集成完成(零 fuzz 应用 + ABI 面仅占用 KABI 槽 ${KCOMPRESS_KABI_SLOT})！"
+
+          # 五、生效条件说明(不改动默认行为):
+          # kcompressd 只在「zswap 已启用」或「交换设备带 SWP_SYNCHRONOUS_IO」时接管大 folio 换出,
+          # 否则其判断分支直接返回 false, 内核行为与打补丁前完全一致, 对不满足条件的设备零副作用。
+          # 若希望强制走 zswap 压缩后端(注意与 zram 叠加会产生二次压缩, 通常不建议), 取消下一行注释:
+          # echo "CONFIG_ZSWAP=y" >> ./arch/arm64/configs/gki_defconfig
+          echo "提示: 运行时用 'cat /proc/sys/vm/kcompressd' 查看队列深度(默认 24, 0 表示关闭 kcompressd),"
+          echo "      dmesg 可看到 'Kcompressd-Unofficial' 启动日志与 'kcompressd started successfully on node 0'"
+
       - name: 添加制作名称
         run: |
           cd kernel_workspace
@@ -1340,6 +1461,7 @@ jobs:
           echo "NoMount: ${{ github.event.inputs.nomount_enable }}" >> ./ak3.log
           echo "ZRAM-IR: ${{ github.event.inputs.zram_ir_enable }}" >> ./ak3.log
           echo "LZ4KDR: ${{ github.event.inputs.lz4kdr_enable }}" >> ./ak3.log
+          echo "Kcompressd: ${{ github.event.inputs.kcompress_enable }}" >> ./ak3.log
           zip -z ../$AK3_NAME < ./ak3.log
 
       - name: 上传 Ccache 调试日志
@@ -1427,6 +1549,7 @@ jobs:
           - NoMount(VFS 路径重定向)支持：${{ github.event.inputs.nomount_enable }}
           - ZRAM-IR 立即重压缩支持：${{ github.event.inputs.zram_ir_enable }}（zram 多级压缩同一写入内逐级尝试，达标即停）
           - LZ4KDR 支持：${{ github.event.inputs.lz4kdr_enable }}（LZ4KD 的高速衍生实现，线格式兼容、重写编码器搜索循环，与 LZ4KD 后端并存）
+          - Kcompressd 异步压缩换出：${{ github.event.inputs.kcompress_enable }}（kcompressd 把 zswap/zram 的压缩与回写从 kswapd 解耦到专用内核线程，避免内存回收上下文被同步压缩阻塞；含 MTHP 大页 zswap 换出统计 zswpout）
           - ReSukiSU管理器下载：[ReSukiSU_CI](https://github.com/cctv18/ReSukiSU_CI/releases)
           - SukiSU Ultra管理器下载：[SukiSU-Ultra](https://github.com/SukiSU-Ultra/SukiSU-Ultra/releases)
           - KernelSU Next管理器下载：[KernelSU-Next](https://github.com/KernelSU-Next/KernelSU-Next/releases)

@@ -1,0 +1,495 @@
+diff --git a/include/linux/kcompress.h b/include/linux/kcompress.h
+new file mode 100644
+--- /dev/null
++++ b/include/linux/kcompress.h
+@@ -0,0 +1,18 @@
++#ifndef _LINUX_KCOMPRESS_H
++#define _LINUX_KCOMPRESS_H
++
++#include <linux/wait.h>
++#include <linux/spinlock.h>
++#include <linux/sched.h>
++#include <linux/kfifo.h>
++
++#define KCOMPRESS_FIFO_SIZE 256
++
++struct kcompress_data {
++	wait_queue_head_t kcompressd_wait;
++	struct task_struct *kcompressd;
++	struct kfifo *kcompress_fifo;
++	spinlock_t kcompress_fifo_lock;
++};
++
++#endif /* _LINUX_KCOMPRESS_H */
+
+diff --git a/include/linux/mmzone.h b/include/linux/mmzone.h
+--- a/include/linux/mmzone.h
++++ b/include/linux/mmzone.h
+@@ -24,6 +24,7 @@
+ #include <linux/page-flags.h>
+ #include <linux/local_lock.h>
+ #include <linux/zswap.h>
++#include <linux/kcompress.h>
+ #include <linux/android_kabi.h>
+ #include <asm/page.h>
+ 
+@@ -1490,7 +1491,7 @@
+ 	struct memory_failure_stats mf_stats;
+ #endif
+ 
+-	ANDROID_KABI_RESERVE(1);
++	ANDROID_KABI_USE(1, struct kcompress_data *kcompress);
+ 	ANDROID_BACKPORT_RESERVE(1);
+ 	ANDROID_OEM_DATA(1);
+ } pg_data_t;
+
+diff --git a/include/linux/swap.h b/include/linux/swap.h
+--- a/include/linux/swap.h
++++ b/include/linux/swap.h
+@@ -713,5 +713,7 @@
+ }
+ #endif
+ 
++extern int vm_kcompressd;
++
+ #endif /* __KERNEL__*/
+ #endif /* _LINUX_SWAP_H */
+
+diff --git a/kernel/sysctl.c b/kernel/sysctl.c
+--- a/kernel/sysctl.c
++++ b/kernel/sysctl.c
+@@ -63,6 +63,7 @@
+ #include <linux/mount.h>
+ #include <linux/userfaultfd_k.h>
+ #include <linux/pid.h>
++#include <linux/kcompress.h>
+ 
+ #include "../lib/kstrtox.h"
+ 
+@@ -2031,6 +2032,9 @@
+ #endif
+ };
+ 
++int vm_kcompressd = 24;
++static int SYSCTL_KCOMPRESS_FIFO_SIZE = KCOMPRESS_FIFO_SIZE;
++
+ static struct ctl_table vm_table[] = {
+ 	{
+ 		.procname	= "overcommit_memory",
+@@ -2080,6 +2084,15 @@
+ 		.proc_handler	= proc_dointvec_minmax,
+ 		.extra1		= SYSCTL_ZERO,
+ 		.extra2		= SYSCTL_TWO_HUNDRED,
++	},
++	{
++		.procname	= "kcompressd",
++		.data		= &vm_kcompressd,
++		.maxlen		= sizeof(int),
++		.mode		= 0644,
++		.proc_handler = proc_dointvec_minmax,
++		.extra1		= SYSCTL_ZERO,
++		.extra2		= &SYSCTL_KCOMPRESS_FIFO_SIZE,
+ 	},
+ #ifdef CONFIG_NUMA
+ 	{
+
+diff --git a/mm/mm_init.c b/mm/mm_init.c
+--- a/mm/mm_init.c
++++ b/mm/mm_init.c
+@@ -30,6 +30,7 @@
+ #include <linux/crash_dump.h>
+ #include <linux/execmem.h>
+ #include <linux/vmstat.h>
++#include <linux/kfifo.h>
+ #include "internal.h"
+ #include "slab.h"
+ #include "shuffle.h"
+@@ -1370,6 +1371,10 @@
+ 	pgdat_init_kcompactd(pgdat);
+ 
+ 	init_waitqueue_head(&pgdat->kswapd_wait);
++
++	/* kcompress will be initialized later in kswapd_run() */
++	pgdat->kcompress = NULL;
++
+ 	init_waitqueue_head(&pgdat->pfmemalloc_wait);
+ 
+ 	for (i = 0; i < NR_VMSCAN_THROTTLE; i++)
+
+diff --git a/mm/page_io.c b/mm/page_io.c
+--- a/mm/page_io.c
++++ b/mm/page_io.c
+@@ -25,6 +25,9 @@
+ #include <linux/sched/task.h>
+ #include <linux/delayacct.h>
+ #include <linux/zswap.h>
++#include <linux/cpumask.h>
++#include <linux/kfifo.h>
++#include <linux/cleanup.h>
+ #include "swap.h"
+ 
+ #undef CREATE_TRACE_POINTS
+@@ -238,6 +241,102 @@
+ }
+ 
+ /*
++ * do_swapout() - Write a folio to swap space
++ * @folio: The folio to write out
++ *
++ * This function writes the folio to swap space, either using zswap or
++ * synchronous write. It ensures that the folio is unlocked and the
++ * reference count is decremented after the operation.
++ */
++static inline void do_swapout(struct folio *folio)
++{
++	struct writeback_control wbc = {
++		.sync_mode = WB_SYNC_NONE,
++		.nr_to_write = SWAP_CLUSTER_MAX,
++		.range_start = 0,
++		.range_end = LLONG_MAX,
++		.for_reclaim = 1,
++	};
++
++	if (zswap_store(folio)) {
++		folio_unlock(folio);
++	} else
++		__swap_writepage(folio, &wbc); /* Implies folio_unlock(folio) */
++
++	/* Decrement the folio reference count */
++	folio_put(folio);
++}
++
++/*
++ * kcompressd_store() - Off-load folio compression to kcompressd
++ * @folio: The folio to compress
++ *
++ * This function attempts to off-load the compression of the folio to
++ * kcompressd. If kcompressd is not available or the folio cannot be
++ * compressed, it falls back to synchronous write.
++ *
++ * Returns true if the folio was successfully queued for compression,
++ * false otherwise.
++ */
++static bool kcompressd_store(struct folio *folio)
++{
++	pg_data_t *pgdat = NODE_DATA(numa_node_id());
++	unsigned int ret, sysctl_kcompressd = vm_kcompressd;
++	struct folio *head = NULL;
++
++	/* Only kswapd can use kcompressd */
++	if (!current_is_kswapd())
++		return false;
++
++	/* kcompressd must be enabled and running */
++	if (!sysctl_kcompressd || unlikely(!pgdat->kcompress ||
++			!pgdat->kcompress->kcompressd))
++		return false;
++
++	/* We can only off-load anon folios */
++	if (!folio_test_anon(folio))
++		return false;
++
++	/* Fall back to synchronously return AOP_WRITEPAGE_ACTIVATE */
++	if (!mem_cgroup_zswap_writeback_enabled(folio_memcg(folio)))
++		return false;
++
++	/* Swap device must be sync-efficient */
++	if (!zswap_is_enabled() &&
++		!data_race(swp_swap_info(folio->swap)->flags & SWP_SYNCHRONOUS_IO))
++		return false;
++
++	/* If the kcompress_fifo is full, we must swap out the head
++	 * folio to make space for the new folio.
++	 */
++	scoped_guard(spinlock_irqsave, &pgdat->kcompress->kcompress_fifo_lock)
++		if (kfifo_len(pgdat->kcompress->kcompress_fifo) >= sysctl_kcompressd * sizeof(folio) &&
++				unlikely(!kfifo_out(pgdat->kcompress->kcompress_fifo, &head, sizeof(folio))))
++			/* Can't dequeue the head folio. Fall back to synchronous write. */
++			return false;
++
++	/* Increment the folio reference count to avoid it being freed */
++	folio_get(folio);
++
++	/* Enqueue the folio for compression */
++	ret = kfifo_in(pgdat->kcompress->kcompress_fifo, &folio, sizeof(folio));
++	if (likely(ret))
++		/* We successfully enqueued the folio. wake up kcompressd */
++		wake_up_interruptible(&pgdat->kcompress->kcompressd_wait);
++	else
++		/* Enqueue failed, so we must cancel the reference count */
++		folio_put(folio);
++
++	/* If we had to swap out the head folio, do it now.
++	 * This will block until the folio is written out.
++	 */
++	if (head)
++		do_swapout(head);
++
++	return ret;
++}
++
++/*
+  * We may have stale swap cache pages in memory: notice
+  * them here and get rid of the unnecessary final write.
+  */
+@@ -279,6 +378,15 @@
+ 		 */
+ 		swap_zeromap_folio_clear(folio);
+ 	}
++
++	/*
++	 * Compression within zswap and zram might block rmap, unmap
++	 * of both file and anon pages, try to do compression async
++	 * if possible
++	 */
++	if (kcompressd_store(folio))
++		return 0;
++
+ 	if (zswap_store(folio)) {
+ 		count_mthp_stat(folio_order(folio), MTHP_STAT_ZSWPOUT);
+ 		folio_unlock(folio);
+@@ -290,6 +398,37 @@
+ 	}
+ 
+ 	__swap_writepage(folio, wbc);
++	return 0;
++}
++
++/*
++ * kcompressd() - Kernel thread for compressing folios
++ * @p: Pointer to pg_data_t structure
++ *
++ * This function runs in a kernel thread and waits for folios to be
++ * queued for compression. It processes the folios by calling do_swapout()
++ * on them, which handles the actual writing to swap space.
++ */
++int kcompressd(void *p)
++{
++	pg_data_t *pgdat = (pg_data_t *)p;
++	struct folio *folio;
++	/* * kcompressd runs with PF_MEMALLOC and PF_KSWAPD flags set to
++	 * allow it to allocate memory for compression without being
++	 * restricted by the current memory allocation context.
++	 * Also PF_KSWAPD prevents Intel Graphics driver from crashing
++	 * the system in i915_gem_shrinker.c:i915_gem_shrinker_scan()
++	 */
++	current->flags |= PF_MEMALLOC | PF_KSWAPD;
++
++	while (!kthread_should_stop()) {
++		wait_event_interruptible(pgdat->kcompress->kcompressd_wait,
++				!kfifo_is_empty(pgdat->kcompress->kcompress_fifo));
++
++		while (kfifo_out_locked(pgdat->kcompress->kcompress_fifo,
++				&folio, sizeof(folio), &pgdat->kcompress->kcompress_fifo_lock))
++			do_swapout(folio);
++	}
+ 	return 0;
+ }
+ 
+
+diff --git a/mm/swap.h b/mm/swap.h
+--- a/mm/swap.h
++++ b/mm/swap.h
+@@ -21,6 +21,7 @@
+ void swap_write_unplug(struct swap_iocb *sio);
+ int swap_writepage(struct page *page, struct writeback_control *wbc);
+ void __swap_writepage(struct folio *folio, struct writeback_control *wbc);
++int kcompressd(void *p);
+ 
+ /* linux/mm/swap_state.c */
+ /* One swap address space for each 64M swap space */
+@@ -146,6 +147,11 @@
+ 	return 0;
+ }
+ 
++static inline int kcompressd(void *p)
++{
++	return 0;
++}
++
+ static inline void swapcache_clear(struct swap_info_struct *si, swp_entry_t entry, int nr)
+ {
+ }
+
+diff --git a/mm/vmscan.c b/mm/vmscan.c
+--- a/mm/vmscan.c
++++ b/mm/vmscan.c
+@@ -17,6 +17,8 @@
+ #include <linux/module.h>
+ #include <linux/gfp.h>
+ #include <linux/kernel_stat.h>
++#include <linux/kfifo.h>
++#include <linux/zswap.h>
+ #include <linux/swap.h>
+ #include <linux/pagemap.h>
+ #include <linux/init.h>
+@@ -7589,6 +7591,58 @@
+ #endif /* CONFIG_HIBERNATION */
+ 
+ /*
++ * kcompress_init_for_node() - Initialize kcompress for a NUMA node
++ * @pgdat: The pg_data_t structure for the node
++ * @nid: Node ID
++ *
++ * This function initializes kcompress structures after the system
++ * is fully initialized, following Linux kernel best practices.
++ */
++static int kcompress_init_for_node(pg_data_t *pgdat, int nid)
++{
++	/* Already initialized or disabled */
++	if (pgdat->kcompress)
++		return 0;
++
++	pgdat->kcompress = kzalloc(sizeof(struct kcompress_data), GFP_KERNEL);
++	if (!pgdat->kcompress) {
++		pr_warn("Failed to allocate kcompress_data for node %d\n", nid);
++		return -ENOMEM;
++	}
++
++	/* Initialize synchronization primitives */
++	init_waitqueue_head(&pgdat->kcompress->kcompressd_wait);
++	spin_lock_init(&pgdat->kcompress->kcompress_fifo_lock);
++	pgdat->kcompress->kcompressd = NULL;
++	
++	/* Allocate FIFO structure */
++	pgdat->kcompress->kcompress_fifo = kzalloc(sizeof(struct kfifo), GFP_KERNEL);
++	if (!pgdat->kcompress->kcompress_fifo) {
++		pr_warn("Failed to allocate kcompress_fifo for node %d\n", nid);
++		goto cleanup_kcompress;
++	}
++
++	/* Initialize the FIFO with proper size */
++	if (kfifo_alloc(pgdat->kcompress->kcompress_fifo,
++			KCOMPRESS_FIFO_SIZE * sizeof(struct folio *),
++			GFP_KERNEL)) {
++		pr_warn("Failed to initialize kcompress_fifo for node %d\n", nid);
++		goto cleanup_fifo_struct;
++	}
++	
++	return 0;
++
++cleanup_fifo_struct:
++	kfree(pgdat->kcompress->kcompress_fifo);
++	pgdat->kcompress->kcompress_fifo = NULL;
++cleanup_kcompress:
++	kfree(pgdat->kcompress);
++	pgdat->kcompress = NULL;
++	pr_info("kcompressd disabled for node %d due to initialization failure\n", nid);
++	return -ENOMEM;
++}
++
++/*
+  * This kswapd start function will be called by init and node-hot-add.
+  */
+ void __meminit kswapd_run(int nid)
+@@ -7599,14 +7653,95 @@
+ 	if (!pgdat->kswapd) {
+ 		pgdat->kswapd = kthread_run(kswapd, pgdat, "kswapd%d", nid);
+ 		if (IS_ERR(pgdat->kswapd)) {
+-			/* failure at boot is fatal */
++			/* Failure at boot is fatal */
+ 			pr_err("Failed to start kswapd on node %d，ret=%ld\n",
+ 				   nid, PTR_ERR(pgdat->kswapd));
+ 			BUG_ON(system_state < SYSTEM_RUNNING);
+ 			pgdat->kswapd = NULL;
+-		}
+-	}
++			goto out;
++		}
++
++		/* 
++		 * Initialize kcompress now that the system is fully running
++		 * This follows the kernel pattern of delayed initialization
++		 */
++		if (kcompress_init_for_node(pgdat, nid) == 0) {
++			/* Only create kcompressd if initialization succeeded */
++			pgdat->kcompress->kcompressd = kthread_create_on_node(
++				kcompressd, pgdat, nid, "kcompressd%d", nid);
++
++			printk(KERN_INFO "Kcompressd-Unofficial 0.5 by Masahito Suzuki (forked from Kcompressd by Qun-Wei Lin from MediaTek)\n");
++
++			if (IS_ERR(pgdat->kcompress->kcompressd)) {
++				pr_warn("Failed to start kcompressd on node %d: %ld\n",
++				       nid, PTR_ERR(pgdat->kcompress->kcompressd));
++				pgdat->kcompress->kcompressd = NULL;
++				/* kswapd continues without kcompressd */
++			} else {
++				pr_info("kcompressd started successfully on node %d\n", nid);
++				wake_up_process(pgdat->kcompress->kcompressd);
++			}
++		} else {
++			pr_info("kcompressd disabled on node %d\n", nid);
++		}
++	}
++out:
+ 	pgdat_kswapd_unlock(pgdat);
++}
++
++/*
++ * kcompress_cleanup() - Clean up kcompress resources for a node
++ * @pgdat: The pg_data_t structure for the node
++ *
++ * This function safely cleans up all kcompress-related resources,
++ * ensuring proper shutdown of the kcompressd thread and deallocation
++ * of memory structures.
++ */
++static void kcompress_cleanup(pg_data_t *pgdat)
++{
++	if (!pgdat || !pgdat->kcompress)
++		return;
++
++	/* Stop kcompressd thread if it exists */
++	if (pgdat->kcompress->kcompressd) {
++		kthread_stop(pgdat->kcompress->kcompressd);
++		pgdat->kcompress->kcompressd = NULL;
++	}
++
++	/* Process any remaining folios in the FIFO before cleanup */
++	if (pgdat->kcompress->kcompress_fifo) {
++		struct folio *folio;
++		
++		/* Drain the FIFO and process remaining folios synchronously */
++		while (kfifo_out_locked(pgdat->kcompress->kcompress_fifo,
++					&folio, sizeof(folio), 
++					&pgdat->kcompress->kcompress_fifo_lock)) {
++			/* Process the folio synchronously before cleanup */
++			if (zswap_store(folio)) {
++				count_mthp_stat(folio_order(folio), MTHP_STAT_ZSWPOUT);
++				folio_unlock(folio);
++			} else {
++				struct writeback_control wbc = {
++					.sync_mode = WB_SYNC_NONE,
++					.nr_to_write = SWAP_CLUSTER_MAX,
++					.range_start = 0,
++					.range_end = LLONG_MAX,
++					.for_reclaim = 1,
++				};
++				__swap_writepage(folio, &wbc);
++			}
++			folio_put(folio);
++		}
++
++		/* Free FIFO resources */
++		kfifo_free(pgdat->kcompress->kcompress_fifo);
++		kfree(pgdat->kcompress->kcompress_fifo);
++		pgdat->kcompress->kcompress_fifo = NULL;
++	}
++
++	/* Free the main kcompress structure */
++	kfree(pgdat->kcompress);
++	pgdat->kcompress = NULL;
+ }
+ 
+ /*
+@@ -7624,6 +7759,10 @@
+ 		kthread_stop(kswapd);
+ 		pgdat->kswapd = NULL;
+ 	}
++
++	/* Clean up kcompress resources */
++	kcompress_cleanup(pgdat);
++
+ 	pgdat_kswapd_unlock(pgdat);
+ }
+ 
+

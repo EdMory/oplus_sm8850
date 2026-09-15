@@ -1235,7 +1235,12 @@ jobs:
           cd kernel_workspace
           trap 'echo "hybridswap 黑名单步骤在脚本第 $LINENO 行失败(退出码 $?)" >&2' ERR
 
-          # 补丁只改 kernel/module/main.c 的模块加载黑名单，不新增导出符号、不触碰 KABI 保留区
+          # 补丁只改 kernel/module/main.c 的模块加载黑名单，不新增导出符号、不触碰 KABI 保留区。
+          # 补丁的两个 hunk 均锚定「本仓库其它补丁不触及」的上游原生行，因此不依赖应用顺序：
+          #   hunk1 锚 core_param(module_blacklist, ...) 之后插入判定函数；
+          #   hunk2 锚 early_mod_check(info, flags) 之后的空行与 layout_and_allocate 注释。
+          # 注意：lz4kd.patch 会把 early_mod_check() 里的 blacklisted() 判定搬进 load_module()，
+          #      旧版补丁锚在该判定块上，故在本 workflow 的树形态下必然失配(无法应用的 hunk)。
           wget -q https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/hybridswap-blacklist-6.12.patch
 
           if [ ! -s hybridswap-blacklist-6.12.patch ]; then
@@ -1243,7 +1248,9 @@ jobs:
           fi
 
           # 一、作用域校验：只允许改 kernel/module/main.c
-          OUT_OF_SCOPE="$(grep -E '^diff --git ' hybridswap-blacklist-6.12.patch | grep -vE ' b/kernel/module/main\.c$' || true)"
+          # 同时兼容带 diff --git 头与仅带 --- / +++ 头的补丁，避免无 diff --git 行时校验被绕过
+          OUT_OF_SCOPE="$(grep -E '^(diff --git |--- |\+\+\+ )' hybridswap-blacklist-6.12.patch \
+            | grep -vE ' (a|b)/kernel/module/main\.c([ \t].*)?$' || true)"
           if [ -n "$OUT_OF_SCOPE" ]; then
             echo "hybridswap 黑名单补丁改动了 main.c 以外的文件, 已中止:"
             echo "$OUT_OF_SCOPE"

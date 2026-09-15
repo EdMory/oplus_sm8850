@@ -1,0 +1,90 @@
+From: Marvis <marvis@local>
+Subject: [PATCH] module: 内核侧强制禁用 ColorOS hybridswap(模块名名单 + zram.ko 镜像标记扫描)
+
+ColorOS 把 hybridswap 编进 vendor 的 zram.ko(drivers/block/zram/hybridswap/*,
+CONFIG_HYBRIDSWAP / _CORE / _SWAPD), 它按 zram slot index 自维护 LRU 元数据;
+与本仓库自编译 zram 特性(ZRAM-IR 立即重压缩 / Kcompressd 异步压缩换出)同用时
+会出现 slot 索引失配。本补丁在内核模块加载路径上直接拒绝 hybridswap 模块:
+
+  1) 精确模块名名单: oplus_bsp_hybridswap_zram / oplus_hybridswap_zram / hybridswap_zram;
+  2) 镜像标记扫描: 名为 zram 的模块, 镜像内含 "hybridswap" 标记(即带 hybridswap 代码
+     的 vendor zram.ko)一律拒绝加载; common 树自编译 zram.ko 不含该标记, 不受影响。
+
+仅改 kernel/module/main.c 的加载黑名单, 不触碰导出符号 / KABI 保留区 / 结构体布局。
+适用: 6.12.x common(GKI)树; 用 patch -p1 在 common/ 目录下应用。
+
+---
+--- a/kernel/module/main.c
++++ b/kernel/module/main.c
+@@ -2813,6 +2813,61 @@
+ 	}
+ 	return false;
+ }
++
++/*
++ * ColorOS hybridswap 强制禁用名单(编译期固定, 不依赖内核 cmdline)。
++ *
++ * 背景: OPLUS 把 hybridswap 直接编进 vendor 的 zram.ko
++ * (drivers/block/zram/hybridswap/*, 由 CONFIG_HYBRIDSWAP / _CORE / _SWAPD 打开),
++ * 它按 zram slot index 自维护一份 LRU 元数据; 与本仓库自编译的 zram 特性
++ * (ZRAM-IR 立即重压缩 / Kcompressd 异步压缩换出)同用时会造成 slot 生命周期与
++ * 索引失配。此处在内核模块加载路径上直接拒绝 hybridswap 模块加载。
++ *
++ * 两层判定:
++ *   1. 精确模块名名单: 覆盖 hybridswap 独立成模块的机型;
++ *   2. 镜像标记扫描: 名为 zram 的模块, 镜像内若含 "hybridswap" 标记
++ *      (即 hybridswap 代码被编进 zram.ko 的机型)一律拒绝加载;
++ *      common 树自编译的 zram.ko 不含该标记, 不受影响。
++ *
++ * 说明: 使用本补丁时必须保证设备有可用的 zram 模块(自编译 zram.ko),
++ *       否则屏蔽 vendor zram.ko 后设备将失去 swap。
++ */
++static const char * const oplus_hybridswap_module_list[] = {
++	"oplus_bsp_hybridswap_zram",
++	"oplus_hybridswap_zram",
++	"hybridswap_zram",
++};
++
++static bool oplus_hybridswap_blacklisted(const char *name, const void *data,
++					 unsigned long size)
++{
++	static const char marker[] = "hybridswap";
++	const unsigned char *p = data;
++	const unsigned char *end;
++	size_t mlen = sizeof(marker) - 1;
++	unsigned int i;
++
++	for (i = 0; i < ARRAY_SIZE(oplus_hybridswap_module_list); i++) {
++		if (!strcmp(name, oplus_hybridswap_module_list[i]))
++			return true;
++	}
++
++	/* 只扫描 zram 模块; 如机型另有 hybridswap 载体, 可放宽此条件 */
++	if (strcmp(name, "zram") != 0 || !data || size < mlen)
++		return false;
++
++	end = p + size - mlen;
++	while (p <= end) {
++		p = memchr(p, marker[0], end - p + 1);
++		if (!p)
++			break;
++		if (!memcmp(p, marker, mlen))
++			return true;
++		p++;
++	}
++
++	return false;
++}
+ core_param(module_blacklist, module_blacklist, charp, 0400);
+ 
+ static struct module *layout_and_allocate(struct load_info *info, int flags)
+@@ -3273,7 +3328,8 @@
+ 	 * Now that we know we have the correct module name, check
+ 	 * if it's blacklisted.
+ 	 */
+-	if (blacklisted(info->name)) {
++	if (blacklisted(info->name) ||
++	    oplus_hybridswap_blacklisted(info->name, info->hdr, info->len)) {
+ 		pr_err("Module %s is blacklisted\n", info->name);
+ 		return -EPERM;
+ 	}

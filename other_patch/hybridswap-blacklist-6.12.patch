@@ -1,0 +1,108 @@
+From: Marvis <marvis@local>
+Subject: [PATCH] module: 内核侧强制禁用 ColorOS hybridswap(模块名名单 + zram.ko 镜像标记扫描)
+
+ColorOS 把 hybridswap 编进 vendor 的 zram.ko(drivers/block/zram/hybridswap/*,
+CONFIG_HYBRIDSWAP / _CORE / _SWAPD), 它按 zram slot index 自维护 LRU 元数据;
+与本仓库自编译 zram 特性(ZRAM-IR 立即重压缩 / Kcompressd 异步压缩换出)同用时
+会出现 slot 索引失配。本补丁在内核模块加载路径上直接拒绝 hybridswap 模块:
+
+  1) 精确模块名名单: oplus_bsp_hybridswap_zram / oplus_hybridswap_zram / hybridswap_zram;
+  2) 镜像标记扫描: 名为 zram 的模块, 镜像内含 "hybridswap" 标记(即带 hybridswap 代码
+     的 vendor zram.ko)一律拒绝加载; common 树自编译 zram.ko 不含该标记, 不受影响。
+
+锚点说明(本版修正重点):
+  上一版补丁的 hunk 上下文取自「未打任何补丁」的 main.c, 而 workflow 在同一步之前
+  已打过 lz4kd.patch 与 ddl_hit_hook.patch; 其中 lz4kd.patch 会把 early_mod_check()
+  内的 blacklisted() 判定整体搬进 load_module(), 于是旧补丁的两个 hunk 在 CI 树上
+  均无法定位, 报 "无法应用的 hunk"。本版把锚点全部换成上述补丁集都不触及的上游原生行:
+    hunk 1: 锚定 core_param(module_blacklist, ...) (前一行 '}' + 后一行空行),
+            紧随其后插入 oplus_hybridswap_module_list[] 与 oplus_hybridswap_blacklisted();
+    hunk 2: 锚定 err = early_mod_check(info, flags); 之后的空行与
+            "/* Figure out module layout, and allocate all the memory. */",
+            在该注释前追加 hybridswap 判定分支。
+  这两处锚点在「已打 lz4kd/ddl_hit_hook」与「未打」两种树形态下都能定位,
+  与补丁应用顺序无关(仅按上下文定位, 允许 offset)。
+
+仅改 kernel/module/main.c 的加载黑名单, 不触碰导出符号 / KABI 保留区 / 结构体布局。
+适用: 6.12.x common(GKI)树; 用 patch -p1 在 common/ 目录下应用。
+
+diff --git a/kernel/module/main.c b/kernel/module/main.c
+--- a/kernel/module/main.c
++++ b/kernel/module/main.c
+@@ -2837,6 +2837,60 @@
+ }
+ core_param(module_blacklist, module_blacklist, charp, 0400);
+ 
++/*
++ * Force-disable ColorOS hybridswap (kernel side).
++ *
++ * OPLUS compiles hybridswap into the vendor zram.ko (drivers/block/zram/hybridswap/*,
++ * enabled by CONFIG_HYBRIDSWAP / CONFIG_HYBRIDSWAP_CORE / CONFIG_HYBRIDSWAP_SWAPD).
++ * It keeps its own LRU metadata indexed by zram slot index, which conflicts with the
++ * zram features built from this tree (ZRAM-IR immediate recompression / Kcompressd
++ * async writeback) and ends up with slot index mismatch. Reject it at load time.
++ *
++ * Two layers:
++ *   1. exact module name list: covers devices shipping hybridswap as its own module;
++ *   2. image marker scan: a module named "zram" whose image carries the "hybridswap"
++ *      marker (the vendor zram.ko with hybridswap compiled in) is rejected.
++ *      The zram.ko built from this common tree has no such marker.
++ *
++ * NOTE: keep a working zram module available, otherwise the device loses swap.
++ */
++static const char * const oplus_hybridswap_module_list[] = {
++	"oplus_bsp_hybridswap_zram",
++	"oplus_hybridswap_zram",
++	"hybridswap_zram",
++};
++
++static bool oplus_hybridswap_blacklisted(const char *name, const void *data,
++					 unsigned long size)
++{
++	static const char marker[] = "hybridswap";
++	const unsigned char *p = data;
++	const unsigned char *end;
++	size_t mlen = sizeof(marker) - 1;
++	unsigned int i;
++
++	for (i = 0; i < ARRAY_SIZE(oplus_hybridswap_module_list); i++) {
++		if (!strcmp(name, oplus_hybridswap_module_list[i]))
++			return true;
++	}
++
++	/* only the zram image carries hybridswap in the vendor build */
++	if (strcmp(name, "zram") != 0 || !data || size < mlen)
++		return false;
++
++	end = p + size - mlen;
++	while (p <= end) {
++		p = memchr(p, marker[0], end - p + 1);
++		if (!p)
++			break;
++		if (!memcmp(p, marker, mlen))
++			return true;
++		p++;
++	}
++
++	return false;
++}
++
+ static struct module *layout_and_allocate(struct load_info *info, int flags)
+ {
+ 	struct module *mod;
+@@ -3446,5 +3500,15 @@
+ 
++	/*
++	 * Force-disable ColorOS hybridswap: exact module names plus a marker scan of
++	 * the module image (see oplus_hybridswap_blacklisted()).
++	 */
++	if (oplus_hybridswap_blacklisted(info->name, info->hdr, info->len)) {
++		pr_err("Module %s is blacklisted (hybridswap)\n", info->name);
++		err = -EPERM;
++		goto free_copy;
++	}
++
+ 	/* Figure out module layout, and allocate all the memory. */
+ 	mod = layout_and_allocate(info, flags);
+ 	if (IS_ERR(mod)) {
+ 		err = PTR_ERR(mod);

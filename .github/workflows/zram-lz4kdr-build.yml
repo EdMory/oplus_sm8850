@@ -1264,6 +1264,13 @@ jobs:
           sudo rm -rf /opt/ghc &
           sudo rm -rf /opt/hostedtoolcache/CodeQL &
           make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="clang" LD="ld.lld" OBJCOPY="llvm-objcopy" O=out gki_defconfig &&
+          # 本树 zstd 词典接口(zstd_*_cdict/ddict)已被 zram_patch/002-zstd.patch 移除，vendor 自带的
+          # drivers/block/zram/backend_zstd.c 依赖这些接口，故编 zram 模块时必须关掉该后端(仅影响 zram.ko，
+          # 不影响 Image 与其它模块)，否则 zram.ko 永远编不出来。
+          sed -i 's/^CONFIG_ZRAM_BACKEND_ZSTD=y$/# CONFIG_ZRAM_BACKEND_ZSTD is not set/' out/.config &&
+          make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="clang" LD="ld.lld" OBJCOPY="llvm-objcopy" O=out olddefconfig &&
+          { grep -q '^# CONFIG_ZRAM_BACKEND_ZSTD is not set' out/.config && grep -q '^CONFIG_ZRAM_BACKEND_LZ4KDR=y' out/.config && grep -q '^CONFIG_ZRAM_DEF_COMP_LZ4KD=y' out/.config; } || { echo "[cfg] zram 后端关键配置校验失败:"; grep -E '^CONFIG_ZRAM' out/.config | sort; exit 1; } &&
+          echo "[cfg] zram 后端: zstd 已关闭, lz4kd/lz4kdr 已启用" &&
           export CC="$(pwd)/cc-wrapper" && export LD="$(pwd)/ld-wrapper" &&
           make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="$(pwd)/cc-wrapper" LD="$(pwd)/ld-wrapper" OBJCOPY="llvm-objcopy" O=out Image
 
@@ -1282,28 +1289,88 @@ jobs:
             echo "===== [zram] 未直接产出，回退整体 modules(-k) ====="
             make -k -j$(nproc --all) $MAKEARGS modules 2>&1 | tail -60
           fi
+          echo "===== [zram] 编译依赖模块(zsmalloc / lz4kdr / lz4kd / lz4k / lz4 / lzo / 842) ====="
+          for t in mm/zsmalloc.ko lib/lz4kdr/ lib/lz4kd/ lib/lz4k/ lib/lz4/ lib/lzo/ lib/842/; do
+            echo "--- make $t"
+            make -k -j$(nproc --all) $MAKEARGS "$t" 2>&1 | tail -3
+          done
           echo "===== [zram] 搜索到的模块产物 ====="
-          find out -name 'zram*.ko' -o -name 'zsmalloc*.ko' 2>/dev/null | sort
+          find out -name 'zram.ko' -o -name 'zsmalloc*.ko' -o -name 'lz4*.ko' -o -name 'lzo*.ko' -o -name '842*.ko' 2>/dev/null | sort
           ZRAM_KO=$(find out -name 'zram.ko' 2>/dev/null | head -n1)
           if [ -n "$ZRAM_KO" ]; then
             echo "===== [zram] 找到 $ZRAM_KO ====="
             cp -f "$ZRAM_KO" zram_out/zram.ko
             cp -f out/.config zram_out/config.txt
-            cp -f out/vmlinux.symvers zram_out/vmlinux.symvers
+            cp -f out/Module.symvers zram_out/Module.symvers
+            cp -f out/vmlinux.symvers zram_out/vmlinux.symvers 2>/dev/null
             sha256sum zram_out/zram.ko | tee zram_out/zram.ko.sha256
             modinfo zram_out/zram.ko > zram_out/zram.ko.modinfo 2>&1
-            echo "----- vermagic -----"
-            strings zram_out/zram.ko | grep -i 'vermagic=' | head -5
-            echo "----- lz4kdr/lz4kd/zstd 相关字符串 -----"
-            strings zram_out/zram.ko | grep -iE 'lz4kdr|lz4kd' | sort -u | head -20
+            echo "----- vermagic(须与设备当前内核一致) -----"
+            strings zram_out/zram.ko | grep 'vermagic=' | head -3
+            echo "----- 后端/算法相关字符串 -----"
+            strings zram_out/zram.ko | grep -iE 'lz4kdr|lz4kd|zstd' | sort -u | head -25
             echo "----- modinfo -----"
             cat zram_out/zram.ko.modinfo
             echo "----- 未定义符号数 -----"
             llvm-nm -u zram_out/zram.ko 2>/dev/null | wc -l
-            echo "----- 零值 CRC(应为空) -----"
-            llvm-nm zram_out/zram.ko 2>/dev/null | awk '$2=="A" && $1 ~ /^0+$/ {print $3}'
-            echo "----- 导出/关键符号校验 -----"
-            llvm-nm zram_out/zram.ko 2>/dev/null | grep -iE 'zram|lz4kdr' | head -30
+            echo "----- 依赖闭包 + 符号 CRC 校验(对照本轮 out/Module.symvers) -----"
+            python3 - <<'PYZRAM'
+          import os, subprocess, shutil
+          sym2mod, sym2crc = {}, {}
+          for line in open('out/Module.symvers'):
+              p = line.rstrip('\n').split('\t')
+              if len(p) >= 3:
+                  sym2mod[p[1]] = p[2]; sym2crc[p[1]] = p[0]
+          komap = {}
+          for root, _, files in os.walk('out'):
+              for fn in files:
+                  if fn.endswith('.ko'):
+                      komap.setdefault(fn[:-3], os.path.join(root, fn))
+          def nm(p, *a):
+              return subprocess.run(['llvm-nm'] + list(a) + [p], capture_output=True, text=True).stdout
+          def undef(p):
+              return [f[-1] for f in (l.split() for l in nm(p, '-u').splitlines()) if len(f) >= 2]
+          def crcs(p):
+              d = {}
+              for l in nm(p).splitlines():
+                  f = l.split()
+                  if len(f) == 3 and f[2].startswith('__crc_'):
+                      d[f[2][6:]] = int(f[0], 16)
+              return d
+          base = 'zram_out/zram.ko'
+          todo, seen, deps, missing = list(undef(base)), set(), {}, []
+          while todo:
+              s = todo.pop()
+              if s in seen:
+                  continue
+              seen.add(s)
+              m = sym2mod.get(s)
+              if m is None:
+                  missing.append(s)
+              elif m != 'vmlinux':
+                  kp = komap.get(m)
+                  if kp is None:
+                      missing.append('%s(模块 %s 未产出 .ko)' % (s, m))
+                  elif m not in deps:
+                      deps[m] = kp
+                      todo += undef(kp)
+          kb = crcs(base)
+          bad = [s for s in seen if s in sym2crc and int(sym2crc[s], 16) != kb.get(s, 0)]
+          zero = sorted(s for s in seen if kb.get(s, 0) == 0)
+          os.makedirs('zram_out/deps', exist_ok=True)
+          for m, p in sorted(deps.items()):
+              shutil.copy2(p, 'zram_out/deps/' + os.path.basename(p))
+          lines = ['zram.ko: 未定义符号 %d 个, 依赖模块 %d 个' % (len(seen), len(deps))]
+          lines += ['  依赖: %s -> %s' % (m, os.path.basename(p)) for m, p in sorted(deps.items())]
+          lines += ['  无法解析的符号(应为空): %s' % missing]
+          lines += ['  CRC 与 Module.symvers 不一致(应为空): %s' % bad]
+          lines += ['  CRC 缺失/为零(应为空): %s' % zero]
+          report = '\n'.join(lines)
+          print(report)
+          open('zram_out/DEPENDS.txt', 'w').write(report + '\n')
+          PYZRAM
+            echo "----- 关键导出符号 -----"
+            llvm-nm zram_out/zram.ko 2>/dev/null | grep -iE 'lz4kdr|zcomp' | head -20
           else
             echo "===== [zram] 未找到 zram.ko，输出诊断 ====="
             grep -E 'CONFIG_ZRAM|CONFIG_ZSMALLOC|CONFIG_MODULES|CONFIG_LZ4KDR' out/.config | sort | head -40

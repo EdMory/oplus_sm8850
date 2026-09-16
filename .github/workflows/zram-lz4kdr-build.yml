@@ -1283,17 +1283,23 @@ jobs:
           make $MAKEARGS -s kernelrelease
           echo "===== [zram] modules_prepare ====="
           make -j$(nproc --all) $MAKEARGS modules_prepare 2>&1 | tail -5
-          echo "===== [zram] 编译 drivers/block/zram/zram.ko ====="
-          make -j$(nproc --all) $MAKEARGS drivers/block/zram/zram.ko 2>&1 | tail -60
+          # 依赖顺序说明(直接 make zram.ko 必然失败, 两类坑)：
+          #   1) zram.ko 依赖 zsmalloc(=m) 及 lib/lz4kdr 等模块导出的符号(zs_*/lz4kdr_*)，
+          #      只有先把依赖模块编出来，导出符号才会进 out/Module.symvers，modpost 才能解析并算出正确 CRC；
+          #   2) 整体 make modules 的 modpost 会被无关模块(本树 rust_binder.ko 缺 put_ipc_ns/init_ipc_ns)
+          #      一票否决 -> __modpost 不重制 -> 所有 .ko 都不产出；故需 KBUILD_MODPOST_WARN=1 把
+          #      未解析符号降级为告警(scripts/Makefile.modpost 会据此加 -w 并照常写出 Module.symvers)。
+          echo "===== [zram] 阶段1: 先编依赖模块 mm/zsmalloc.ko ====="
+          make -k -j$(nproc --all) $MAKEARGS mm/zsmalloc.ko 2>&1 | tail -5
+          echo "===== [zram] 阶段2: 整体 modules(依赖模块符号入表, 无关模块仅告警) ====="
+          make -k -j$(nproc --all) $MAKEARGS KBUILD_MODPOST_WARN=1 modules 2>&1 | tail -40
+          echo "===== [zram] 阶段3: 编译 drivers/block/zram/zram.ko ====="
+          make -j$(nproc --all) $MAKEARGS KBUILD_MODPOST_WARN=1 drivers/block/zram/zram.ko 2>&1 | tail -40
           if [ ! -f out/drivers/block/zram/zram.ko ]; then
-            echo "===== [zram] 未直接产出，回退整体 modules(-k) ====="
-            make -k -j$(nproc --all) $MAKEARGS modules 2>&1 | tail -60
+            echo "===== [zram] 仍未产出, 回退重试: modules + 单模块 ====="
+            make -k -j$(nproc --all) $MAKEARGS KBUILD_MODPOST_WARN=1 modules 2>&1 | tail -30
+            make -j$(nproc --all) $MAKEARGS KBUILD_MODPOST_WARN=1 drivers/block/zram/zram.ko 2>&1 | tail -30
           fi
-          echo "===== [zram] 编译依赖模块(zsmalloc / lz4kdr / lz4kd / lz4k / lz4 / lzo / 842) ====="
-          for t in mm/zsmalloc.ko lib/lz4kdr/ lib/lz4kd/ lib/lz4k/ lib/lz4/ lib/lzo/ lib/842/; do
-            echo "--- make $t"
-            make -k -j$(nproc --all) $MAKEARGS "$t" 2>&1 | tail -3
-          done
           echo "===== [zram] 搜索到的模块产物 ====="
           find out -name 'zram.ko' -o -name 'zsmalloc*.ko' -o -name 'lz4*.ko' -o -name 'lzo*.ko' -o -name '842*.ko' 2>/dev/null | sort
           ZRAM_KO=$(find out -name 'zram.ko' 2>/dev/null | head -n1)

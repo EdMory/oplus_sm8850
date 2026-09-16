@@ -1,0 +1,24 @@
+diff --git a/lib/Kconfig b/lib/Kconfig
+--- a/lib/Kconfig
++++ b/lib/Kconfig
+@@ -650,6 +650,8 @@
+ 
+ source "lib/fonts/Kconfig"
+ 
++source "lib/intfp/Kconfig"
++
+ config SG_SPLIT
+ 	def_bool n
+ 	help
+diff --git a/lib/Makefile b/lib/Makefile
+--- a/lib/Makefile
++++ b/lib/Makefile
+@@ -366,6 +366,8 @@
+ # pldmfw library
+ obj-$(CONFIG_PLDMFW) += pldmfw/
+ 
++obj-$(CONFIG_INTFP) += intfp/
++
+ # KUnit tests
+ CFLAGS_bitfield_kunit.o := $(DISABLE_STRUCTLEAK_PLUGIN)
+ obj-$(CONFIG_BITFIELD_KUNIT) += bitfield_kunit.o

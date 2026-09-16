@@ -1283,22 +1283,29 @@ jobs:
           make $MAKEARGS -s kernelrelease
           echo "===== [zram] modules_prepare ====="
           make -j$(nproc --all) $MAKEARGS modules_prepare 2>&1 | tail -5
-          # 依赖顺序说明(直接 make zram.ko 必然失败, 两类坑)：
-          #   1) zram.ko 依赖 zsmalloc(=m) 及 lib/lz4kdr 等模块导出的符号(zs_*/lz4kdr_*)，
-          #      只有先把依赖模块编出来，导出符号才会进 out/Module.symvers，modpost 才能解析并算出正确 CRC；
-          #   2) 整体 make modules 的 modpost 会被无关模块(本树 rust_binder.ko 缺 put_ipc_ns/init_ipc_ns)
+          # 依赖顺序与解析机制说明(踩坑后确认, 勿改)：
+          #   1) zram.ko 依赖 zsmalloc(=m)、lib/lz4kdr、lib/lz4kd 等模块导出的符号(zs_*/lz4kdr_*/lz4kd_*)。
+          #      「模块 -> 模块」的符号解析，靠 modpost 读取 out/modules.order 中逐行列出的各模块 .o
+          #      (读其 __ksymtab_/__crc_ 段)来完成；out/Module.symvers 里只有 vmlinux 的导出。
+          #   2) 因此严禁再用 `make drivers/block/zram/zram.ko` 这种单目标编译：
+          #      顶层 Makefile 的 single_modules 会先把 modules.order 覆盖成「只有 zram.o」再跑 modpost
+          #      （$(single-ko): ... echo $(m:%.ko=%.o) > $(MODORDER)），依赖模块的导出全部看不见 ->
+          #      zram.ko 里 zs_*/lz4kd_*/lz4kdr_* 全成未解析符号且 CRC 为 0，加载必失败。单目标编译结束后
+          #      还会 rm -f modules.order。故 zram.ko 只能由整体 `make modules` 真正产出，且此后不可再
+          #      跑任何单目标 %.ko 编译，否则会把好产物重新链接成坏产物。
+          #   3) 整体 make modules 的 modpost 会被无关模块(本树 rust_binder.ko 缺 put_ipc_ns/init_ipc_ns)
           #      一票否决 -> __modpost 不重制 -> 所有 .ko 都不产出；故需 KBUILD_MODPOST_WARN=1 把
           #      未解析符号降级为告警(scripts/Makefile.modpost 会据此加 -w 并照常写出 Module.symvers)。
-          echo "===== [zram] 阶段1: 先编依赖模块 mm/zsmalloc.ko ====="
-          make -k -j$(nproc --all) $MAKEARGS mm/zsmalloc.ko 2>&1 | tail -5
-          echo "===== [zram] 阶段2: 整体 modules(依赖模块符号入表, 无关模块仅告警) ====="
-          make -k -j$(nproc --all) $MAKEARGS KBUILD_MODPOST_WARN=1 modules 2>&1 | tail -40
-          echo "===== [zram] 阶段3: 编译 drivers/block/zram/zram.ko ====="
-          make -j$(nproc --all) $MAKEARGS KBUILD_MODPOST_WARN=1 drivers/block/zram/zram.ko 2>&1 | tail -40
+          echo "===== [zram] 依赖对象与 modules.order 概览 ====="
+          ls -l out/mm/zsmalloc.o out/lib/lz4kdr/lz4kdr_encode.o 2>&1
+          echo "===== [zram] 编译: 整体 make modules(一次到位, 生成含正确符号/CRC 的 zram.ko) ====="
+          make -k -j$(nproc --all) $MAKEARGS KBUILD_MODPOST_WARN=1 modules 2>&1 | tail -45
+          echo "===== [zram] 关键产物检查 ====="
+          ls -l out/drivers/block/zram/zram.ko out/mm/zsmalloc.ko out/lib/lz4kdr/*.ko 2>&1
           if [ ! -f out/drivers/block/zram/zram.ko ]; then
-            echo "===== [zram] 仍未产出, 回退重试: modules + 单模块 ====="
+            echo "===== [zram] 未产出 zram.ko, 重跑整体 modules ====="
             make -k -j$(nproc --all) $MAKEARGS KBUILD_MODPOST_WARN=1 modules 2>&1 | tail -30
-            make -j$(nproc --all) $MAKEARGS KBUILD_MODPOST_WARN=1 drivers/block/zram/zram.ko 2>&1 | tail -30
+            ls -l out/drivers/block/zram/zram.ko 2>&1
           fi
           echo "===== [zram] 搜索到的模块产物 ====="
           find out -name 'zram.ko' -o -name 'zsmalloc*.ko' -o -name 'lz4*.ko' -o -name 'lzo*.ko' -o -name '842*.ko' 2>/dev/null | sort
@@ -1511,5 +1518,6 @@ jobs:
         with:
           path: ${{ github.workspace }}/kernel_workspace/common/zram_out/
           archive: false
+          name: zram-lz4kdr-module
           if-no-files-found: error
 

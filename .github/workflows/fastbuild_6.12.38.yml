@@ -95,8 +95,13 @@ on:
         required: true
         type: boolean
         default: 'true'
-      sbalance_enable:
-        description: '是否集成 SBalance 中断负载均衡器(周期把中断从最繁忙 CPU 迁往最空闲 CPU, 以 CPU 容量对中断数加权, 兼顾大小核/热压差异; 不触碰 KABI 保留区、不新增导出符号)'
+      perf_patch_enable:
+        description: '是否集成性能优化补丁集(TCP 初始窗口锁定 64K、IRQ 默认亲和性收敛到 CPU0、F2FS GC 走 idle I/O 优先级、workqueue flush 减少自旋锁、关闭 debug_locks 全局锁调试开关)'
+        required: true
+        type: boolean
+        default: 'true'
+      o3_enable:
+        description: '是否开启 O3 构建优化'
         required: true
         type: boolean
         default: 'true'
@@ -410,6 +415,51 @@ jobs:
           cd common
           wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/cve-2026-43499-rtmutex-6.12.patch
           patch -p1 -F 3 < cve-2026-43499-rtmutex-6.12.patch
+      - name: 集成 SM8750(6.6.100)移植的性能优化补丁集
+        if: inputs.perf_patch_enable
+        run: |
+          echo "正在集成 SM8750 移植性能优化补丁集…"
+          cd kernel_workspace/common
+          PATCH=sm8750-perf-core-6.12.patch
+          wget -O $PATCH https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/$PATCH \
+            || wget -O $PATCH https://github.com/EdMory/oplus_sm8850/raw/refs/heads/main/other_patch/$PATCH
+          # KMI 保护审计：本补丁只改函数体，禁止新增导出符号、禁止改动 include/ 下的头文件
+          if grep -qE '^\+.*EXPORT_SYMBOL' $PATCH; then
+            echo "错误：$PATCH 新增了 EXPORT_SYMBOL，可能破坏 KMI，已中止"; exit 1
+          fi
+          if grep -qE '^\+\+\+ b/include/' $PATCH; then
+            echo "错误：$PATCH 改动了 include/ 头文件，可能破坏 KMI，已中止"; exit 1
+          fi
+          # 零 fuzz 干跑：任何一个 hunk 无法精确落位就直接失败，避免半成品内核
+          if ! patch -p1 --dry-run -F 0 < $PATCH; then
+            echo "错误：性能优化补丁无法零 fuzz 应用，请确认内核源码未被上游改动（可关闭 perf_patch_enable 后重试）"; exit 1
+          fi
+          patch -p1 -F 0 < $PATCH
+          grep -q 'rcv_wnd = 64240;' net/ipv4/tcp_output.c || { echo "错误：TCP 初始窗口优化未生效"; exit 1; }
+          grep -q 'cpumask_set_cpu(0, irq_default_affinity);' kernel/irq/irqdesc.c || { echo "错误：IRQ 默认亲和性优化未生效"; exit 1; }
+          grep -q 'IOPRIO_PRIO_VALUE(IOPRIO_CLASS_IDLE, 0)' fs/f2fs/gc.c || { echo "错误：F2FS GC I/O 优先级优化未生效"; exit 1; }
+          grep -q 'current_pool = pwq->pool;' kernel/workqueue.c || { echo "错误：workqueue 锁优化未生效"; exit 1; }
+          grep -q 'int debug_locks __read_mostly = 0;' lib/debug_locks.c || { echo "错误：debug_locks 优化未生效"; exit 1; }
+          echo "SM8750 性能优化补丁集应用完成"
+
+      - name: 应用 O3 构建优化
+        if: inputs.o3_enable
+        run: |
+          echo "正在应用 O3 构建优化…"
+          cd kernel_workspace/common
+          PATCH=sm8750-perf-build-6.12.patch
+          wget -O $PATCH https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/$PATCH \
+            || wget -O $PATCH https://github.com/EdMory/oplus_sm8850/raw/refs/heads/main/other_patch/$PATCH
+          # 该补丁只调整编译器优化等级，命中失败时降级为 -O2 继续编译，不影响整体构建
+          if patch -p1 --dry-run -F 0 < $PATCH; then
+            patch -p1 -F 0 < $PATCH
+            grep -q '^KBUILD_CFLAGS += -O3$' Makefile || { echo "错误：-O3 未生效"; exit 1; }
+            grep -q 'cc-option,-frename-registers' arch/arm64/Makefile || { echo "错误：arm64 代码生成优化未生效"; exit 1; }
+            echo "O3 构建优化应用完成"
+          else
+            echo "警告：O3 构建优化补丁未能精确应用，本次跳过 O3，继续以 -O2 编译"
+          fi
+
           
       - name: 启用网络功能增强优化配置
         if: inputs.better_net
@@ -914,124 +964,6 @@ jobs:
           echo "提示: LZ4KDR 与 LZ4KD 同为 zram 可选后端, 运行时通过 /sys/block/zram0/compressor 选择具体算法"
           echo "LZ4KDR 集成完成(零 fuzz 应用 + KABI 面未触碰)！"
 
-      - name: 集成 SBalance 中断负载均衡器(IRQ balancer)
-        if: inputs.sbalance_enable
-        run: |
-          echo "正在集成 SBalance(周期性把中断负载从最繁忙的 CPU 迁移到最空闲的 CPU; 以 CPU 容量对中断数加权, 兼顾大小核容量/热压/RT 时间差异; 不动 KABI 保留区、不新增或改动任何导出符号)…"
-          # 任何命令失败时打印出错行号: 避免 set -e 静默退出后失败点无法定位
-          trap 'echo "SBalance 集成步骤在脚本第 $LINENO 行失败(退出码 $?)" >&2' ERR
-          cd kernel_workspace/common
-
-          # 上游补丁由 epicmann24/android_kernel_common_oneplus_sm8750 的 8 个提交合并而成
-          # (0f1dc83 47b8b8e a41c5dff ed8f192 3dfa052 67b4e78 8243397 80f7508),
-          # 本副本已对 6.12.38 vendor 树逐 hunk 对位: 中断计数读取改用树内 irq_desc_kstat_cpu(),
-          # sbalance.c 显式包含 <linux/cpu.h> / <linux/timer.h>, struct irq_desc 新增的 last_cpu 字段
-          # 用 __GENKSYMS__ 包住(genksyms 解析不到 => 导出符号 CRC 不变, 不破坏 GKI kABI)。
-          # 仅改动 kernel/irq/ 六个文件与 include/linux/irqdesc.h, 不涉及任何导出符号, 故仅从本仓库 other_patch 取用。
-          PATCH_URLS=(
-            "https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/sbalance-6.12.patch"
-          )
-          # 下载器自适应: 优先 curl(对 4xx/5xx 返回非 0, --retry 抗弱网); 无 curl 时回退 wget(只用其自身合法选项)
-          fetch() { # $1=url $2=输出文件 $3=日志文件
-            if command -v curl >/dev/null 2>&1; then
-              curl -fSL --retry 3 --retry-delay 2 --connect-timeout 20 -o "$2" "$1" 2> "$3"
-            else
-              wget -O "$2" --tries=3 --timeout=20 "$1" 2> "$3"
-            fi
-          }
-          rm -f sbalance.patch
-          for u in "${PATCH_URLS[@]}"; do
-            echo "尝试下载 SBalance 补丁: $u"
-            if fetch "$u" sbalance.patch.tmp download_sbalance.log; then
-              if [ -s sbalance.patch.tmp ]; then
-                mv sbalance.patch.tmp sbalance.patch
-                echo "下载成功: $(wc -c < sbalance.patch) 字节"
-                break
-              fi
-              echo "该源返回空文件, 尝试下一个源"
-            else
-              echo "该源不可用: $(tail -n 2 download_sbalance.log | tr '\n' ' ')"
-            fi
-          done
-          rm -f sbalance.patch.tmp download_sbalance.log
-          [ -s sbalance.patch ] || { echo "SBalance 补丁下载失败: 仓库 other_patch/sbalance-6.12.patch 缺失或不可达(见上方诊断)"; exit 1; }
-
-          # 一、前置条件: 适配锚点必须存在(6.12 vendor 树提供 irq_desc_kstat_cpu 与 __irq_can_set_affinity),
-          #     缺失说明树结构不符, 补丁会落错位置, 直接中止。
-          grep -qE 'irq_desc_kstat_cpu' include/linux/irqdesc.h \
-            || { echo "SBalance 前置检查失败: 树内缺少 irq_desc_kstat_cpu(), 中断计数适配点不存在"; exit 1; }
-          grep -qE '^static bool __irq_can_set_affinity\(struct irq_desc \*desc\)' kernel/irq/manage.c \
-            || { echo "SBalance 前置检查失败: kernel/irq/manage.c 中 __irq_can_set_affinity 形态与预期不符(或已集成过)"; exit 1; }
-
-          # 二、ABI 面静态审计:
-          #     1) 触碰 KABI 保留区一律中止;
-          #     2) 补丁不得新增或改动任何导出符号(EXPORT_SYMBOL / EXPORT_SYMBOL_GPL 行);
-          #     3) 白名单(kernel/irq/ 六个文件 + include/linux/irqdesc.h)以外的文件一律中止。
-          if grep -nE 'ANDROID_KABI|__kabi_reserved' sbalance.patch; then
-            echo "SBalance 补丁触碰 KABI 保留区, 已中止"; exit 1
-          fi
-          if grep -nE '^[-+].*EXPORT_SYMBOL' sbalance.patch; then
-            echo "SBalance 补丁改动了导出符号(EXPORT_SYMBOL), 已中止"; exit 1
-          fi
-          # 注意: 白名单全部命中时 grep -vE 无输出返回码为 1, 必须 || true 兜底, 否则 bash -e 下静默退出
-          OUT_OF_SCOPE="$(grep -E '^diff --git ' sbalance.patch | grep -vE ' b/(kernel/irq/(Kconfig|Makefile|internals\.h|irqdesc\.c|manage\.c|sbalance\.c)|include/linux/irqdesc\.h)$' || true)"
-          if [ -n "$OUT_OF_SCOPE" ]; then
-            echo "SBalance 补丁改动了白名单以外的文件, 已中止:"; echo "$OUT_OF_SCOPE"; exit 1
-          fi
-
-          # 三、严格零 fuzz 应用: dry-run 探路, 任何 FAILED / fuzz / 重复应用痕迹立即中止
-          if ! patch -p1 --dry-run < sbalance.patch > /tmp/sbalance_dryrun.log 2>&1; then
-            cat /tmp/sbalance_dryrun.log
-            echo "SBalance 补丁存在无法应用的 hunk, 已中止"; exit 1
-          fi
-          cat /tmp/sbalance_dryrun.log
-          if grep -qE 'with fuzz|FAILED|ignored|Reversed|previously applied' /tmp/sbalance_dryrun.log; then
-            echo "SBalance 补丁与当前内核树不匹配(fuzz / hunk 失败 / 重复应用), 已中止"; exit 1
-          fi
-          if grep -q 'offset' /tmp/sbalance_dryrun.log; then
-            echo "提示: 以下 hunk 存在纯行号偏移(上下文精确匹配, 位置正确, 属其它补丁先行改动所致), 继续应用:"
-            grep 'offset' /tmp/sbalance_dryrun.log
-          fi
-          patch -p1 --no-backup-if-mismatch < sbalance.patch
-
-          # 四、ABI 复核: struct irq_desc 新增的 last_cpu 字段必须完整包在
-          #     #ifdef CONFIG_IRQ_SBALANCE / #ifndef __GENKSYMS__ 内(genksyms 看不到该字段 => 导出符号 CRC 不变)
-          awk '/#ifdef CONFIG_IRQ_SBALANCE/{s=NR} /#ifndef __GENKSYMS__/{g=NR} /unsigned int[[:space:]]+last_cpu;/{l=NR} END{exit (s&&g&&l&&s<g&&g<l)?0:1}' include/linux/irqdesc.h \
-            || { echo "SBalance ABI 校验失败: last_cpu 未被 CONFIG_IRQ_SBALANCE + __GENKSYMS__ 完整包住"; exit 1; }
-
-          # 五、集成结果校验: Kconfig 选项 / Makefile 目标 / 中断计数钩子 / 亲和性接口可见性 / 独立实现必须齐全
-          check() { grep -qF "$2" "$1" || { echo "SBalance 集成校验失败: $1 缺少 '$2'"; exit 1; }; }
-          checkre() { grep -qE "$2" "$1" || { echo "SBalance 集成校验失败(正则): $1 缺少 '$2'"; exit 1; }; }
-          check kernel/irq/Kconfig 'config IRQ_SBALANCE'
-          check kernel/irq/Kconfig 'config IRQ_SBALANCE_POLL_MSEC'
-          check kernel/irq/Kconfig 'config IRQ_SBALANCE_THRESH'
-          check kernel/irq/Kconfig 'config SBALANCE_EXCLUDE_CPUS'
-          check kernel/irq/Makefile 'obj-$(CONFIG_IRQ_SBALANCE) += sbalance.o'
-          check kernel/irq/internals.h 'WRITE_ONCE(desc->last_cpu, raw_smp_processor_id());'
-          check kernel/irq/internals.h 'sbalance_desc_add(struct irq_desc *desc);'
-          check kernel/irq/internals.h 'sbalance_desc_del(struct irq_desc *desc);'
-          check kernel/irq/internals.h 'bool __irq_can_set_affinity(struct irq_desc *desc);'
-          check kernel/irq/irqdesc.c 'sbalance_desc_add(desc);'
-          check kernel/irq/irqdesc.c 'sbalance_desc_del(desc);'
-          checkre kernel/irq/manage.c '^bool __irq_can_set_affinity\(struct irq_desc \*desc\)$'
-          check kernel/irq/sbalance.c '#include <linux/cpu.h>'
-          check kernel/irq/sbalance.c '#include <linux/timer.h>'
-          check kernel/irq/sbalance.c 'irq_desc_kstat_cpu(desc, *cpu)'
-          check kernel/irq/sbalance.c 'late_initcall(sbalance_init);'
-          check include/linux/irqdesc.h '#ifdef CONFIG_IRQ_SBALANCE'
-          checkre include/linux/irqdesc.h 'unsigned int[[:space:]]+last_cpu;'
-          if grep -qE '^static bool __irq_can_set_affinity' kernel/irq/manage.c; then
-            echo "SBalance 集成校验失败: manage.c 中 __irq_can_set_affinity 仍为 static(补丁未真正生效)"; exit 1
-          fi
-
-          # 六、显式写入开关: 均衡线程由 late_initcall 拉起, 轮询间隔/阈值走 Kconfig 默认(3000ms / 1024)
-          grep -q '^CONFIG_IRQ_SBALANCE=' arch/arm64/configs/gki_defconfig \
-            || echo "CONFIG_IRQ_SBALANCE=y" >> arch/arm64/configs/gki_defconfig
-          echo "提示: 轮询间隔与阈值可分别用 CONFIG_IRQ_SBALANCE_POLL_MSEC(默认3000) / CONFIG_IRQ_SBALANCE_THRESH(默认1024) 调整,"
-          echo "      需要排除的 CPU 用 CONFIG_SBALANCE_EXCLUDE_CPUS=\"0,1-2\" 指定(留空即不排除);"
-          echo "      实测可对比 /proc/interrupts 中各 CPU 列的中断增量, 观察重负载中断是否已从最忙 CPU 迁走"
-          echo "SBalance 集成完成(零 fuzz 应用 + KABI 面未触碰)！"
-
       - name: 添加制作名称
         run: |
           cd kernel_workspace
@@ -1357,6 +1289,8 @@ jobs:
           - NoMount(VFS 路径重定向)支持：${{ github.event.inputs.nomount_enable }}
           - LZ4KDR 支持：${{ github.event.inputs.lz4kdr_enable }}（LZ4KD 的高速衍生实现，线格式兼容、重写编码器搜索循环，与 LZ4KD 后端并存）
           - SBalance 中断均衡支持：${{ github.event.inputs.sbalance_enable }}（周期性把中断从最繁忙 CPU 迁往最空闲 CPU，按 CPU 容量对中断数加权，兼顾大小核容量差异，不触碰 kABI）
+          - 性能优化补丁集：${{ github.event.inputs.perf_patch_enable }}（TCP 初始窗口锁定 64K、IRQ 默认亲和性收敛到 CPU0、F2FS GC 走 idle I/O 优先级、workqueue flush 减少自旋锁、关闭 debug_locks 全局锁调试开关；均只改函数体，不触碰 kABI）
+          - O3 构建优化：${{ github.event.inputs.o3_enable }}（内核整体 -O3 + arm64 额外代码生成优化，镜像体积会增大）
           - ReSukiSU管理器下载：[ReSukiSU_CI](https://github.com/cctv18/ReSukiSU_CI/releases)
           
           ### ⏫️ 更新内容：

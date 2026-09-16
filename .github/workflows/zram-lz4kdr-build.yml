@@ -1328,57 +1328,82 @@ jobs:
             llvm-nm -u zram_out/zram.ko 2>/dev/null | wc -l
             echo "----- 依赖闭包 + 符号 CRC 校验(对照本轮 out/Module.symvers) -----"
             python3 - <<'PYZRAM'
-          import os, subprocess, shutil
+          import os, re, struct, subprocess, shutil
+
+          def nm(*a):
+              return subprocess.run(['llvm-nm'] + list(a), capture_output=True, text=True).stdout
+
+          def undef(p):
+              return [l.split()[-1] for l in nm('-u', p).splitlines() if len(l.split()) >= 2]
+
+          def elf_versions(p):
+              # 直接解析 ELF 的 __versions 段: 内核加载模块时按此逐符号比对 CRC
+              # 每项 = unsigned long crc(8B) + char name[MODULE_NAME_LEN=64-8=56B] = 64 字节
+              d = open(p, 'rb').read()
+              shoff, = struct.unpack_from('<Q', d, 0x28)
+              shentsize, shnum, shstrndx = struct.unpack_from('<HHH', d, 0x3a)
+              secs = [struct.unpack_from('<IIQQQQ', d, shoff + i * shentsize) for i in range(shnum)]
+              _, _, stoff, stsize = secs[shstrndx]
+              st = d[stoff:stoff + stsize]
+              def sname(n):
+                  return st[n:st.index(b'\0', n)].decode()
+              res = {}
+              for (n, typ, fl, ad, off, sz) in secs:
+                  if sname(n) == '__versions':
+                      for i in range(sz // 64):
+                          crc, = struct.unpack_from('<Q', d, off + i * 64)
+                          nmb = d[off + i * 64 + 8: off + i * 64 + 64].split(b'\0')[0].decode()
+                          res[nmb] = crc
+              return res
+
           sym2mod, sym2crc = {}, {}
           for line in open('out/Module.symvers'):
               p = line.rstrip('\n').split('\t')
               if len(p) >= 3:
-                  sym2mod[p[1]] = p[2]; sym2crc[p[1]] = p[0]
-          komap = {}
+                  sym2crc[p[1]] = int(p[0], 16)
+                  sym2mod[p[1]] = p[2]
+
+          ko = {}
           for root, _, files in os.walk('out'):
               for fn in files:
                   if fn.endswith('.ko'):
-                      komap.setdefault(fn[:-3], os.path.join(root, fn))
-          def nm(p, *a):
-              return subprocess.run(['llvm-nm'] + list(a) + [p], capture_output=True, text=True).stdout
-          def undef(p):
-              return [f[-1] for f in (l.split() for l in nm(p, '-u').splitlines()) if len(f) >= 2]
-          def crcs(p):
-              d = {}
-              for l in nm(p).splitlines():
-                  f = l.split()
-                  if len(f) == 3 and f[2].startswith('__crc_'):
-                      d[f[2][6:]] = int(f[0], 16)
-              return d
+                      ko.setdefault(fn[:-3], os.path.join(root, fn))
+
           base = 'zram_out/zram.ko'
-          todo, seen, deps, missing = list(undef(base)), set(), {}, []
-          while todo:
-              s = todo.pop()
-              if s in seen:
-                  continue
-              seen.add(s)
-              m = sym2mod.get(s)
-              if m is None:
-                  missing.append(s)
-              elif m != 'vmlinux':
-                  kp = komap.get(m)
-                  if kp is None:
-                      missing.append('%s(模块 %s 未产出 .ko)' % (s, m))
-                  elif m not in deps:
-                      deps[m] = kp
-                      todo += undef(kp)
-          kb = crcs(base)
-          bad = [s for s in seen if s in sym2crc and int(sym2crc[s], 16) != kb.get(s, 0)]
-          zero = sorted(s for s in seen if kb.get(s, 0) == 0)
+          u = undef(base)
+          ver = elf_versions(base)
+          mi = subprocess.run(['modinfo', base], capture_output=True, text=True).stdout
+          depm = re.search(r'^depends:\s*(\S*)$', mi, re.M)
+          deplist = [x for x in (depm.group(1) if depm else '').split(',') if x]
+
+          nosym = sorted(s for s in u if s not in sym2crc)
+          nocrc = sorted(s for s in ver if ver[s] == 0)
+          diff = sorted(s for s in ver if s in sym2crc and sym2crc[s] != ver[s])
+          extra = sorted(s for s in ver if s not in sym2crc)
+          newdrv = sorted(s for s in u if re.match(r'^(zs_|lz4kdr_|lz4kd_|lz4k_)', s))
+
           os.makedirs('zram_out/deps', exist_ok=True)
-          for m, p in sorted(deps.items()):
-              shutil.copy2(p, 'zram_out/deps/' + os.path.basename(p))
-          lines = ['zram.ko: 未定义符号 %d 个, 依赖模块 %d 个' % (len(seen), len(deps))]
-          lines += ['  依赖: %s -> %s' % (m, os.path.basename(p)) for m, p in sorted(deps.items())]
-          lines += ['  无法解析的符号(应为空): %s' % missing]
-          lines += ['  CRC 与 Module.symvers 不一致(应为空): %s' % bad]
-          lines += ['  CRC 缺失/为零(应为空): %s' % zero]
-          report = '\n'.join(lines)
+          depcopied = []
+          for m in deplist:
+              p = ko.get(m)
+              if p:
+                  shutil.copy2(p, 'zram_out/deps/' + os.path.basename(p))
+                  depcopied.append(os.path.basename(p))
+              else:
+                  depcopied.append(m + '(缺失!)')
+
+          L = []
+          L.append('zram.ko 未定义符号 %d 个; 模块依赖 depends=%s' % (len(u), ','.join(deplist) or '无'))
+          L.append('  依赖 .ko 一同打包: %s' % (', '.join(depcopied) or '无'))
+          L.append('  驱动侧模块间符号: %s' % (','.join(newdrv) or '无'))
+          L.append('  out/Module.symvers 中查不到的符号(应为空): %s' % (nosym or '无'))
+          L.append('  __versions 版本项 %d 条; CRC 与 Module.symvers 一致 %d 条' % (len(ver), len(ver) - len(diff) - len(nocrc)))
+          L.append('  CRC 与 Module.symvers 不一致(应为空): %s' % (diff or '无'))
+          L.append('  CRC 为零(应为空): %s' % (nocrc or '无'))
+          L.append('  有版本项但不在符号表(应为空): %s' % (extra or '无'))
+          for s in newdrv:
+              L.append('    %s CRC=0x%08x 提供方=%s' % (s, ver.get(s, 0xffffffff), sym2mod.get(s, '?')))
+          report = '\n'.join(L)
           print(report)
           open('zram_out/DEPENDS.txt', 'w').write(report + '\n')
           PYZRAM
@@ -1517,7 +1542,6 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           path: ${{ github.workspace }}/kernel_workspace/common/zram_out/
-          archive: false
           name: zram-lz4kdr-module
           if-no-files-found: error
 

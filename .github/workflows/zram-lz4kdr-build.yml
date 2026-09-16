@@ -1343,7 +1343,7 @@ jobs:
               shoff, = struct.unpack_from('<Q', d, 0x28)
               shentsize, shnum, shstrndx = struct.unpack_from('<HHH', d, 0x3a)
               secs = [struct.unpack_from('<IIQQQQ', d, shoff + i * shentsize) for i in range(shnum)]
-              _, _, stoff, stsize = secs[shstrndx]
+              stoff, stsize = secs[shstrndx][4], secs[shstrndx][5]
               st = d[stoff:stoff + stsize]
               def sname(n):
                   return st[n:st.index(b'\0', n)].decode()

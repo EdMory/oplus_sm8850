@@ -1,0 +1,34 @@
+--- a/Makefile
++++ b/Makefile
+@@ -839,8 +839,9 @@
+ KBUILD_CFLAGS	+= -fno-delete-null-pointer-checks
+ 
+ ifdef CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE
+-KBUILD_CFLAGS += -O2
+-KBUILD_RUSTFLAGS += -Copt-level=2
++# SM8750: build the whole kernel with -O3 for performance
++KBUILD_CFLAGS += -O3
++KBUILD_RUSTFLAGS += -Copt-level=3
+ else ifdef CONFIG_CC_OPTIMIZE_FOR_SIZE
+ KBUILD_CFLAGS += -Os
+ KBUILD_RUSTFLAGS += -Copt-level=s
+--- a/arch/arm64/Makefile
++++ b/arch/arm64/Makefile
+@@ -117,6 +117,17 @@
+ KBUILD_CFLAGS	+= -Wa,-march=$(asm-arch) \
+ 		   -DARM64_ASM_ARCH='"$(asm-arch)"'
+ endif
++
++# SM8750: extra code generation optimisations.  Every flag is probed
++# with cc-option, so compilers that do not support it simply skip it.
++KBUILD_CFLAGS	+= $(call cc-option,-frename-registers)
++KBUILD_CFLAGS	+= $(call cc-option,-fgcse-after-reload)
++KBUILD_CFLAGS	+= $(call cc-option,-fschedule-insns2)
++KBUILD_CFLAGS	+= $(call cc-option,-fpeel-loops)
++KBUILD_CFLAGS	+= $(call cc-option,-fprefetch-loop-arrays)
++KBUILD_CFLAGS	+= $(call cc-option,-floop-unroll-and-jam)
++KBUILD_CFLAGS	+= $(call cc-option,-fno-semantic-interposition)
++KBUILD_CFLAGS	+= $(call cc-option,-fno-math-errno)
+ 
+ ifeq ($(CONFIG_SHADOW_CALL_STACK), y)
+ KBUILD_CFLAGS	+= -ffixed-x18

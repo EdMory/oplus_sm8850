@@ -1,0 +1,104 @@
+--- a/net/ipv4/tcp_output.c
++++ b/net/ipv4/tcp_output.c
+@@ -247,6 +247,9 @@
+ 		*rcv_wscale = clamp_t(int, ilog2(space) - 15,
+ 				      0, TCP_MAX_WSCALE);
+ 	}
++	/* Lock the initial TCP window size to 64K */
++	*rcv_wnd = 64240;
++
+ 	/* Set the clamp no higher than max representable value */
+ 	WRITE_ONCE(*__window_clamp,
+ 		   min_t(__u32, U16_MAX << (*rcv_wscale), window_clamp));
+--- a/kernel/irq/irqdesc.c
++++ b/kernel/irq/irqdesc.c
+@@ -42,7 +42,7 @@
+ 	if (!cpumask_available(irq_default_affinity))
+ 		zalloc_cpumask_var(&irq_default_affinity, GFP_NOWAIT);
+ 	if (cpumask_empty(irq_default_affinity))
+-		cpumask_setall(irq_default_affinity);
++		cpumask_set_cpu(0, irq_default_affinity);
+ }
+ #else
+ static void __init init_irq_default_affinity(void)
+--- a/fs/f2fs/gc.c
++++ b/fs/f2fs/gc.c
+@@ -12,6 +12,7 @@
+ #include <linux/kthread.h>
+ #include <linux/delay.h>
+ #include <linux/freezer.h>
++#include <linux/ioprio.h>
+ #include <linux/sched/signal.h>
+ #include <linux/random.h>
+ #include <linux/sched/mm.h>
+@@ -226,6 +227,12 @@
+ 		sbi->gc_thread = NULL;
+ 		return err;
+ 	}
++
++	/* Run GC I/O in the idle class so that background GC never
++	 * delays foreground user I/O.
++	 */
++	set_task_ioprio(gc_th->f2fs_gc_task,
++			IOPRIO_PRIO_VALUE(IOPRIO_CLASS_IDLE, 0));
+ 
+ 	return 0;
+ }
+--- a/kernel/workqueue.c
++++ b/kernel/workqueue.c
+@@ -3846,16 +3846,28 @@
+ {
+ 	bool wait = false;
+ 	struct pool_workqueue *pwq;
++	struct worker_pool *current_pool = NULL;
+ 
+ 	if (flush_color >= 0) {
+ 		WARN_ON_ONCE(atomic_read(&wq->nr_pwqs_to_flush));
+ 		atomic_set(&wq->nr_pwqs_to_flush, 1);
+ 	}
+ 
++	/*
++	 * For unbound workqueue, pwqs will map to only a few pools.
++	 * Most of the time, pwqs within the same pool will be linked
++	 * sequentially to wq->pwqs by cpu index. So in the majority
++	 * of pwq iters, the pool is the same, only doing lock/unlock
++	 * if the pool has changed. This can largely reduce expensive
++	 * lock operations.
++	 */
+ 	for_each_pwq(pwq, wq) {
+-		struct worker_pool *pool = pwq->pool;
+-
+-		raw_spin_lock_irq(&pool->lock);
++		if (current_pool != pwq->pool) {
++			if (likely(current_pool))
++				raw_spin_unlock_irq(&current_pool->lock);
++			current_pool = pwq->pool;
++			raw_spin_lock_irq(&current_pool->lock);
++		}
+ 
+ 		if (flush_color >= 0) {
+ 			WARN_ON_ONCE(pwq->flush_color != -1);
+@@ -3872,8 +3884,10 @@
+ 			pwq->work_color = work_color;
+ 		}
+ 
+-		raw_spin_unlock_irq(&pool->lock);
+-	}
++	}
++
++	if (current_pool)
++		raw_spin_unlock_irq(&current_pool->lock);
+ 
+ 	if (flush_color >= 0 && atomic_dec_and_test(&wq->nr_pwqs_to_flush))
+ 		complete(&wq->first_flusher->done);
+--- a/lib/debug_locks.c
++++ b/lib/debug_locks.c
+@@ -22,7 +22,7 @@
+  * that would just muddy the log. So we report the first one and
+  * shut up after that.
+  */
+-int debug_locks __read_mostly = 1;
++int debug_locks __read_mostly = 0;
+ EXPORT_SYMBOL_GPL(debug_locks);
+ 
+ /*

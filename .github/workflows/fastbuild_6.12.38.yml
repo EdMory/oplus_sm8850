@@ -1067,7 +1067,7 @@ jobs:
           # 四、名称冲突检查(应用前): intfp 的公共类型/宏名不得与本树既有代码重名, 命中即中止,
           #     避免内核编译期出现重复定义; 限定 include/ 与 lib/ 两处, 秒级完成。
           for sym in u32fp_radix u32fp_radix_type U32FP_RADIX_TYPE_COUNT INTFP_DECL_BITS intfp_fls32; do
-            hit="$(grep -rlE --include='.h' --include='.c' "\b${sym}\b" include lib 2>/dev/null | head -n 3 || true)"
+            hit="$(grep -rlE --include='*.h' --include='*.c' "\b${sym}\b" include lib 2>/dev/null | head -n 3 || true)"
             if [ -n "$hit" ]; then
               echo "intfp 名称冲突: ${sym} 已存在于以下文件, 已中止:"; echo "$hit"; exit 1
             fi
@@ -1109,14 +1109,14 @@ jobs:
           check lib/Makefile 'obj-$(CONFIG_INTFP) += intfp/'
 
           # 八、宿主机数值自检: 内核无法在 CI 上启动, 故用 runner 的 gcc 直接跑移植头文件的数值用例;
-          #     stub 只提供 u8..s64/bool 等基础类型, 置于 -I 首位优先命中, 内核头仅用于取 。
+          #     stub 只提供 u8..s64/bool 等基础类型, 置于 -I 首位优先命中, 内核头仅用于取 <linux/intfp.h>。
           mkdir -p /tmp/intfp_host/linux
           cat > /tmp/intfp_host/linux/types.h <<'EOF_TYPES'
           #ifndef _INTFP_HOST_STUB_TYPES_H
           #define _INTFP_HOST_STUB_TYPES_H
-          / host stand-in for , used only by the intfp offline numeric self test /
-          #include 
-          #include 
+          /* host stand-in for <linux/types.h>, used only by the intfp offline numeric self test */
+          #include <stdbool.h>
+          #include <stddef.h>
           typedef unsigned char u8;
           typedef unsigned short u16;
           typedef unsigned int u32;
@@ -1125,7 +1125,7 @@ jobs:
           typedef short s16;
           typedef int s32;
           typedef long long s64;
-          #endif / _INTFP_HOST_STUB_TYPES_H /
+          #endif /* _INTFP_HOST_STUB_TYPES_H */
           EOF_TYPES
           gcc -std=gnu11 -O2 -Wall -Wextra -I/tmp/intfp_host -Iinclude \
             -o /tmp/intfp_host/intfp_selftest lib/intfp/intfp_selftest_host.c
@@ -1135,7 +1135,7 @@ jobs:
           #     KUnit 用例保持关闭(依赖 CONFIG_KUNIT, 生产内核无必要)
           grep -q '^CONFIG_INTFP=' arch/arm64/configs/gki_defconfig \
             || echo "CONFIG_INTFP=y" >> arch/arm64/configs/gki_defconfig
-          echo "提示: 内核代码 include  即可按需使用; 启动后可用 dmesg | grep intfp 查看内置自检结果"
+          echo "提示: 内核代码 include <linux/intfp.h> 即可按需使用; 启动后可用 dmesg | grep intfp 查看内置自检结果"
           echo "intfp 集成完成(零 fuzz 应用 + 零导出符号 + KABI 面未触碰)！"
 
       - name: 添加制作名称

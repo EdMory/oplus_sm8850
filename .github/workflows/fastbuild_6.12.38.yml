@@ -922,12 +922,12 @@ jobs:
             echo "LZ4KDR 补丁触碰 KABI 保留区, 已中止"; exit 1
           fi
           BAD_SYMS="$(grep -oE 'EXPORT_SYMBOL(_GPL)?\([A-Za-z_][A-Za-z0-9_]*\);' lz4kdr.patch \
-            | sed -E 's/.\(([A-Za-z_][A-Za-z0-9_])\);/\1/' | sort -u | grep -vE '^lz4kdr_' || true)"
+            | sed -E 's/.*\(([A-Za-z_][A-Za-z0-9_]*)\);/\1/' | sort -u | grep -vE '^lz4kdr_' || true)"
           if [ -n "$BAD_SYMS" ]; then
             echo "LZ4KDR 补丁导出了非 lz4kdr_* 前缀的符号, 已中止:"; echo "$BAD_SYMS"; exit 1
           fi
-          for s in $(grep -oE 'EXPORT_SYMBOL(_GPL)?\(lz4kdr_[A-Za-z0-9_]\);' lz4kdr.patch | sed -E 's/.\(([A-Za-z0-9_]+)\);/\1/' | sort -u); do
-            if grep -rqE "EXPORT_SYMBOL(_GPL)?\(\s$s\s\)" --include='*.c' . 2>/dev/null; then
+          for s in $(grep -oE 'EXPORT_SYMBOL(_GPL)?\(lz4kdr_[A-Za-z0-9_]*\);' lz4kdr.patch | sed -E 's/.*\(([A-Za-z0-9_]+)\);/\1/' | sort -u); do
+            if grep -rqE "EXPORT_SYMBOL(_GPL)?\(\s*$s\s*\)" --include='*.c' . 2>/dev/null; then
               echo "LZ4KDR 符号冲突: $s 在树中已存在同名导出, 已中止"; exit 1
             fi
           done

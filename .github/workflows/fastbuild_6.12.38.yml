@@ -101,7 +101,7 @@ on:
         type: boolean
         default: 'true'
       perf_patch_enable:
-        description: '是否集成 SM8750(6.6.100)移植的 12 项性能优化补丁集(EAS O1 感知、overutilized 判定优化、SMT 全闲核心唤醒、SLAB 硬件缓存对齐、int_sqrt Oryon 查表、F2FS ATGC/GC_MERGE 默认开启、memchr/memchr_inv 向量化、xxhash 内联、loop 高优先级工作队列、vmstat 刷新间隔调整、zstd L1D 压缩参数优化)'
+        description: '是否集成 SM8750(6.6.100)移植的 12 项性能优化补丁集(EAS O1 感知、overutilized 判定优化、SMT 全闲核心唤醒、SLAB 硬件缓存对齐、int_sqrt Oryon 查表、F2FS ATGC/GC_MERGE 默认开启、memchr/memchr_inv 向量化、xxhash 内联、loop 高优先级工作队列)'
         required: true
         type: boolean
         default: 'true'
@@ -453,34 +453,6 @@ jobs:
           grep -q 'WQ_UNBOUND | WQ_FREEZABLE | WQ_HIGHPRI' drivers/block/loop.c || { echo "错误：loop 高优先级工作队列未生效"; exit 1; }
           grep -q 'int sysctl_stat_interval __read_mostly = 5 * HZ;' mm/vmstat.c || { echo "错误：vmstat 刷新间隔优化未生效"; }
           echo "SM8750 性能优化补丁集应用完成"
-
-      - name: 应用 zstd L1D 缓存压缩参数优化补丁
-        if: inputs.perf_patch_enable
-        run: |
-          echo "正在应用 zstd L1D 缓存压缩参数优化补丁…"
-          cd kernel_workspace/common
-          # 该补丁基于 6.12.38 自带 zstd_compress.c 重基；若 002-zstd(1.5.7) 补丁已将其改写则自动跳过
-          if grep -q '#include "../common/bits.h"' lib/zstd/compress/zstd_compress.c; then
-            echo "检测到 zstd_compress.c 已被 002-zstd(1.5.7) 补丁改写，跳过 zstd L1D 优化（压缩参数已由上游 1.5.7 调整）"
-          else
-            PATCH=sm8750-perf-zstd-l1d-6.12.patch
-            wget -O $PATCH https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/$PATCH \
-              || wget -O $PATCH https://github.com/EdMory/oplus_sm8850/raw/refs/heads/main/other_patch/$PATCH
-            # KMI 保护审计
-            if grep -qE '^\+.*EXPORT_SYMBOL' $PATCH; then
-              echo "错误：$PATCH 新增了 EXPORT_SYMBOL，可能破坏 KMI，已中止"; exit 1
-            fi
-            if grep -qE '^\+\+\+ b/include/' $PATCH; then
-              echo "错误：$PATCH 改动了 include/ 头文件，可能破坏 KMI，已中止"; exit 1
-            fi
-            # 零 fuzz 干跑 + 应用
-            if ! patch -p1 --dry-run -F 0 < $PATCH; then
-              echo "错误：zstd L1D 优化补丁无法零 fuzz 应用（若开启了 lz4_enable 且 002-zstd 补丁部分改写 zstd_compress.c，请关闭 lz4_enable 后重试）"; exit 1
-            fi
-            patch -p1 -F 0 < $PATCH
-            grep -q 'DSLAB_L1DCACHE_LOG' lib/zstd/compress/zstd_compress.c || { echo "错误：zstd L1D 优化未生效"; exit 1; }
-            echo "zstd L1D 缓存压缩参数优化应用完成"
-          fi
 
       - name: 应用 O3 构建优化
         if: inputs.o3_enable

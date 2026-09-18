@@ -648,7 +648,7 @@ jobs:
           # 五、集成结果校验: 算法名/注册标志/关键实现/两个集成点必须齐全
           check() { grep -qF "$2" "$1" || { echo "BBRv3 集成校验失败: $1 缺少 '$2'"; exit 1; }; }
           checkre() { grep -qE "$2" "$1" || { echo "BBRv3 集成校验失败(正则): $1 缺少 '$2'"; exit 1; }; }
-          checkre net/ipv4/tcp_bbr3.c '\.name[[:space:]]=[[:space:]]"bbr3",'
+          checkre net/ipv4/tcp_bbr3.c '\.name[[:space:]]*=[[:space:]]*"bbr3",'
           checkre net/ipv4/tcp_bbr3.c 'tcp_register_congestion_control'
           check net/ipv4/tcp_bbr3.c 'bbr_register'
           check net/ipv4/tcp_bbr3_compat.h 'TCP_CONGESTION_OPS_CONG_CONTROL_HAS_4_ARGS'

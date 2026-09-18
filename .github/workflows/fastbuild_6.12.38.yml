@@ -420,10 +420,10 @@ jobs:
           cd common
           wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/cve-2026-43499-rtmutex-6.12.patch
           patch -p1 -F 3 < cve-2026-43499-rtmutex-6.12.patch
-      - name: 集成 SM8750(6.6.100)移植的性能优化补丁集
+      - name: 集成性能优化补丁集
         if: inputs.perf_patch_enable
         run: |
-          echo "正在集成 SM8750 移植性能优化补丁集…"
+          echo "正在集成性能优化补丁集…"
           cd kernel_workspace/common
           PATCH=sm8750-perf-core-6.12.patch
           wget -O $PATCH https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/$PATCH \
@@ -440,11 +440,17 @@ jobs:
             echo "错误：性能优化补丁无法零 fuzz 应用，请确认内核源码未被上游改动（可关闭 perf_patch_enable 后重试）"; exit 1
           fi
           patch -p1 -F 0 < $PATCH
-          grep -q 'rcv_wnd = 64240;' net/ipv4/tcp_output.c || { echo "错误：TCP 初始窗口优化未生效"; exit 1; }
-          grep -q 'cpumask_set_cpu(0, irq_default_affinity);' kernel/irq/irqdesc.c || { echo "错误：IRQ 默认亲和性优化未生效"; exit 1; }
-          grep -q 'IOPRIO_PRIO_VALUE(IOPRIO_CLASS_IDLE, 0)' fs/f2fs/gc.c || { echo "错误：F2FS GC I/O 优先级优化未生效"; exit 1; }
-          grep -q 'current_pool = pwq->pool;' kernel/workqueue.c || { echo "错误：workqueue 锁优化未生效"; exit 1; }
-          grep -q 'int debug_locks __read_mostly = 0;' lib/debug_locks.c || { echo "错误：debug_locks 优化未生效"; exit 1; }
+          # 逐项验证各优化已生效（标记均为补丁独有、vendor 源码中不存在）
+          grep -q 'unsigned long pd_max_util;' kernel/sched/fair.c || { echo "错误：EAS O1 感知优化未生效"; exit 1; }
+          grep -q 'int threshold = env->sd->span_weight >> 1;' kernel/sched/fair.c || { echo "错误：overutilized 判定优化未生效"; exit 1; }
+          grep -q 'static inline bool is_idle_cpu(int cpu)' kernel/sched/fair.c || { echo "错误：SMT 全闲核心唤醒优化未生效"; exit 1; }
+          grep -q 'flags |= SLAB_HWCACHE_ALIGN;' mm/slab_common.c || { echo "错误：SLAB 硬件缓存对齐优化未生效"; exit 1; }
+          grep -q 'int_sqrt16_delta_lut' lib/math/int_sqrt.c || { echo "错误：int_sqrt Oryon 查表优化未生效"; exit 1; }
+          grep -qPzo '\tset_opt\(sbi, ATGC\);\n\tset_opt\(sbi, GC_MERGE\);\n\tset_opt\(sbi, INLINE_XATTR\);' fs/f2fs/super.c || { echo "错误：F2FS ATGC/GC_MERGE 默认开启未生效"; exit 1; }
+          grep -q 'MEMCHR_MASK_GEN(mask)' lib/string.c || { echo "错误：memchr_inv 向量化优化未生效"; exit 1; }
+          grep -q 'p <= end - 8' lib/string.c || { echo "错误：memchr 向量化优化未生效"; exit 1; }
+          grep -q 'static inline uint64_t xxh64_round' lib/xxhash.c || { echo "错误：xxhash 内联优化未生效"; exit 1; }
+          grep -q 'WQ_UNBOUND | WQ_FREEZABLE | WQ_HIGHPRI' drivers/block/loop.c || { echo "错误：loop 高优先级工作队列未生效"; exit 1; }
           echo "SM8750 性能优化补丁集应用完成"
 
       - name: 应用 O3 构建优化
@@ -1130,39 +1136,6 @@ jobs:
             || echo "CONFIG_INTFP=y" >> arch/arm64/configs/gki_defconfig
           echo "提示: 内核代码 include <linux/intfp.h> 即可按需使用; 启动后可用 dmesg | grep intfp 查看内置自检结果"
           echo "intfp 集成完成(零 fuzz 应用 + 零导出符号 + KABI 面未触碰)！"
-
-      - name: 集成性能优化补丁集
-        if: inputs.perf_patch_enable
-        run: |
-          echo "正在集成性能优化补丁集…"
-          cd kernel_workspace/common
-          PATCH=sm8750-perf-core-6.12.patch
-          wget -O $PATCH https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/$PATCH \
-            || wget -O $PATCH https://github.com/EdMory/oplus_sm8850/raw/refs/heads/main/other_patch/$PATCH
-          # KMI 保护审计：本补丁只改函数体，禁止新增导出符号、禁止改动 include/ 下的头文件
-          if grep -qE '^\+.*EXPORT_SYMBOL' $PATCH; then
-            echo "错误：$PATCH 新增了 EXPORT_SYMBOL，可能破坏 KMI，已中止"; exit 1
-          fi
-          if grep -qE '^\+\+\+ b/include/' $PATCH; then
-            echo "错误：$PATCH 改动了 include/ 头文件，可能破坏 KMI，已中止"; exit 1
-          fi
-          # 零 fuzz 干跑：任何一个 hunk 无法精确落位就直接失败，避免半成品内核
-          if ! patch -p1 --dry-run -F 0 < $PATCH; then
-            echo "错误：性能优化补丁无法零 fuzz 应用，请确认内核源码未被上游改动（可关闭 perf_patch_enable 后重试）"; exit 1
-          fi
-          patch -p1 -F 0 < $PATCH
-          # 逐项验证各优化已生效（标记均为补丁独有、vendor 源码中不存在）
-          grep -q 'unsigned long pd_max_util;' kernel/sched/fair.c || { echo "错误：EAS O1 感知优化未生效"; exit 1; }
-          grep -q 'int threshold = env->sd->span_weight >> 1;' kernel/sched/fair.c || { echo "错误：overutilized 判定优化未生效"; exit 1; }
-          grep -q 'static inline bool is_idle_cpu(int cpu)' kernel/sched/fair.c || { echo "错误：SMT 全闲核心唤醒优化未生效"; exit 1; }
-          grep -q 'flags |= SLAB_HWCACHE_ALIGN;' mm/slab_common.c || { echo "错误：SLAB 硬件缓存对齐优化未生效"; exit 1; }
-          grep -q 'int_sqrt16_delta_lut' lib/math/int_sqrt.c || { echo "错误：int_sqrt Oryon 查表优化未生效"; exit 1; }
-          grep -qPzo '\tset_opt\(sbi, ATGC\);\n\tset_opt\(sbi, GC_MERGE\);\n\tset_opt\(sbi, INLINE_XATTR\);' fs/f2fs/super.c || { echo "错误：F2FS ATGC/GC_MERGE 默认开启未生效"; exit 1; }
-          grep -q 'MEMCHR_MASK_GEN(mask)' lib/string.c || { echo "错误：memchr_inv 向量化优化未生效"; exit 1; }
-          grep -q 'p <= end - 8' lib/string.c || { echo "错误：memchr 向量化优化未生效"; exit 1; }
-          grep -q 'static inline uint64_t xxh64_round' lib/xxhash.c || { echo "错误：xxhash 内联优化未生效"; exit 1; }
-          grep -q 'WQ_UNBOUND | WQ_FREEZABLE | WQ_HIGHPRI' drivers/block/loop.c || { echo "错误：loop 高优先级工作队列未生效"; exit 1; }
-          echo "SM8750 性能优化补丁集应用完成"
 
       - name: 添加制作名称
         run: |

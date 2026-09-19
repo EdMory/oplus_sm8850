@@ -466,53 +466,6 @@ jobs:
             echo "警告：O3 构建优化补丁未能精确应用，本次跳过 O3，继续以 -O2 编译"
           fi
 
-          
-      - name: 集成 SM8750(6.6.100)提交移植补丁集
-        run: |
-          echo "正在集成 SM8750 6.6.100 提交移植补丁集…"
-          cd kernel_workspace/common
-          for PATCH in \
-            001-c00f8958-zram-default-lz4-16gb.patch \
-            002-9d4d2790-lib-memset.patch \
-            003-75827fe0-sched-cache-hot-buddy.patch \
-            004-ab3c4aa9-f2fs-gc-urgent-sleep.patch \
-            005-c4dc404f-makefile-thinlto.patch \
-            006-ce84b770-lib-int-sqrt-3x.patch \
-            007-79d891be-proc-maps-buffer-write.patch \
-            008-38ae34ca-fs-cache-pressure-50.patch \
-            009-aa81a5b9-lib-memmove.patch \
-            010-1c59f443-lib-memcpy-word-copy.patch \
-            011-fe339f78-fs-file-align.patch \
-            012-ba22069d-arm64-memcmp-neon.patch \
-            013-daeb7ac8-f2fs-io-timeout-6ms.patch \
-            014-87e7e153-f2fs-atgc-gc-merge.patch \
-            015-fcc50fd8-f2fs-gc-idle-sched.patch \
-            016-ffd624db-lib-int-sqrt-oryon.patch \
-            017-6c518085-lib-memchr.patch \
-            018-b194b6d2-lib-memchr-inv.patch
-          do
-            wget -O $PATCH https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/$PATCH \
-              || { echo "错误：$PATCH 下载失败，请确认仓库 other_patch/ 下已上传该补丁"; exit 1; }
-            # 禁止新增导出符号，避免破坏 KMI
-            if grep -qE '^\+.*EXPORT_SYMBOL' $PATCH; then
-              echo "错误：$PATCH 新增了 EXPORT_SYMBOL，可能破坏 KMI，已中止"; exit 1
-            fi
-            # 零 fuzz 干跑：任何一个 hunk 无法精确落位就直接失败，避免半成品内核
-            if ! patch -p1 --dry-run -F 0 < $PATCH; then
-              echo "错误：$PATCH 无法零 fuzz 应用，请确认内核源码 6.12.38 未被上游改动"; exit 1
-            fi
-            patch -p1 -F 0 < $PATCH
-            echo "$PATCH 应用成功"
-          done
-          # 关键改动落位校验
-          grep -q 'default ZRAM_DEF_COMP_LZ4' drivers/block/zram/Kconfig || { echo "错误：zram 默认压缩器 LZ4 未生效"; exit 1; }
-          grep -q 'SCHED_FEAT(CACHE_HOT_BUDDY, false)' kernel/sched/features.h || { echo "错误：CACHE_HOT_BUDDY 关闭未生效"; exit 1; }
-          grep -q 'DEFAULT_IO_TIMEOUT' fs/f2fs/f2fs.h || { echo "错误：f2fs IO 超时优化未生效"; exit 1; }
-          grep -q 'sched_setscheduler' fs/f2fs/gc.c || { echo "错误：F2FS GC 空闲调度未生效"; exit 1; }
-          grep -q 'hex_asc' fs/proc/task_mmu.c || { echo "错误：/proc/pid/maps 输出优化未生效"; exit 1; }
-          grep -q 'int_sqrt_oryon64' lib/math/int_sqrt.c || { echo "错误：Oryon 整数平方根优化未生效"; exit 1; }
-          echo "SM8750 6.6.100 提交移植补丁集应用完成"
-
       - name: 启用网络功能增强优化配置
         if: inputs.better_net
         run: |

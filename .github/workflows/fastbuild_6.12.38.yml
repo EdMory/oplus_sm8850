@@ -469,13 +469,13 @@ jobs:
           if [[ "${{ github.event.inputs.lz4kd_enable }}" == "true" ]]; then
             echo "检测到 lz4kd 已启用，剔除 port 补丁中的 zram Kconfig 默认压缩算法段（由 lz4kd 接管）…"
             python3 - "$PATCH" <<'PYEOF'
-import sys
-p = sys.argv[1]
-s = open(p, encoding='utf-8').read()
-start = s.index('diff --git a/drivers/block/zram/Kconfig')
-end = s.index('diff --git a/drivers/block/zram/zram_drv.c')
-open(p, 'w', encoding='utf-8').write(s[:start] + s[end:])
-PYEOF
+            import sys
+            p = sys.argv[1]
+            s = open(p, encoding='utf-8').read()
+            start = s.index('diff --git a/drivers/block/zram/Kconfig')
+            end = s.index('diff --git a/drivers/block/zram/zram_drv.c')
+            open(p, 'w', encoding='utf-8').write(s[:start] + s[end:])
+            PYEOF
           fi
           # 零 fuzz 干跑：任何一个 hunk 无法精确落位就直接失败，避免半成品内核
           if ! patch -p1 --dry-run -F 0 < $PATCH; then

@@ -464,19 +464,6 @@ jobs:
           if grep -qE '^\+.*EXPORT_SYMBOL' $PATCH; then
             echo "错误：$PATCH 新增了 EXPORT_SYMBOL，可能破坏 KMI，已中止"; exit 1
           fi
-          # lz4kd 已启用时，zram Kconfig 默认压缩算法已被 lz4kd.patch 改为 LZ4KD，
-          # port 补丁中针对原 LZORLE 默认值的 Kconfig hunk 必然无法零 fuzz 落位，动态剔除该段
-          if [[ "${{ github.event.inputs.lz4kd_enable }}" == "true" ]]; then
-            echo "检测到 lz4kd 已启用，剔除 port 补丁中的 zram Kconfig 默认压缩算法段（由 lz4kd 接管）…"
-            python3 - "$PATCH" <<'PYEOF'
-            import sys
-            p = sys.argv[1]
-            s = open(p, encoding='utf-8').read()
-            start = s.index('diff --git a/drivers/block/zram/Kconfig')
-            end = s.index('diff --git a/drivers/block/zram/zram_drv.c')
-            open(p, 'w', encoding='utf-8').write(s[:start] + s[end:])
-            PYEOF
-          fi
           # 零 fuzz 干跑：任何一个 hunk 无法精确落位就直接失败，避免半成品内核
           if ! patch -p1 --dry-run -F 0 < $PATCH; then
             echo "错误：移植补丁集无法零 fuzz 应用，请确认内核源码未被上游改动（可关闭 port_patch_enable 后重试）"; exit 1

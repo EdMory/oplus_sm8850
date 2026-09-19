@@ -101,12 +101,12 @@ on:
         type: boolean
         default: 'true'
       perf_patch_enable:
-        description: '是否集成性能优化补丁集(TCP 初始窗口锁定 64K、IRQ 默认亲和性收敛到 CPU0、F2FS GC 走 idle I/O 优先级、workqueue flush 减少自旋锁、关闭 debug_locks 全局锁调试开关)'
+        description: '是否集成性能优化补丁集(TCP 初始窗口锁定 64K、IRQ 默认亲和性收敛到 CPU0、workqueue flush 减少自旋锁、关闭 debug_locks 全局锁调试开关; F2FS GC idle 优化已随移植补丁集)'
         required: true
         type: boolean
         default: 'true'
       port_patch_enable:
-        description: '是否集成 SM8750(6.6.100) 移植补丁集(zram 默认 LZ4 压缩与 16G 容量、erofs NEON LZ4 解压、F2FS GC SCHED_IDLE 调度、int_sqrt Oryon 混合实现、dcache/task_mmu/string 系列优化、struct file 8 字节对齐)'
+        description: '是否集成 SM8750(6.6.100) 移植补丁集(zram 默认 LZ4 压缩与 16G 容量、erofs NEON LZ4 解压、F2FS GC SCHED_IDLE 调度与 idle I/O 优先级、int_sqrt Oryon 混合实现、dcache/task_mmu/string 系列优化)'
         required: true
         type: boolean
         default: 'true'
@@ -448,7 +448,6 @@ jobs:
           patch -p1 -F 0 < $PATCH
           grep -q 'rcv_wnd = 64240;' net/ipv4/tcp_output.c || { echo "错误：TCP 初始窗口优化未生效"; }
           grep -q 'cpumask_set_cpu(0, irq_default_affinity);' kernel/irq/irqdesc.c || { echo "错误：IRQ 默认亲和性优化未生效"; exit 1; }
-          grep -q 'IOPRIO_PRIO_VALUE(IOPRIO_CLASS_IDLE, 0)' fs/f2fs/gc.c || { echo "错误：F2FS GC I/O 优先级优化未生效"; exit 1; }
           grep -q 'current_pool = pwq->pool;' kernel/workqueue.c || { echo "错误：workqueue 锁优化未生效"; exit 1; }
           grep -q 'int debug_locks __read_mostly = 0;' lib/debug_locks.c || { echo "错误：debug_locks 优化未生效"; exit 1; }
           echo "SM8750 性能优化补丁集应用完成"
@@ -465,6 +464,19 @@ jobs:
           if grep -qE '^\+.*EXPORT_SYMBOL' $PATCH; then
             echo "错误：$PATCH 新增了 EXPORT_SYMBOL，可能破坏 KMI，已中止"; exit 1
           fi
+          # lz4kd 已启用时，zram Kconfig 默认压缩算法已被 lz4kd.patch 改为 LZ4KD，
+          # port 补丁中针对原 LZORLE 默认值的 Kconfig hunk 必然无法零 fuzz 落位，动态剔除该段
+          if [[ "${{ github.event.inputs.lz4kd_enable }}" == "true" ]]; then
+            echo "检测到 lz4kd 已启用，剔除 port 补丁中的 zram Kconfig 默认压缩算法段（由 lz4kd 接管）…"
+            python3 - "$PATCH" <<'PYEOF'
+import sys
+p = sys.argv[1]
+s = open(p, encoding='utf-8').read()
+start = s.index('diff --git a/drivers/block/zram/Kconfig')
+end = s.index('diff --git a/drivers/block/zram/zram_drv.c')
+open(p, 'w', encoding='utf-8').write(s[:start] + s[end:])
+PYEOF
+          fi
           # 零 fuzz 干跑：任何一个 hunk 无法精确落位就直接失败，避免半成品内核
           if ! patch -p1 --dry-run -F 0 < $PATCH; then
             echo "错误：移植补丁集无法零 fuzz 应用，请确认内核源码未被上游改动（可关闭 port_patch_enable 后重试）"; exit 1
@@ -473,9 +485,9 @@ jobs:
           grep -q 'default_disksize = 17179869184ULL' drivers/block/zram/zram_drv.c || { echo "错误：zram 默认 16G 容量未生效"; exit 1; }
           grep -q 'LZ4_arm64_decompress_safe' fs/erofs/decompressor.c || { echo "错误：erofs NEON LZ4 解压未生效"; exit 1; }
           grep -q 'sched_setscheduler(sbi->gc_thread->f2fs_gc_task, SCHED_IDLE' fs/f2fs/gc.c || { echo "错误：F2FS GC SCHED_IDLE 调度未生效"; exit 1; }
+          grep -q 'set_task_ioprio(gc_th->f2fs_gc_task' fs/f2fs/gc.c || { echo "错误：F2FS GC idle I/O 优先级未生效"; exit 1; }
           grep -q 'int_sqrt_oryon64' lib/math/int_sqrt.c || { echo "错误：int_sqrt Oryon 混合实现未生效"; exit 1; }
           grep -q 'print_vma_hex10' fs/proc/task_mmu.c || { echo "错误：task_mmu 地址打印优化未生效"; exit 1; }
-          grep -q '__attribute__((aligned(8)))' include/linux/fs.h || { echo "错误：struct file 对齐调整未生效"; exit 1; }
           echo "SM8750(6.6.100)移植补丁集应用完成"
 
       - name: 应用 O3 构建优化
@@ -1486,7 +1498,7 @@ jobs:
           - NoMount(VFS 路径重定向)支持：${{ github.event.inputs.nomount_enable }}
           - LZ4KDR 支持：${{ github.event.inputs.lz4kdr_enable }}（LZ4KD 的高速衍生实现，线格式兼容、重写编码器搜索循环，与 LZ4KD 后端并存）
           - SBalance 中断均衡支持：${{ github.event.inputs.sbalance_enable }}（周期性把中断从最繁忙 CPU 迁往最空闲 CPU，按 CPU 容量对中断数加权，兼顾大小核容量差异，不触碰 kABI）
-          - 性能优化补丁集：${{ github.event.inputs.perf_patch_enable }}（TCP 初始窗口锁定 64K、IRQ 默认亲和性收敛到 CPU0、F2FS GC 走 idle I/O 优先级、workqueue flush 减少自旋锁、关闭 debug_locks 全局锁调试开关；均只改函数体，不触碰 kABI）
+          - 性能优化补丁集：${{ github.event.inputs.perf_patch_enable }}（TCP 初始窗口锁定 64K、IRQ 默认亲和性收敛到 CPU0、workqueue flush 减少自旋锁、关闭 debug_locks 全局锁调试开关；F2FS GC idle 优化随移植补丁集，均只改函数体，不触碰 kABI）
           - O3 构建优化：${{ github.event.inputs.o3_enable }}（内核整体 -O3 + arm64 额外代码生成优化，镜像体积会增大）
           - ReSukiSU管理器下载：[ReSukiSU_CI](https://github.com/cctv18/ReSukiSU_CI/releases)
           

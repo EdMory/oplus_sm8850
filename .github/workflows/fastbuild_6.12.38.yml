@@ -1252,6 +1252,17 @@ jobs:
           sed -i 's/${scm_version}//' ./common/scripts/setlocalversion
           echo "CONFIG_LOCALVERSION_AUTO=n" >> ./common/arch/arm64/configs/gki_defconfig
            
+      - name: 应用 dmesg 报错修复补丁
+        run: |
+          cd kernel_workspace/common
+          echo "正在应用 dmesg 报错修复补丁(zram 批量回收上限 / suspend 振荡抑制 / battmgr-ADSP 失败节流)..."
+          wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/fix-zram-writeback-limit.patch
+          patch -p1 -F 3 < fix-zram-writeback-limit.patch || true
+          wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/fix-suspend-oscillation.patch
+          patch -p1 -F 3 < fix-suspend-oscillation.patch || true
+          wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/fix-battmgr-adsp-throttle.patch
+          patch -p1 -F 3 < fix-battmgr-adsp-throttle.patch || true
+
       - name: 构建内核
         run: |
           WORKDIR="$(pwd)"

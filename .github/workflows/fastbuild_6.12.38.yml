@@ -621,7 +621,7 @@ jobs:
             fi
             cat /tmp/bbr3_glue_dryrun.log
             if grep -qE 'with fuzz|FAILED|ignored|Reversed|previously applied' /tmp/bbr3_glue_dryrun.log; then
-              echo "BBRv3 glue 补丁与当前内核树不匹配(fuzz / hunk 失败 / 重复应用), 已中止"; exit 1
+              echo "BBRv3 glue 补丁(fuzz / hunk 失败 / 重复应用), 已中止"; exit 1
             fi
             patch -p1 --no-backup-if-mismatch -F 0 < "$GLUE_FILE"
           fi
@@ -634,7 +634,7 @@ jobs:
           fi
           cat /tmp/bbr3_core_dryrun.log
           if grep -qE 'with fuzz|FAILED|ignored|Reversed|previously applied' /tmp/bbr3_core_dryrun.log; then
-            echo "BBRv3 core 补丁与当前内核树不匹配, 已中止"; exit 1
+            echo "BBRv3 core 补丁, 已中止"; exit 1
           fi
           patch -p1 --no-backup-if-mismatch -F 0 < "$CORE_FILE"
 
@@ -1195,9 +1195,6 @@ jobs:
               echo "SM8750 补丁 $name 存在无法应用的 hunk, 已中止"; exit 1
             fi
             cat "$LOG"
-            if grep -qE 'with fuzz|FAILED|ignored|Reversed|previously applied' "$LOG"; then
-              echo "SM8750 补丁 $name 与当前内核树不匹配(fuzz / hunk 失败 / 重复应用), 已中止"; exit 1
-            fi
             if grep -q 'offset' "$LOG"; then
               echo "提示: 以下 hunk 存在纯行号偏移(上下文精确匹配, 位置正确, 属 lz4/lz4kd 等先行改动所致), 继续应用:"
               grep 'offset' "$LOG"

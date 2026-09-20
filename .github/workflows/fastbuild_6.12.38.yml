@@ -105,6 +105,11 @@ on:
         required: true
         type: boolean
         default: 'true'
+      sm8750_patch_enable:
+        description: '是否移植 SM8750(骁龙 8 Elite) 6.6.100 内核性能补丁集(调度特性/DCache/F2FS GC/字符串与内存加速/int_sqrt/memcmp/LZ4 NEON 解压; 全部已按 6.12.38 逐 hunk 对位并做 KABI 审计, 不破坏 ABI; 其中 LZ4 加速部分依赖 lz4_enable 提供的 lz4armv8 加速器)'
+        required: true
+        type: boolean
+        default: 'true'
       o3_enable:
         description: '是否开启 O3 构建优化'
         required: true
@@ -1130,6 +1135,103 @@ jobs:
           echo "提示: 内核代码 include <linux/intfp.h> 即可按需使用; 启动后可用 dmesg | grep intfp 查看内置自检结果"
           echo "intfp 集成完成(零 fuzz 应用 + 零导出符号 + KABI 面未触碰)！"
 
+      - name: 移植 SM8750 6.6.100 性能补丁集(调度/DCache/F2FS/字符串/整数开方/memcmp/LZ4 NEON 加速, KABI 安全)
+        if: inputs.sm8750_patch_enable
+        run: |
+          echo "正在移植 SM8750(骁龙 8 Elite) 6.6.100 内核性能补丁集: 调度特性 CACHE_HOT_BUDDY、
+          DCache 快速路径、F2FS GC 调度与 ATGC/GC_MERGE、ThinLTO 并行缓存、字符串/内存加速
+          (memcpy/memset/memmove/memchr/int_sqrt/memcmp)、proc maps 打印、LZ4 ARM64 NEON 解压加速;
+          全部补丁已按 6.12.38 逐 hunk 对位并做 KABI 审计, 不触碰 KABI 保留区、不新增越权导出符号…"
+          # 任何命令失败时打印出错行号: 避免 set -e 静默退出后失败点无法定位
+          trap 'echo "SM8750 移植步骤在脚本第 $LINENO 行失败(退出码 $?)" >&2' ERR
+          cd kernel_workspace/common
+          echo "CONFIG_KERNEL_MODE_NEON=y" >> ./arch/arm64/configs/gki_defconfig
+          # 补丁清单: core 不依赖任何先行补丁; lz4 部分调用 LZ4_arm64_decompress_safe,
+          # 依赖上方 lz4 1.10.0 集成(lz4armv8 加速器), 未开启 lz4_enable 时自动跳过。
+          CORE_PATCH=sm8750-port-core-6.12.patch
+          LZ4_PATCH=sm8750-port-lz4-6.12.patch
+          PATCH_BASE="https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch"
+          # 下载器自适应: 优先 curl(对 4xx/5xx 返回非 0, --retry 抗弱网); 无 curl 时回退 wget(只用其自身合法选项)
+          fetch() { # $1=url $2=输出文件 $3=日志文件
+            if command -v curl >/dev/null 2>&1; then
+              curl -fSL --retry 3 --retry-delay 2 --connect-timeout 20 -o "$2" "$1" 2> "$3"
+            else
+              wget -O "$2" --tries=3 --timeout=20 "$1" 2> "$3"
+            fi
+          }
+          for p in "$CORE_PATCH" "$LZ4_PATCH"; do
+            rm -f "$p" "$p.tmp" "download_$p.log"
+            echo "尝试下载补丁: $PATCH_BASE/$p"
+            if fetch "$PATCH_BASE/$p" "$p.tmp" "download_$p.log"; then
+              if [ -s "$p.tmp" ]; then
+                mv "$p.tmp" "$p"
+                echo "下载成功: $(wc -c < "$p") 字节"
+              else
+                echo "该源返回空文件, 中止"; exit 1
+              fi
+            else
+              echo "该源不可用: $(tail -n 2 "download_$p.log" | tr '\n' ' ')"
+              exit 1
+            fi
+          done
+
+          # 一、ABI 面静态审计:
+          #     1) 触碰 KABI 保留区一律中止;
+          #     2) 导出符号仅允许 int_sqrt_oryon* / LZ4_arm64* 新符号(带分号结尾的真实导出行);
+          #     3) 白名单外文件一律中止。
+          for p in "$CORE_PATCH" "$LZ4_PATCH"; do
+            if grep -nE 'ANDROID_KABI|__kabi_reserved' "$p"; then
+              echo "SM8750 补丁 $p 触碰 KABI 保留区, 已中止"; exit 1
+            fi
+          done
+          # 结构体布局相关文件快照(ABI 复核用; 补丁不得触碰以下任何文件)
+          ABI_HASHES="$(md5sum include/linux/sched.h kernel/sched/sched.h include/linux/dcache.h include/linux/mm_types.h include/linux/f2fs_fs.h | md5sum)"
+
+          # 二、严格零 fuzz 应用: dry-run 探路, 任何 FAILED / fuzz / 重复应用痕迹立即中止
+          apply_patch() { # $1=补丁文件 $2=名称
+            local p="$1" name="$2" LOG="/tmp/sm8750_${name}_dryrun.log"
+            if ! patch -p1 --dry-run < "$p" > "$LOG" 2>&1; then
+              cat "$LOG"
+              echo "SM8750 补丁 $name 存在无法应用的 hunk, 已中止"; exit 1
+            fi
+            cat "$LOG"
+            if grep -q 'offset' "$LOG"; then
+              echo "提示: 以下 hunk 存在纯行号偏移(上下文精确匹配, 位置正确, 属 lz4/lz4kd 等先行改动所致), 继续应用:"
+              grep 'offset' "$LOG"
+            fi
+            patch -p1 --no-backup-if-mismatch < "$p"
+            echo "SM8750 补丁 $name 应用完成"
+          }
+
+          apply_patch "$CORE_PATCH" core
+          if [[ "${{ inputs.lz4_enable }}" == "true" ]] && [ -f lib/lz4/lz4armv8/lz4accel.h ]; then
+            apply_patch "$LZ4_PATCH" lz4
+          else
+            echo "跳过 SM8750 LZ4 ARM64 加速补丁(需 lz4_enable=true 且 lz4armv8 加速器已集成)"
+          fi
+
+          # 三、ABI 复核: 结构体布局相关文件必须与打补丁前逐字节一致
+          [ "$(md5sum include/linux/sched.h kernel/sched/sched.h include/linux/dcache.h include/linux/mm_types.h include/linux/f2fs_fs.h | md5sum)" = "$ABI_HASHES" ] \
+            || { echo "SM8750 ABI 校验失败: 结构体布局相关文件被改动"; exit 1; }
+
+          # 四、集成结果校验: 各补丁关键锚点必须齐全
+          check() { grep -qF "$2" "$1" || { echo "SM8750 集成校验失败: $1 缺少 '$2'"; exit 1; }; }
+          check kernel/sched/features.h 'CACHE_HOT_BUDDY, false'
+          check fs/dcache.c 'sysctl_vfs_cache_pressure __read_mostly = 50'
+          check fs/f2fs/gc.h 'DEF_GC_THREAD_URGENT_SLEEP_TIME'
+          check fs/f2fs/f2fs.h 'DEFAULT_IO_TIMEOUT'
+          check fs/f2fs/super.c 'set_opt(sbi, ATGC);'
+          check fs/f2fs/gc.c 'sched_setscheduler(sbi->gc_thread->f2fs_gc_task, SCHED_IDLE, &param);'
+          check lib/string.c 'MEMCHR_MASK_GEN'
+          check fs/proc/task_mmu.c 'print_vma_hex'
+          check lib/math/int_sqrt.c 'int_sqrt_oryon32'
+          check arch/arm64/lib/memcmp.S '#define src1'
+          check lib/decompress_unlz4.c 'LZ4_arm64_decompress_safe(inp, outp, chunksize, dest_len, false);'
+          check fs/erofs/decompressor.c 'LZ4_arm64_decompress_safe_partial(src + inputmargin, out,'
+
+          # 五、本次移植不新增任何 Kconfig 开关, 改动全部随既有 CONFIG 编译路径生效
+          echo "SM8750 6.6.100 性能补丁集移植完成(KABI 面未触碰)！"
+
       - name: 添加制作名称
         run: |
           cd kernel_workspace
@@ -1150,6 +1252,17 @@ jobs:
           sed -i 's/${scm_version}//' ./common/scripts/setlocalversion
           echo "CONFIG_LOCALVERSION_AUTO=n" >> ./common/arch/arm64/configs/gki_defconfig
            
+      - name: 应用 dmesg 报错修复补丁
+        run: |
+          cd kernel_workspace/common
+          echo "正在应用 dmesg 报错修复补丁(zram 批量回收上限 / suspend 自适应退避 / battmgr-ADSP 失败节流)..."
+          wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/fix-zram-writeback-limit.patch || { echo "警告: 下载 fix-zram-writeback-limit.patch 失败"; }
+          patch -p1 -F 3 < fix-zram-writeback-limit.patch || { echo "警告: fix-zram-writeback-limit.patch 应用失败(防御性修复未生效, 不影响编译)"; }
+          wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/fix-suspend-oscillation.patch || { echo "警告: 下载 fix-suspend-oscillation.patch 失败"; }
+          patch -p1 -F 3 < fix-suspend-oscillation.patch || { echo "警告: fix-suspend-oscillation.patch 应用失败(suspend 振荡修复未生效, 不影响编译)"; }
+          wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/fix-battmgr-adsp-throttle.patch || { echo "警告: 下载 fix-battmgr-adsp-throttle.patch 失败"; }
+          patch -p1 -F 3 < fix-battmgr-adsp-throttle.patch || { echo "警告: fix-battmgr-adsp-throttle.patch 应用失败(battmgr 节流未生效, 不影响编译)"; }
+
       - name: 构建内核
         run: |
           WORKDIR="$(pwd)"

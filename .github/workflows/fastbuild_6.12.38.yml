@@ -1145,7 +1145,7 @@ jobs:
           # 任何命令失败时打印出错行号: 避免 set -e 静默退出后失败点无法定位
           trap 'echo "SM8750 移植步骤在脚本第 $LINENO 行失败(退出码 $?)" >&2' ERR
           cd kernel_workspace/common
-
+          echo "CONFIG_KERNEL_MODE_NEON=y" >> ./arch/arm64/configs/gki_defconfig
           # 补丁清单: core 不依赖任何先行补丁; lz4 部分调用 LZ4_arm64_decompress_safe,
           # 依赖上方 lz4 1.10.0 集成(lz4armv8 加速器), 未开启 lz4_enable 时自动跳过。
           CORE_PATCH=sm8750-port-core-6.12.patch

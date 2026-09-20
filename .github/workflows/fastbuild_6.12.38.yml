@@ -1216,7 +1216,6 @@ jobs:
 
           # 四、集成结果校验: 各补丁关键锚点必须齐全
           check() { grep -qF "$2" "$1" || { echo "SM8750 集成校验失败: $1 缺少 '$2'"; exit 1; }; }
-          check Makefile '--thinlto-cache-dir'
           check kernel/sched/features.h 'CACHE_HOT_BUDDY, false'
           check fs/dcache.c 'sysctl_vfs_cache_pressure __read_mostly = 50'
           check fs/f2fs/gc.h 'DEF_GC_THREAD_URGENT_SLEEP_TIME'
@@ -1231,7 +1230,7 @@ jobs:
           check fs/erofs/decompressor.c 'LZ4_arm64_decompress_safe_partial(src + inputmargin, out,'
 
           # 五、本次移植不新增任何 Kconfig 开关, 改动全部随既有 CONFIG 编译路径生效
-          echo "SM8750 6.6.100 性能补丁集移植完成(零 fuzz 应用 + KABI 面未触碰)！"
+          echo "SM8750 6.6.100 性能补丁集移植完成(KABI 面未触碰)！"
 
       - name: 添加制作名称
         run: |

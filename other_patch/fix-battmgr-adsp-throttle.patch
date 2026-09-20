@@ -1,0 +1,79 @@
+diff --git a/drivers/power/supply/qcom_battmgr.c b/drivers/power/supply/qcom_battmgr.c
+index f0a64c0..c096e9d 100644
+--- a/drivers/power/supply/qcom_battmgr.c
++++ b/drivers/power/supply/qcom_battmgr.c
+@@ -4,6 +4,7 @@
+  * Copyright (c) 2022, Linaro Ltd
+  */
+ #include <linux/auxiliary_bus.h>
++#include <linux/jiffies.h>
+ #include <linux/module.h>
+ #include <linux/mutex.h>
+ #include <linux/of_device.h>
+@@ -16,6 +17,10 @@
+ #define BATTMGR_CHEMISTRY_LEN	4
+ #define BATTMGR_STRING_LEN	128
+ 
++/* Back off after this many consecutive PMIC-GLINK request failures. */
++#define BATTMGR_FAIL_THRESHOLD		10
++#define BATTMGR_THROTTLE_JIFFIES	(10 * HZ)
++
+ enum qcom_battmgr_variant {
+ 	QCOM_BATTMGR_SM8350,
+ 	QCOM_BATTMGR_SC8280XP,
+@@ -298,6 +303,9 @@ struct qcom_battmgr {
+ 
+ 	bool service_up;
+ 
++	unsigned int fail_count;
++	unsigned long throttle_until;
++
+ 	struct qcom_battmgr_info info;
+ 	struct qcom_battmgr_status status;
+ 	struct qcom_battmgr_ac ac;
+@@ -318,19 +326,41 @@ static int qcom_battmgr_request(struct qcom_battmgr *battmgr, void *data, size_t
+ 	unsigned long left;
+ 	int ret;
+ 
++	/*
++	 * Throttle repeated PMIC-GLINK failures.  On SM8850 the upstream
++	 * SM8845 battmgr/ADSP interface is not supported and every request
++	 * fails with -EREMOTEIO (-524), producing endless log and qrtr
++	 * wakeup storms.  Back off for a while instead of hammering ADSP.
++	 */
++	if (battmgr->fail_count >= BATTMGR_FAIL_THRESHOLD &&
++	    time_before(jiffies, battmgr->throttle_until))
++		return -ETIMEDOUT;
++
+ 	reinit_completion(&battmgr->ack);
+ 
+ 	battmgr->error = 0;
+ 
+ 	ret = pmic_glink_send(battmgr->client, data, len);
+ 	if (ret < 0)
+-		return ret;
++		goto err;
+ 
+ 	left = wait_for_completion_timeout(&battmgr->ack, HZ);
+-	if (!left)
+-		return -ETIMEDOUT;
++	if (!left) {
++		ret = -ETIMEDOUT;
++		goto err;
++	}
++
++	ret = battmgr->error;
++	if (ret < 0)
++		goto err;
+ 
+-	return battmgr->error;
++	battmgr->fail_count = 0;
++	return 0;
++
++err:
++	if (++battmgr->fail_count >= BATTMGR_FAIL_THRESHOLD)
++		battmgr->throttle_until = jiffies + BATTMGR_THROTTLE_JIFFIES;
++	return ret;
+ }
+ 
+ static int qcom_battmgr_request_property(struct qcom_battmgr *battmgr, int opcode,

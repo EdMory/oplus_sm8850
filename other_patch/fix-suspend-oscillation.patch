@@ -1,0 +1,39 @@
+diff --git a/kernel/power/suspend.c b/kernel/power/suspend.c
+index 53c8e90..fdb515a 100644
+--- a/kernel/power/suspend.c
++++ b/kernel/power/suspend.c
+@@ -11,6 +11,7 @@
+ 
+ #include <linux/string.h>
+ #include <linux/delay.h>
++#include <linux/jiffies.h>
+ #include <linux/errno.h>
+ #include <linux/init.h>
+ #include <linux/console.h>
+@@ -634,6 +635,8 @@ static int enter_state(suspend_state_t state)
+  * Check if the value of @state represents one of the supported states,
+  * execute enter_state() and update system suspend statistics.
+  */
++static unsigned long last_suspend_jiffies;
++
+ int pm_suspend(suspend_state_t state)
+ {
+ 	int error;
+@@ -641,6 +644,17 @@ int pm_suspend(suspend_state_t state)
+ 	if (state <= PM_SUSPEND_ON || state >= PM_SUSPEND_MAX)
+ 		return -EINVAL;
+ 
++	/*
++	 * Reject back-to-back suspend attempts inside one second to stop
++	 * suspend/resume oscillation storms (997 cycles observed) caused by
++	 * missing OEM bus-arbitration/wakelock patches on this BSP.
++	 */
++	if (time_before(jiffies, last_suspend_jiffies + HZ)) {
++		pr_info("suspend entry rejected (rate-limited)\n");
++		return -EBUSY;
++	}
++	last_suspend_jiffies = jiffies;
++
+ 	pr_info("suspend entry (%s)\n", mem_sleep_labels[state]);
+ 	error = enter_state(state);
+ 	if (error) {

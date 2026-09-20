@@ -1,0 +1,27 @@
+diff --git a/drivers/block/zram/zram_drv.c b/drivers/block/zram/zram_drv.c
+index c5e50e1..e4d5721 100644
+--- a/drivers/block/zram/zram_drv.c
++++ b/drivers/block/zram/zram_drv.c
+@@ -599,6 +599,11 @@ static void read_from_bdev_async(struct zram *zram, struct page *page,
+ 	submit_bio(bio);
+ }
+ 
++/* Cap a single batch writeback pass so one trigger does not drain
++ * the whole device at once (observed 77k+ pages / ~300MB per pass).
++ */
++#define ZRAM_WB_BATCH_MAX_PAGES	16384UL	/* 64MB @ 4K pages */
++
+ #define PAGE_WB_SIG "page_index="
+ 
+ #define PAGE_WRITEBACK			0
+@@ -639,6 +644,10 @@ static ssize_t writeback_store(struct device *dev,
+ 		mode = PAGE_WRITEBACK;
+ 	}
+ 
++	/* Cap batch writeback to avoid aggressive one-shot reclaim storms. */
++	if (mode != PAGE_WRITEBACK && nr_pages > ZRAM_WB_BATCH_MAX_PAGES)
++		nr_pages = ZRAM_WB_BATCH_MAX_PAGES;
++
+ 	down_read(&zram->init_lock);
+ 	if (!init_done(zram)) {
+ 		ret = -EINVAL;

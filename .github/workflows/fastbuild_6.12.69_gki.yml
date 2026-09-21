@@ -437,11 +437,8 @@ jobs:
           patch -p1 -F 3 < config.patch || true
 
       - name: 添加 BBRv3 等一系列拥塞控制算法
+        if: inputs.bbr_enable
         run: |
-          if [[ "${{ github.event.inputs.bbr3_enable }}" == "false" ]]; then
-            echo "已按输入跳过 BBRv3 + FQ_CODEL 集成(bbr3_enable=false)"
-            exit 0
-          fi
           echo "正在集成 BBRv3 拥塞控制算法 + FQ_CODEL 队列规则..."
           # 任何命令失败时打印出错行号: 避免 set -e 静默退出后失败点无法定位
           trap 'echo "BBRv3 集成步骤在脚本第 $LINENO 行失败(退出码 $?)" >&2' ERR

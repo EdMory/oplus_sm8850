@@ -1,4 +1,4 @@
-# 欧加真 SM8850/MT6993 系列通用6.12内核自动化编译脚本
+# SM8850 系列通用6.12内核自动化编译脚本
 [![STAR](https://img.shields.io/github/stars/cctv18/oppo_oplus_realme_sm8850?style=flat&logo=data%3Aimage%2Fsvg%2Bxml%3Bbase64%2CPHN2ZyByb2xlPSJpbWciIHZpZXdCb3g9IjAgMCAyNCAyNCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48dGl0bGU%2BR2l0SHViPC90aXRsZT48cGF0aCBkPSJNMTIgLjI5N2MtNi42MyAwLTEyIDUuMzczLTEyIDEyIDAgNS4zMDMgMy40MzggOS44IDguMjA1IDExLjM4NS42LjExMy44Mi0uMjU4LjgyLS41NzcgMC0uMjg1LS4wMS0xLjA0LS4wMTUtMi4wNC0zLjMzOC43MjQtNC4wNDItMS42MS00LjA0Mi0xLjYxQzQuNDIyIDE4LjA3IDMuNjMzIDE3LjcgMy42MzMgMTcuN2MtMS4wODctLjc0NC4wODQtLjcyOS4wODQtLjcyOSAxLjIwNS4wODQgMS44MzggMS4yMzYgMS44MzggMS4yMzYgMS4wNyAxLjgzNSAyLjgwOSAxLjMwNSAzLjQ5NS45OTguMTA4LS43NzYuNDE3LTEuMzA1Ljc2LTEuNjA1LTIuNjY1LS4zLTUuNDY2LTEuMzMyLTUuNDY2LTUuOTMgMC0xLjMxLjQ2NS0yLjM4IDEuMjM1LTMuMjItLjEzNS0uMzAzLS41NC0xLjUyMy4xMDUtMy4xNzYgMCAwIDEuMDA1LS4zMjIgMy4zIDEuMjMuOTYtLjI2NyAxLjk4LS4zOTkgMy0uNDA1IDEuMDIuMDA2IDIuMDQuMTM4IDMgLjQwNSAyLjI4LTEuNTUyIDMuMjg1LTEuMjMgMy4yODUtMS4yMy42NDUgMS42NTMuMjQgMi44NzMuMTIgMy4xNzYuNzY1Ljg0IDEuMjMgMS45MSAxLjIzIDMuMjIgMCA0LjYxLTIuODA1IDUuNjI1LTUuNDc1IDUuOTIuNDIuMzYuODEgMS4wOTYuODEgMi4yMiAwIDEuNjA2LS4wMTUgMi44OTYtLjAxNSAzLjI4NiAwIC4zMTUuMjEuNjkuODI1LjU3QzIwLjU2NSAyMi4wOTIgMjQgMTcuNTkyIDI0IDEyLjI5N2MwLTYuNjI3LTUuMzczLTEyLTEyLTEyIiBmaWxsPSIjZmZmZmZmIj48L3BhdGg%2BPC9zdmc%2B)](https://github.com/cctv18/oppo_oplus_realme_sm8850/stargazers)
 [![FORK](https://img.shields.io/github/forks/cctv18/oppo_oplus_realme_sm8850?style=flat&logo=greasyfork&color=%2394E61A)](https://github.com/cctv18/oppo_oplus_realme_sm8850/forks)
 [![COOLAPK](https://img.shields.io/badge/cctv18_2-cctv18_2?style=flat&logo=android&logoColor=FF4500&label=%E9%85%B7%E5%AE%89&color=FF4500)](http://www.coolapk.com/u/22650293)
@@ -7,7 +7,7 @@
 <img alt="Endpoint Badge" src="https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fcctv18%2Fkernel-workshop%2Frefs%2Fheads%2Fhotfix%2Fnotice.json">
 
 ##### 
-一个更方便、快捷的自动化OPPO/一加/真我系列骁龙8Elite Gen5(SM8850)/天玑9500(MT6993)机型的通用6.12内核编译脚本。
+一个更方便、快捷的自动化OPPO/一加/真我系列骁龙8Elite Gen5(SM8850)机型的通用6.12内核编译脚本。
 ##### 
 这个项目的初衷是解决以下问题：
 - 绿厂官方摆烂，代码开源开一半，导致部分内核代码无法通过已有的配置xml正常编译，甚至没有编译配置xml；
@@ -18,31 +18,25 @@
 - 修复官方代码部分bug/未及时更新的补丁，并引入诸多第三方更新/功能支持；
 - 提供 Github Action 在线编译/shell本地编译双版本脚本。
 ## 已实现：
-- [x] 欧加真骁龙 SM8850 通用OKI内核（基于一加15源码的 6.12.23 / 一加Ace 6T源码的 6.12.38 ，其他同内核版本非SM8850机型可自行测试，部分机型可完全兼容）
-- [x] 欧加真天玑 MT6993 通用OKI内核（基于OPPO Find X9 源码的 6.12.23 ，其他同内核版本非MT6993机型可自行测试，部分机型可完全兼容）
+- [x] 骁龙 SM8850 通用OKI内核（基于一加Ace 6T源码的 6.12.38 ，其他同内核版本非SM8850机型可自行测试，部分机型可完全兼容）
 - [x] ReSukiSU/SukiSU Ultra/KernelSU Next/原版KernelSU多版本KSU可选
-- [x] 引入独家设计的 [ccache-ECS](https://github.com/cctv18/ccache-ECS) 缓存及大量编译流程优化，编译时间可稳定在约6min *(首次编译时会拉取公共预置ccache，从第二次开始没有大量配置改动的情况下，单次编译时间约6min；距离上一次调用两周未调用后缓存会被自动清除，此时编译会自动重建缓存)*
-- [x] 引入O2编译优化，改善内核运行性能
+- [x] cctv18独家设计的 [ccache-ECS](https://github.com/cctv18/ccache-ECS) 缓存及大量编译流程优化，编译时间可稳定在约6min *(首次编译时会拉取公共预置ccache，从第二次开始没有大量配置改动的情况下，单次编译时间约6min；距离上一次调用两周未调用后缓存会被自动清除，此时编译会自动重建缓存)*
+- [x] 引入O3编译优化，改善内核运行性能
 - [x] lz4 1.10.0 & zstd 1.5.7 算法更新&优化补丁(来自[@ferstar](https://github.com/ferstar), 移植by [@Xiaomichael](https://github.com/Xiaomichael), 6.12版本补丁重制by [@cctv18](https://github.com/cctv18))
 - [x] 移植lz4kd支持到6.12内核(可选补丁)
 - [x] 可选加入 BBR/Brutal 及一系列 tcp 拥塞控制算法
-- [x] [ADIOS IO调度器](https://github.com/firelzrd/adios)移植
+- [x] [ADIOS IO调度器](https://github.com/firelzrd/adios),[INTFP](https://github.com/firelzrd/intfp)移植
 - [x] 加入一些网络连接性能优化配置选项（用于为ipset及需要iptables等高级网络功能内核支持的程序提供支持）
 - [x] Droidspaces 容器化支持（比传统 Docker/LXC 更轻量化，便于移植的完整 Linux 环境容器实现）
-- [x] 添加了对[Mountify](https://github.com/backslashxx/mountify)模块的支持
+- [x] 添加了对[Mountify](https://github.com/backslashxx/mountify),[NoMount](https://[https://github.com/maxsteeel/nomount])模块的支持
 - [x] 加入Re:Kernel支持，与Freezer，NoActive等软件配合降低功耗
 - [x] 加入[内核防格基带保护(By @showdo)](https://github.com/vc-teahouse/Baseband-guard)，有效防止恶意格机脚本/程序对系统分区数据的破坏
-## 待实现：
-- [ ] zram内置化，无需外置zram.ko挂载 ~~（有了新版 lz4&zstd 补丁真的还有必要吗）~~
-- [ ] Nethunter 网卡监听模式支持
-- [ ] kexec 内核热切换支持
-- 更多优化与特性移植……
-- 更多优化与特性移植……
 ##### 
 ##### 
 ##### 
 ## 鸣谢
 - WildKernel的一加系列内核构建脚本：[WildKernels/OnePlus_KernelSU_SUSFS](https://github.com/WildKernels/OnePlus_KernelSU_SUSFS)
+- cctv18的欧加真米系列内核构建脚本：[oppo_oplus_realme_sm8850](https://github.com/cctv18/oppo_oplus_realme_sm8850)
 - ReSukiSU：[ReSukiSU/ReSukiSU](https://github.com/ReSukiSU/ReSukiSU)
 - SukiSU Ultra：[SukiSU-Ultra/SukiSU-Ultra](https://github.com/SukiSU-Ultra/SukiSU-Ultra)
 - susfs4ksu：[ShirkNeko/susfs4ksu](https://github.com/ShirkNeko/susfs4ksu)
@@ -51,7 +45,6 @@
 - 原版KernelSU: [tiann/KernelSU](https://github.com/tiann/KernelSU)
 - 内核防格基带保护模块：[vc-teahouse/Baseband-guard](https://github.com/vc-teahouse/Baseband-guard)
 - KSUN的多管理器补丁：[WildKernels/kernel_patches](https://github.com/WildKernels/kernel_patches)
-- ~~本地化内核构建脚本（已失效）：[Suxiaoqinx/kernel_manifest_OnePlus_Sukisu_Ultra](https://github.com/Suxiaoqinx/kernel_manifest_OnePlus_Sukisu_Ultra)~~
 
 <!-- 这是一个访客统计，用来看看我的项目主页有多少人访问过 -->
 <div align="center">

@@ -86,6 +86,11 @@ on:
         required: true
         type: boolean
         default: 'true'
+      o3_enable:
+        description: '是否开启 O3 编译优化'
+        required: true
+        type: boolean
+        default: 'true'
       ccache_update:
         description: '更新ccache缓存(将本次编译生成的ccache缓存覆盖至仓库缓存，在更改编译配置、源码或需要刷新缓存时开启)'
         required: true
@@ -918,7 +923,25 @@ jobs:
           echo "CONFIG_KEYS=y" >> ./arch/arm64/configs/gki_defconfig
           echo "CONFIG_NOMOUNT=y" >> ./arch/arm64/configs/gki_defconfig
           echo "NoMount 集成完成！"
-          
+
+      - name: 应用 O3 构建优化
+        if: inputs.o3_enable
+        run: |
+          echo "正在应用 O3 构建优化…"
+          cd kernel_workspace/common
+          PATCH=sm8750-perf-build-6.12.patch
+          wget -O $PATCH https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/$PATCH \
+            || wget -O $PATCH https://github.com/EdMory/oplus_sm8850/raw/refs/heads/main/other_patch/$PATCH
+          # 该补丁只调整编译器优化等级，命中失败时降级为 -O2 继续编译，不影响整体构建
+          if patch -p1 --dry-run -F 0 < $PATCH; then
+            patch -p1 -F 0 < $PATCH
+            grep -q '^KBUILD_CFLAGS += -O3$' Makefile || { echo "错误：-O3 未生效"; exit 1; }
+            grep -q 'cc-option,-frename-registers' arch/arm64/Makefile || { echo "错误：arm64 代码生成优化未生效"; exit 1; }
+            echo "O3 构建优化应用完成"
+          else
+            echo "警告：O3 构建优化补丁未能精确应用，本次跳过 O3，继续以 -O2 编译"
+          fi
+         
       - name: 添加制作名称
         run: |
           cd kernel_workspace

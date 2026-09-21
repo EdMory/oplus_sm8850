@@ -438,8 +438,6 @@ jobs:
 
       - name: 添加 BBRv3 等一系列拥塞控制算法
         run: |
-          - name: 集成 BBRv3 拥塞控制算法与 FQ_CODEL 队列规则并设为默认
-        run: |
           if [[ "${{ github.event.inputs.bbr3_enable }}" == "false" ]]; then
             echo "已按输入跳过 BBRv3 + FQ_CODEL 集成(bbr3_enable=false)"
             exit 0

@@ -1,5 +1,5 @@
 diff --git a/include/linux/tcp.h b/include/linux/tcp.h
-index 3bbf355..ad22dcc 100644
+index 3bbf355..8cd063d 100644
 --- a/include/linux/tcp.h
 +++ b/include/linux/tcp.h
 @@ -227,7 +227,8 @@ struct tcp_sock {
@@ -22,15 +22,8 @@ index 3bbf355..ad22dcc 100644
  	__cacheline_group_end(tcp_sock_write_txrx);
  
  	/* RX read-write hotpath cache lines */
-@@ -629,4 +631,4 @@ static inline bool dst_tcp_usec_ts(const struct dst_entry *dst)
- 	return dst_feature(dst, RTAX_FEATURE_TCP_USEC_TS);
- }
- 
--#endif	/* _LINUX_TCP_H */
-+#endif	/* _LINUX_TCP_H */
-\ No newline at end of file
 diff --git a/include/net/inet_connection_sock.h b/include/net/inet_connection_sock.h
-index fff59a2..431cc8e 100644
+index fff59a2..1a61ce5 100644
 --- a/include/net/inet_connection_sock.h
 +++ b/include/net/inet_connection_sock.h
 @@ -143,8 +143,8 @@ struct inet_connection_sock {
@@ -44,15 +37,8 @@ index fff59a2..431cc8e 100644
  };
  
  /*
-@@ -381,4 +381,4 @@ static inline void inet_init_csk_locks(struct sock *sk)
- 	spin_lock_init(&icsk->icsk_accept_queue.fastopenq.lock);
- }
- 
--#endif /* _INET_CONNECTION_SOCK_H */
-+#endif /* _INET_CONNECTION_SOCK_H */
-\ No newline at end of file
 diff --git a/include/net/tcp.h b/include/net/tcp.h
-index 3255a19..d90df89 100644
+index 3255a19..fff5583 100644
 --- a/include/net/tcp.h
 +++ b/include/net/tcp.h
 @@ -376,6 +376,13 @@ static inline void tcp_dec_quickack_mode(struct sock *sk)
@@ -226,13 +212,6 @@ index 3255a19..d90df89 100644
  
  static inline void tcp_plb_init(const struct sock *sk,
  				struct tcp_plb_state *plb)
-@@ -2838,4 +2899,4 @@ enum skb_drop_reason tcp_inbound_hash(struct sock *sk,
- 		const void *saddr, const void *daddr,
- 		int family, int dif, int sdif);
- 
--#endif	/* _TCP_H */
-+#endif	/* _TCP_H */
-\ No newline at end of file
 diff --git a/include/uapi/linux/inet_diag.h b/include/uapi/linux/inet_diag.h
 index 86bb2e8..9d9a3eb 100644
 --- a/include/uapi/linux/inet_diag.h
@@ -288,7 +267,7 @@ index db7254d..38de18d 100644
  struct rta_session {
  	__u8	proto;
 diff --git a/include/uapi/linux/tcp.h b/include/uapi/linux/tcp.h
-index dbf896f..bd7c022 100644
+index dbf896f..053a5f3 100644
 --- a/include/uapi/linux/tcp.h
 +++ b/include/uapi/linux/tcp.h
 @@ -178,6 +178,7 @@ enum tcp_fastopen_client_fail {
@@ -299,15 +278,8 @@ index dbf896f..bd7c022 100644
  
  /*
   * Sender's congestion state indicating normal or abnormal situations
-@@ -485,4 +486,4 @@ struct tcp_zerocopy_receive {
- 	__u32 msg_flags;
- 	__u32 reserved; /* set to 0 for now */
- };
--#endif /* _UAPI_LINUX_TCP_H */
-+#endif /* _UAPI_LINUX_TCP_H */
-\ No newline at end of file
 diff --git a/net/ipv4/Kconfig b/net/ipv4/Kconfig
-index eabda42..4177769 100644
+index eabda42..27b8844 100644
 --- a/net/ipv4/Kconfig
 +++ b/net/ipv4/Kconfig
 @@ -666,18 +666,21 @@ config TCP_CONG_CDG
@@ -315,7 +287,6 @@ index eabda42..4177769 100644
  config TCP_CONG_BBR
  	tristate "BBR TCP"
 -	default n
-+	default y
  	help
  
 -	  BBR (Bottleneck Bandwidth and RTT) TCP congestion control aims to
@@ -351,13 +322,6 @@ index eabda42..4177769 100644
  	help
  	  Select the TCP congestion control that will be used by default
  	  for all connections.
-@@ -785,4 +788,4 @@ config TCP_MD5SIG
- 	  Its main (only?) use is to protect BGP sessions between core routers
- 	  on the Internet.
- 
--	  If unsure, say N.
-+	  If unsure, say N.
-\ No newline at end of file
 diff --git a/net/ipv4/bpf_tcp_ca.c b/net/ipv4/bpf_tcp_ca.c
 index 5548047..fb6ab6c 100644
 --- a/net/ipv4/bpf_tcp_ca.c
@@ -402,7 +366,7 @@ index 09e2f85..2ed7398 100644
  		info->tcpi_options |= TCPI_OPT_SYN_DATA;
  	if (tp->tcp_usec_ts)
 diff --git a/net/ipv4/tcp_bbr.c b/net/ipv4/tcp_bbr.c
-index 760941e..265fbed 100644
+index 760941e..8147616 100644
 --- a/net/ipv4/tcp_bbr.c
 +++ b/net/ipv4/tcp_bbr.c
 @@ -1,18 +1,19 @@
@@ -3047,7 +3011,6 @@ index 760941e..265fbed 100644
  MODULE_LICENSE("Dual BSD/GPL");
  MODULE_DESCRIPTION("TCP BBR (Bottleneck Bandwidth and RTT)");
 +MODULE_VERSION(__stringify(BBR_VERSION));
-\ No newline at end of file
 diff --git a/net/ipv4/tcp_cong.c b/net/ipv4/tcp_cong.c
 index 0306d25..28f581c 100644
 --- a/net/ipv4/tcp_cong.c
@@ -3061,7 +3024,7 @@ index 0306d25..28f581c 100644
  		icsk->icsk_ca_ops->init(sk);
  	if (tcp_ca_needs_ecn(sk))
 diff --git a/net/ipv4/tcp_input.c b/net/ipv4/tcp_input.c
-index 444105e..60f1b50 100644
+index 444105e..ee6cc5a 100644
 --- a/net/ipv4/tcp_input.c
 +++ b/net/ipv4/tcp_input.c
 @@ -376,7 +376,7 @@ static void __tcp_ecn_check_ce(struct sock *sk, const struct sk_buff *skb)
@@ -3194,13 +3157,6 @@ index 444105e..60f1b50 100644
  	    /* We ACK each frame or... */
  	    tcp_in_quickack_mode(sk) ||
  	    /* Protocol state mandates a one-time immediate ACK */
-@@ -7392,4 +7418,4 @@ drop:
- 	tcp_listendrop(sk);
- 	return 0;
- }
--EXPORT_SYMBOL(tcp_conn_request);
-+EXPORT_SYMBOL(tcp_conn_request);
-\ No newline at end of file
 diff --git a/net/ipv4/tcp_minisocks.c b/net/ipv4/tcp_minisocks.c
 index f3e4fc9..8b2b9dd 100644
 --- a/net/ipv4/tcp_minisocks.c
@@ -3295,7 +3251,7 @@ index d75c1cd..0d6168b 100644
  		goto rearm_timer;
  
 diff --git a/net/ipv4/tcp_rate.c b/net/ipv4/tcp_rate.c
-index a8f6d9d..615ab91 100644
+index a8f6d9d..9006282 100644
 --- a/net/ipv4/tcp_rate.c
 +++ b/net/ipv4/tcp_rate.c
 @@ -1,5 +1,6 @@
@@ -3378,15 +3334,8 @@ index a8f6d9d..615ab91 100644
  				    rs->prior_mstamp); /* ack phase */
  	rs->interval_us = max(snd_us, ack_us);
  
-@@ -206,4 +230,4 @@ void tcp_rate_check_app_limited(struct sock *sk)
- 		tp->app_limited =
- 			(tp->delivered + tcp_packets_in_flight(tp)) ? : 1;
- }
--EXPORT_SYMBOL_GPL(tcp_rate_check_app_limited);
-+EXPORT_SYMBOL_GPL(tcp_rate_check_app_limited);
-\ No newline at end of file
 diff --git a/net/ipv4/tcp_timer.c b/net/ipv4/tcp_timer.c
-index 1b7ba5e..1da144a 100644
+index 1b7ba5e..07017d8 100644
 --- a/net/ipv4/tcp_timer.c
 +++ b/net/ipv4/tcp_timer.c
 @@ -699,6 +699,7 @@ void tcp_write_timer_handler(struct sock *sk)
@@ -3397,15 +3346,8 @@ index 1b7ba5e..1da144a 100644
  	tcp_mstamp_refresh(tcp_sk(sk));
  	event = icsk->icsk_pending;
  
-@@ -885,4 +886,4 @@ void tcp_init_xmit_timers(struct sock *sk)
- 	hrtimer_init(&tcp_sk(sk)->compressed_ack_timer, CLOCK_MONOTONIC,
- 		     HRTIMER_MODE_REL_PINNED_SOFT);
- 	tcp_sk(sk)->compressed_ack_timer.function = tcp_compressed_ack_kick;
--}
-+}
-\ No newline at end of file
 diff --git a/net/sched/Kconfig b/net/sched/Kconfig
-index 8180d0c..77389e0 100644
+index 8180d0c..77b7496 100644
 --- a/net/sched/Kconfig
 +++ b/net/sched/Kconfig
 @@ -418,7 +418,7 @@ if NET_SCH_DEFAULT
@@ -3417,18 +3359,3 @@ index 8180d0c..77389e0 100644
  	help
  	  Select the queueing discipline that will be used by default
  	  for all network devices.
-@@ -431,6 +431,7 @@ choice
- 
- 	config DEFAULT_FQ_CODEL
- 		bool "Fair Queue Controlled Delay" if NET_SCH_FQ_CODEL
-+		default y
- 
- 	config DEFAULT_FQ_PIE
- 		bool "Flow Queue Proportional Integral controller Enhanced" if NET_SCH_FQ_PIE
-@@ -942,4 +943,4 @@ config NET_TC_SKB_EXT
- endif # NET_SCHED
- 
- config NET_SCH_FIFO
--	bool
-+	bool
-\ No newline at end of file

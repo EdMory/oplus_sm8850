@@ -57,7 +57,7 @@ on:
         type: boolean
         default: 'true'
       bbr_enable:
-        description: '是否集成 BBRv3 TCP 拥塞控制补丁(BBR设为默认拥塞控制算法, fq_codel 设为默认队列管理)'
+        description: '是否集成 BBR 拥塞控制补丁'
         required: true
         type: boolean
         default: 'true'
@@ -438,7 +438,7 @@ jobs:
           grep -q 'int debug_locks __read_mostly = 0;' lib/debug_locks.c || { echo "错误：debug_locks 优化未生效"; exit 1; }
           echo "SM8750 性能优化补丁集应用完成"
 
-      - name: 集成 BBRv3 TCP 拥塞控制补丁
+      - name: 集成 BBR 拥塞控制补丁
         if: inputs.bbr_enable
         run: |
           echo "正在集成 BBR 拥塞控制补丁…"
@@ -1209,7 +1209,6 @@ jobs:
           echo "LZ4KD: ${{ github.event.inputs.lz4kd_enable }}" >> ./ak3.log
           echo "IPset: ${{ github.event.inputs.better_net }}" >> ./ak3.log
           echo "BBR&Brutal: ${{ github.event.inputs.bbr_enable }}" >> ./ak3.log
-          echo "BBRv3(默认拥塞控制+bbr): ${{ github.event.inputs.bbr3_enable }}" >> ./ak3.log
           echo "Droidspaces: ${{ github.event.inputs.droidspaces_enable }}" >> ./ak3.log
           echo "ADIOS: ${{ github.event.inputs.adios_enable }} (v3.3.0)" >> ./ak3.log
           echo "Re-Kernel: ${{ github.event.inputs.rekernel_enable }}" >> ./ak3.log
@@ -1304,9 +1303,7 @@ jobs:
           - 内核级基带保护支持：${{ github.event.inputs.baseband_guard }}
           - NoMount(VFS 路径重定向)支持：${{ github.event.inputs.nomount_enable }}
           - LZ4KDR 支持：${{ github.event.inputs.lz4kdr_enable }}（LZ4KD 的高速衍生实现，线格式兼容、重写编码器搜索循环，与 LZ4KD 后端并存）
-          - SBalance 中断均衡支持：${{ github.event.inputs.sbalance_enable }}（周期性把中断从最繁忙 CPU 迁往最空闲 CPU，按 CPU 容量对中断数加权，兼顾大小核容量差异，不触碰 kABI）
-          - 性能优化补丁集：${{ github.event.inputs.perf_patch_enable }}（TCP 初始窗口锁定 64K、IRQ 默认亲和性收敛到 CPU0、workqueue flush 减少自旋锁、关闭 debug_locks 全局锁调试开关；F2FS GC idle 优化随移植补丁集，均只改函数体，不触碰 kABI）
-          - BBRv3 拥塞控制：${{ github.event.inputs.bbr3_enable }}（BBR v3 移植入 6.12.38，编译期设为默认拥塞控制算法，fq_codel 设为默认队列管理算法；不触碰 KABI 保留区、不新增导出符号）
+          - 性能优化补丁集：${{ github.event.inputs.perf_patch_enable }}（TCP 初始窗口锁定 64K、IRQ 默认亲和性收敛到 CPU0、workqueue flush 减少自旋锁、关闭 debug_locks 全局锁调试开关；F2FS GC idle 优化随移植补丁集）
           - O3 构建优化：${{ github.event.inputs.o3_enable }}（内核整体 -O3 + arm64 额外代码生成优化，镜像体积会增大）
           - ReSukiSU管理器下载：[ReSukiSU_CI](https://github.com/cctv18/ReSukiSU_CI/releases)
           

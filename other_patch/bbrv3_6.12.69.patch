@@ -267,7 +267,7 @@ index db7254d..38de18d 100644
  struct rta_session {
  	__u8	proto;
 diff --git a/include/uapi/linux/tcp.h b/include/uapi/linux/tcp.h
-index dbf896f..053a5f3 100644
+index dbf896f..d6490f2 100644
 --- a/include/uapi/linux/tcp.h
 +++ b/include/uapi/linux/tcp.h
 @@ -178,6 +178,7 @@ enum tcp_fastopen_client_fail {
@@ -278,6 +278,14 @@ index dbf896f..053a5f3 100644
  
  /*
   * Sender's congestion state indicating normal or abnormal situations
+@@ -226,6 +227,7 @@ struct tcp_info {
+ 	__u8	tcpi_probes;
+ 	__u8	tcpi_backoff;
+ 	__u8	tcpi_options;
++	__u8	tcpi_options2;
+ 	__u8	tcpi_snd_wscale : 4, tcpi_rcv_wscale : 4;
+ 	__u8	tcpi_delivery_rate_app_limited:1, tcpi_fastopen_client_fail:2;
+ 
 diff --git a/net/ipv4/Kconfig b/net/ipv4/Kconfig
 index eabda42..27b8844 100644
 --- a/net/ipv4/Kconfig

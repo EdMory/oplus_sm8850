@@ -38,7 +38,7 @@ index fff59a2..1a61ce5 100644
  
  /*
 diff --git a/include/net/tcp.h b/include/net/tcp.h
-index 3255a19..fff5583 100644
+index 3255a19..0385384 100644
 --- a/include/net/tcp.h
 +++ b/include/net/tcp.h
 @@ -376,6 +376,13 @@ static inline void tcp_dec_quickack_mode(struct sock *sk)
@@ -181,11 +181,10 @@ index 3255a19..fff5583 100644
  void tcp_rate_skb_sent(struct sock *sk, struct sk_buff *skb);
  void tcp_rate_skb_delivered(struct sock *sk, struct sk_buff *skb,
  			    struct rate_sample *rs);
-@@ -1281,6 +1327,21 @@ void tcp_rate_check_app_limited(struct sock *sk);
- static inline bool tcp_skb_sent_after(u64 t1, u64 t2, u32 seq1, u32 seq2)
- {
+@@ -1283,6 +1329,21 @@ static inline bool tcp_skb_sent_after(u64 t1, u64 t2, u32 seq1, u32 seq2)
  	return t1 > t2 || (t1 == t2 && after(seq1, seq2));
-+
+ }
+ 
 +/* If a retransmit failed due to local qdisc congestion or other local issues,
 + * then we may have called tcp_set_skb_tso_segs() to increase the number of
 + * segments in the skb without increasing the tx.in_flight. In all other cases,
@@ -200,9 +199,10 @@ index 3255a19..fff5583 100644
 +{
 +	return (skb_pcount > tx_in_flight) && !(skb_sacked_flags & TCPCB_LOST);
 +}
- }
- 
++
  /* These functions determine how the current flow behaves in respect of SACK
+  * handling. SACK is negotiated with the peer, and therefore it can vary
+  * between different flows.
 @@ -2434,7 +2495,7 @@ struct tcp_plb_state {
  	u8	consec_cong_rounds:5, /* consecutive congested rounds */
  		unused:3;
@@ -287,6 +287,7 @@ index eabda42..27b8844 100644
  config TCP_CONG_BBR
  	tristate "BBR TCP"
 -	default n
++	default y
  	help
  
 -	  BBR (Bottleneck Bandwidth and RTT) TCP congestion control aims to

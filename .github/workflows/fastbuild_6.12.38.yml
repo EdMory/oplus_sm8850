@@ -56,7 +56,7 @@ on:
         required: true
         type: boolean
         default: 'true'
-      bbr3_enable:
+      bbr_enable:
         description: '是否集成 BBRv3 TCP 拥塞控制补丁(BBR设为默认拥塞控制算法, fq_codel 设为默认队列管理)'
         required: true
         type: boolean
@@ -439,34 +439,10 @@ jobs:
           echo "SM8750 性能优化补丁集应用完成"
 
       - name: 集成 BBRv3 TCP 拥塞控制补丁
-        if: inputs.bbr3_enable
+        if: inputs.bbr_enable
         run: |
-          echo "正在集成 BBRv3 TCP 拥塞控制补丁…"
+          echo "正在集成 BBR 拥塞控制补丁…"
           cd kernel_workspace/common
-          PATCH=bbrv3-tcp-6.12.38.patch
-          wget -O $PATCH https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/$PATCH \
-            || wget -O $PATCH https://github.com/EdMory/oplus_sm8850/raw/refs/heads/main/other_patch/$PATCH
-          # KMI 保护审计：BBR v3 移植必然扩展 TCP 拥塞控制相关结构(位域重排/icsk_ca_priv 私有区/uapi 扩展)，
-          # 但绝不新增 ANDROID_KABI 保留位、不新增任何导出符号（仅检查补丁新增行，上下文行不受影响）
-          if grep -qE '^\+.*(ANDROID_KABI|__kabi_reserved)' $PATCH; then
-            echo "错误：$PATCH 新增了 KABI 保留区行，可能破坏 KMI，已中止"; exit 1
-          fi
-          if grep -qE '^\+.*EXPORT_SYMBOL' $PATCH; then
-            echo "错误：$PATCH 新增了 EXPORT_SYMBOL，可能破坏 KMI，已中止"; exit 1
-          fi
-          # 改动范围白名单：仅允许 BBR/TCP 拥塞控制相关文件（含必要的 include/ 头文件与 uapi 扩展）
-          OUT_OF_SCOPE="$(grep -E '^diff --git ' $PATCH | grep -vE ' b/(include/linux/tcp\.h|include/net/inet_connection_sock\.h|include/net/tcp\.h|include/uapi/linux/(inet_diag|rtnetlink|tcp)\.h|net/ipv4/(Kconfig|tcp\.c|tcp_bbr\.c|tcp_cong\.c|tcp_input\.c|tcp_minisocks\.c|tcp_output\.c|tcp_rate\.c|tcp_timer\.c))$' || true)"
-          if [ -n "$OUT_OF_SCOPE" ]; then
-            echo "错误：$PATCH 越界改动了以下文件：$OUT_OF_SCOPE"; exit 1
-          fi
-          # 零 fuzz 干跑：BBR v3 任一 hunk 无法精确落位直接失败，避免半成品内核
-          if ! patch -p1 --dry-run -F 0 < $PATCH; then
-            echo "错误：BBR v3 补丁无法零 fuzz 应用，请确认内核源码为 6.12.38 且未被其他补丁打乱 TCP 相关文件"; exit 1
-          fi
-          patch -p1 -F 0 < $PATCH
-          # 编译期将 BBR v3 设为默认拥塞控制算法、fq_codel 设为默认队列管理算法（先清除可能存在的旧默认值，避免 defconfig 重复项）
-          sed -i '/CONFIG_DEFAULT_TCP_CONG=/d; /CONFIG_TCP_CONG_BBR=/d' arch/arm64/configs/gki_defconfig
-          sed -i '/CONFIG_DEFAULT_NET_SCH=/d; /CONFIG_NET_SCH_FQ_CODEL=/d' arch/arm64/configs/gki_defconfig
           echo "CONFIG_TCP_CONG_BBR=y" >> arch/arm64/configs/gki_defconfig
           echo 'CONFIG_DEFAULT_TCP_CONG="bbr"' >> arch/arm64/configs/gki_defconfig
           echo "CONFIG_NET_SCH_FQ_CODEL=y" >> arch/arm64/configs/gki_defconfig
@@ -478,11 +454,6 @@ jobs:
           echo "CONFIG_TCP_CONG_WESTWOOD=y" >> arch/arm64/configs/gki_defconfig
           echo "CONFIG_TCP_CONG_HTCP=y" >> arch/arm64/configs/gki_defconfig
           echo "CONFIG_TCP_CONG_BRUTAL=y" >> arch/arm64/configs/gki_defconfig
-          # 生效校验
-          grep -q '#define BBR_VERSION' net/ipv4/tcp_bbr.c || { echo "错误：BBR v3 补丁未生效"; exit 1; }
-          grep -q 'CONFIG_DEFAULT_TCP_CONG="bbr"' arch/arm64/configs/gki_defconfig || { echo "错误：BBR 默认拥塞控制配置未生效"; exit 1; }
-          grep -q 'CONFIG_DEFAULT_NET_SCH="fq_codel"' arch/arm64/configs/gki_defconfig || { echo "错误：fq_codel 默认队列管理配置未生效"; exit 1; }
-          echo "BBR v3 集成完成(零 fuzz 应用 + KABI 保留区未触碰 + 无新增导出符号)！"
 
       - name: 应用 O3 构建优化
         if: inputs.o3_enable

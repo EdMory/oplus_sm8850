@@ -56,6 +56,11 @@ on:
         required: true
         type: boolean
         default: 'true'
+      bbr3_enable:
+        description: '是否集成 BBRv3 TCP 拥塞控制补丁(BBR设为默认拥塞控制算法, fq_codel 设为默认队列管理)'
+        required: true
+        type: boolean
+        default: 'true'
       adios_enable:
         description: '是否启用ADIOS IO调度器支持'
         required: true
@@ -88,11 +93,6 @@ on:
         default: 'true'
       perf_patch_enable:
         description: '是否集成性能优化补丁集'
-        required: true
-        type: boolean
-        default: 'true'
-      bbr3_enable:
-        description: '是否集成 BBRv3 TCP 拥塞控制补丁(BBR设为默认拥塞控制算法, fq_codel 设为默认队列管理)'
         required: true
         type: boolean
         default: 'true'

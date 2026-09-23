@@ -761,7 +761,7 @@ new file mode 100644
 +#define SCHED_BORE_VERSION  "7.0.0"
 +
 +extern u8   __read_mostly sched_bore;
-+DECLARE_STATIC_KEY_TRUE(sched_bore_key);
++DECLARE_STATIC_KEY_FALSE(sched_bore_key);
 +extern u8   __read_mostly sched_burst_inherit_type;
 +extern u8   __read_mostly sched_burst_smoothness;
 +extern u8   __read_mostly sched_burst_penalty_offset;
@@ -818,8 +818,8 @@ new file mode 100644
 +#include "sched.h"
 +
 +#ifdef CONFIG_SCHED_BORE
-+DEFINE_STATIC_KEY_TRUE(sched_bore_key);
-+u8   __read_mostly sched_bore                   = 1;
++DEFINE_STATIC_KEY_FALSE(sched_bore_key);
++u8   __read_mostly sched_bore                   = 0;
 +u8   __read_mostly sched_burst_inherit_type     = 2;
 +u8   __read_mostly sched_burst_protect_slice_lv = 1;
 +u8   __read_mostly sched_burst_smoothness       = 1;

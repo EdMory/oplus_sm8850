@@ -74,10 +74,11 @@ diff --git a/init/Kconfig b/init/Kconfig
 diff --git a/kernel/Kconfig.hz b/kernel/Kconfig.hz
 --- a/kernel/Kconfig.hz
 +++ b/kernel/Kconfig.hz
-@@ -58,3 +58,20 @@
+@@ -57,3 +57,20 @@
+ 
  config SCHED_HRTICK
  	def_bool HIGH_RES_TIMERS
- 
++
 +config MIN_BASE_SLICE_NS
 +	int "Default value for min_base_slice_ns"
 +	default 2000000
@@ -178,14 +179,11 @@ diff --git a/kernel/futex/waitwake.c b/kernel/futex/waitwake.c
 diff --git a/kernel/sched/Makefile b/kernel/sched/Makefile
 --- a/kernel/sched/Makefile
 +++ b/kernel/sched/Makefile
-@@ -32,6 +32,7 @@
+@@ -32,3 +32,4 @@
  obj-y += fair.o
  obj-y += build_policy.o
  obj-y += build_utility.o
 +obj-$(CONFIG_SCHED_BORE) += bore.o
- obj-$(CONFIG_ANDROID_VENDOR_HOOKS) += vendor_hooks.o
- obj-$(CONFIG_SCHED_RT_INVARIANT_TEST) += test_ksched_football.o
- 
 diff --git a/kernel/sched/build_utility.c b/kernel/sched/build_utility.c
 --- a/kernel/sched/build_utility.c
 +++ b/kernel/sched/build_utility.c

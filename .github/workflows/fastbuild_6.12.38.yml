@@ -1016,6 +1016,7 @@ jobs:
           }
           BORE_PATCH=bore-6.12.38-kabi-safe.patch
           get_patch "$BORE_PATCH" || { echo "BORE 补丁下载失败: 仓库 other_patch/$BORE_PATCH 缺失或不可达(见上方诊断)"; exit 1; }
+          patch -p1 -F 0 --no-backup-if-mismatch < "$BORE_PATCH"
 
           # 三、ABI/KMI 面静态审计(仅检查补丁新增行):
           #     1) 禁止触碰 ANDROID_KABI 保留区与 __kabi_reserved;

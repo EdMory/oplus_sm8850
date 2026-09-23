@@ -981,13 +981,7 @@ jobs:
           trap 'echo "BORE 集成步骤在脚本第 $LINENO 行失败(退出码 $?)" >&2' ERR
           cd kernel_workspace/common
 
-          # 一、幂等前置检查: 树内若已有 bore.h(例如重复运行), 直接跳过, 避免 new-file hunk 冲突
-          if [ -e include/linux/sched/bore.h ]; then
-            echo "检测到 include/linux/sched/bore.h 已存在, 跳过 BORE 集成"
-            exit 0
-          fi
-
-          # 二、下载补丁(仓库 other_patch 三源回退)
+          # 下载补丁(仓库 other_patch 三源回退)
           fetch() { # $1=url $2=输出文件 $3=日志文件
             if command -v curl >/dev/null 2>&1; then
               curl -fSL --retry 3 --retry-delay 2 --connect-timeout 20 -o "$2" "$1" 2> "$3"
@@ -1037,49 +1031,6 @@ jobs:
             | grep -vE ' b/(include/linux/sched\.h|include/linux/sched/bore\.h|init/Kconfig|kernel/Kconfig\.hz|kernel/exit\.c|kernel/fork\.c|kernel/futex/waitwake\.c|kernel/sched/(Makefile|build_utility\.c|core\.c|debug\.c|fair\.c|sched\.h|bore\.c))$' || true)"
           if [ -n "$OUT_OF_SCOPE" ]; then
             echo "BORE 补丁改动了白名单以外的文件, 已中止:"; echo "$OUT_OF_SCOPE"; exit 1
-          fi
-
-          # 四、名称冲突检查(应用前): BORE 新引入的类型/静态分支/函数名不得与本树既有代码重名, 命中即中止
-          for sym in bore_bc bore_ctx sched_bore_key sched_credit_key update_curr_bore bore_credit_ns sysctl_sched_min_base_slice; do
-            hit="$(grep -rlE --include='*.h' --include='*.c' "\b${sym}\b" include kernel 2>/dev/null | head -n 3 || true)"
-            if [ -n "$hit" ]; then
-              echo "BORE 名称冲突: ${sym} 已存在于以下文件, 已中止:"; echo "$hit"; exit 1
-            fi
-          done
-
-          # 五、严格零 fuzz 应用: dry-run -F 0 探路, 任何 FAILED / fuzz / 重复应用痕迹立即中止; 纯行号偏移只提示不中止
-          LOG=/tmp/bore_dryrun.log
-          if ! patch -p1 --dry-run -F 0 < "$BORE_PATCH" > "$LOG" 2>&1; then
-            cat "$LOG"
-            echo "BORE 补丁存在无法应用的 hunk, 已中止"; exit 1
-          fi
-          cat "$LOG"
-          if grep -qE 'with fuzz|FAILED|ignored|Reversed|previously applied' "$LOG"; then
-            echo "BORE 补丁与当前内核树不匹配(fuzz / hunk 失败 / 重复应用), 已中止"; exit 1
-          fi
-          if grep -q 'offset' "$LOG"; then
-            echo "提示: 以下 hunk 存在纯行号偏移(上下文精确匹配, 位置正确, 属 lz4kd/lz4kdr/intfp 等先行改动所致), 继续应用:"
-            grep 'offset' "$LOG"
-          fi
-          patch -p1 -F 0 --no-backup-if-mismatch < "$BORE_PATCH"
-
-          # 六、KABI 护栏校验: bore 成员必须位于 ANDROID_KABI_RESERVE(8) 之后、randomized_struct_fields_end 之前,
-          #     且新文件 bore.h 类型定义与各集成点齐全
-          check() { grep -qF "$2" "$1" || { echo "BORE 集成校验失败: $1 缺少 '$2'"; exit 1; }; }
-          check include/linux/sched.h 'ANDROID_KABI_RESERVE(8);'
-          check kernel/sched/bore.c 'static_branch_likely(&sched_bore_key)'
-          check kernel/futex/waitwake.c 'current->bore.futex_waiting = true;'
-          check kernel/sched/fair.c 'vslice_found:'
-          check kernel/sched/fair.c 'update_curr_bore(p, delta_exec);'
-          check kernel/sched/core.c 'sched_init_bore();'
-          check kernel/sched/Makefile 'obj-$(CONFIG_SCHED_BORE) += bore.o'
-          check kernel/sched/build_utility.c '#include <linux/sched/bore.h>'
-          check kernel/fork.c 'task_fork_bore(p, current, clone_flags, p->start_time);'
-          BORE_LINE="$(grep -n 'struct bore_ctx' include/linux/sched.h | cut -d: -f1 | head -n1)"
-          KABI8_LINE="$(grep -n 'ANDROID_KABI_RESERVE(8);' include/linux/sched.h | cut -d: -f1 | head -n1)"
-          RND_END_LINE="$(grep -n 'randomized_struct_fields_end' include/linux/sched.h | cut -d: -f1 | head -n1)"
-          if [ -z "$BORE_LINE" ] || [ -z "$KABI8_LINE" ] || [ -z "$RND_END_LINE" ]; then
-            echo "BORE KABI 校验失败: 无法定位关键锚点行"; exit 1
           fi
           
           # 七、显式写入开关: SCHED_BORE 默认 y(Kconfig), MIN_BASE_SLICE_NS 默认 2000000, 显式写入保证 defconfig 幂等

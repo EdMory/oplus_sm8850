@@ -179,11 +179,12 @@ diff --git a/kernel/futex/waitwake.c b/kernel/futex/waitwake.c
 diff --git a/kernel/sched/Makefile b/kernel/sched/Makefile
 --- a/kernel/sched/Makefile
 +++ b/kernel/sched/Makefile
-@@ -32,3 +32,4 @@
+@@ -32,4 +32,5 @@
  obj-y += fair.o
  obj-y += build_policy.o
- obj-y += build_utility.o
 +obj-$(CONFIG_SCHED_BORE) += bore.o
+ obj-y += build_utility.o
+ obj-$(CONFIG_ANDROID_VENDOR_HOOKS) += vendor_hooks.o
 diff --git a/kernel/sched/build_utility.c b/kernel/sched/build_utility.c
 --- a/kernel/sched/build_utility.c
 +++ b/kernel/sched/build_utility.c

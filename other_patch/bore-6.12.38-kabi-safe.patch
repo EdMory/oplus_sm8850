@@ -358,7 +358,7 @@ diff --git a/kernel/sched/fair.c b/kernel/sched/fair.c
  EXPORT_TRACEPOINT_SYMBOL_GPL(sched_stat_runtime);
  
  /*
-@@ -84,18 +88,33 @@
+@@ -84,18 +88,32 @@
   *   SCHED_TUNABLESCALING_LOG - scaled logarithmically, *1+ilog(ncpus)
   *   SCHED_TUNABLESCALING_LINEAR - scaled linear, *ncpus
   *
@@ -391,7 +391,7 @@ diff --git a/kernel/sched/fair.c b/kernel/sched/fair.c
  
  /*
   * After fork, child runs first. If set to 0 (default) then
-@@ -222,6 +241,13 @@
+@@ -222,6 +240,12 @@
   *
   * This idea comes from the SD scheduler of Con Kolivas:
   */
@@ -404,7 +404,7 @@ diff --git a/kernel/sched/fair.c b/kernel/sched/fair.c
  static unsigned int get_update_sysctl_factor(void)
  {
  	unsigned int cpus = min_t(unsigned int, num_online_cpus(), 8);
-@@ -252,6 +278,7 @@
+@@ -252,6 +276,7 @@
  	SET_SYSCTL(sched_base_slice);
  #undef SET_SYSCTL
  }
@@ -412,7 +412,7 @@ diff --git a/kernel/sched/fair.c b/kernel/sched/fair.c
  
  void __init sched_init_granularity(void)
  {
-@@ -729,6 +756,10 @@
+@@ -729,6 +754,10 @@
  
  	vlag = avruntime - se->vruntime;
  	limit = calc_delta_fair(max_t(u64, 2*se->slice, TICK_NSEC), se);
@@ -423,7 +423,7 @@ diff --git a/kernel/sched/fair.c b/kernel/sched/fair.c
  
  	return clamp(vlag, -limit, limit);
  }
-@@ -977,8 +1008,17 @@
+@@ -977,8 +1006,17 @@
  	if (curr && (!curr->on_rq || !entity_eligible(cfs_rq, curr)))
  		curr = NULL;
  
@@ -443,7 +443,7 @@ diff --git a/kernel/sched/fair.c b/kernel/sched/fair.c
  
  	/* Pick the leftmost entity if it's eligible */
  	if (se && entity_eligible(cfs_rq, se)) {
-@@ -1036,6 +1076,7 @@
+@@ -1036,6 +1074,7 @@
   * Scheduling class statistics methods:
   */
  #ifdef CONFIG_SMP
@@ -451,7 +451,7 @@ diff --git a/kernel/sched/fair.c b/kernel/sched/fair.c
  int sched_update_scaling(void)
  {
  	unsigned int factor = get_update_sysctl_factor();
-@@ -1047,6 +1088,7 @@
+@@ -1047,6 +1086,7 @@
  
  	return 0;
  }
@@ -459,7 +459,7 @@ diff --git a/kernel/sched/fair.c b/kernel/sched/fair.c
  #endif
  #endif
  
-@@ -1265,6 +1307,37 @@
+@@ -1265,6 +1305,37 @@
  	return false;
  }
  
@@ -497,7 +497,7 @@ diff --git a/kernel/sched/fair.c b/kernel/sched/fair.c
  /*
   * Used by other classes to account runtime.
   */
-@@ -1301,6 +1374,11 @@
+@@ -1301,6 +1372,11 @@
  	update_min_vruntime(cfs_rq);
  
  	if (entity_is_task(curr)) {
@@ -509,7 +509,7 @@ diff --git a/kernel/sched/fair.c b/kernel/sched/fair.c
  		/*
  		 * If the fair_server is active, we need to account for the
  		 * fair_server time whether or not the task is running on
-@@ -3947,7 +4025,7 @@
+@@ -3947,7 +4023,7 @@
  	se->deadline = avruntime + vslice;
  }
  
@@ -518,7 +518,7 @@ diff --git a/kernel/sched/fair.c b/kernel/sched/fair.c
  			    unsigned long weight)
  {
  	bool curr = cfs_rq->curr == se;
-@@ -5389,12 +5467,11 @@
+@@ -5389,12 +5465,11 @@
  static void
  place_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
  {
@@ -532,7 +532,7 @@ diff --git a/kernel/sched/fair.c b/kernel/sched/fair.c
  
  	/*
  	 * Due to how V is constructed as the weighted average of entities,
-@@ -5479,7 +5556,18 @@
+@@ -5479,7 +5554,18 @@
  		se->rel_deadline = 0;
  		return;
  	}
@@ -552,7 +552,7 @@ diff --git a/kernel/sched/fair.c b/kernel/sched/fair.c
  	/*
  	 * When joining the competition; the existing tasks will be,
  	 * on average, halfway through their slice, as such start tasks
-@@ -5488,10 +5576,23 @@
+@@ -5488,10 +5574,23 @@
  	if (sched_feat(PLACE_DEADLINE_INITIAL) && (flags & ENQUEUE_INITIAL))
  		vslice /= 2;
  
@@ -576,7 +576,7 @@ diff --git a/kernel/sched/fair.c b/kernel/sched/fair.c
  	trace_android_rvh_place_entity(cfs_rq, se, flags, &vruntime);
  }
  
-@@ -5501,7 +5602,7 @@
+@@ -5501,7 +5600,7 @@
  static inline bool cfs_bandwidth_used(void);
  
  static void
@@ -585,7 +585,7 @@ diff --git a/kernel/sched/fair.c b/kernel/sched/fair.c
  
  static void
  enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
-@@ -5665,6 +5766,10 @@
+@@ -5665,6 +5764,10 @@
  		if (sched_feat(DELAY_DEQUEUE) && delay &&
  		    !entity_eligible(cfs_rq, se)) {
  			update_load_avg(cfs_rq, se, 0);
@@ -596,7 +596,7 @@ diff --git a/kernel/sched/fair.c b/kernel/sched/fair.c
  			set_delayed(se);
  			return false;
  		}
-@@ -7091,7 +7196,7 @@
+@@ -7091,7 +7194,7 @@
  #endif
  
  static void
@@ -605,7 +605,7 @@ diff --git a/kernel/sched/fair.c b/kernel/sched/fair.c
  {
  	struct cfs_rq *cfs_rq = cfs_rq_of(se);
  
-@@ -7104,13 +7209,22 @@
+@@ -7104,13 +7207,22 @@
  	SCHED_WARN_ON(!se->on_rq);
  
  	if (sched_feat(DELAY_ZERO)) {
@@ -629,7 +629,7 @@ diff --git a/kernel/sched/fair.c b/kernel/sched/fair.c
  			if (se != cfs_rq->curr)
  				__enqueue_entity(cfs_rq, se);
  			cfs_rq->nr_running++;
-@@ -7148,7 +7262,7 @@
+@@ -7148,7 +7260,7 @@
  		util_est_enqueue(&rq->cfs, p);
  
  	if (flags & ENQUEUE_DELAYED) {
@@ -638,7 +638,7 @@ diff --git a/kernel/sched/fair.c b/kernel/sched/fair.c
  		return;
  	}
  
-@@ -7168,7 +7282,7 @@
+@@ -7168,7 +7280,7 @@
  	for_each_sched_entity(se) {
  		if (se->on_rq) {
  			if (se->sched_delayed)
@@ -647,7 +647,7 @@ diff --git a/kernel/sched/fair.c b/kernel/sched/fair.c
  			break;
  		}
  		cfs_rq = cfs_rq_of(se);
-@@ -7392,6 +7506,16 @@
+@@ -7392,6 +7504,16 @@
  		util_est_dequeue(&rq->cfs, p);
  
  	util_est_update(&rq->cfs, p, flags & DEQUEUE_SLEEP);
@@ -664,7 +664,7 @@ diff --git a/kernel/sched/fair.c b/kernel/sched/fair.c
  	if (dequeue_entities(rq, &p->se, flags) < 0)
  		return false;
  
-@@ -9075,6 +9199,11 @@
+@@ -9075,6 +9197,11 @@
  	if (do_preempt_short(cfs_rq, pse, se))
  		cancel_protect_slice(se);
  
@@ -676,7 +676,7 @@ diff --git a/kernel/sched/fair.c b/kernel/sched/fair.c
  	/*
  	 * If @p has become the most eligible task, force preemption.
  	 */
-@@ -9260,16 +9389,25 @@
+@@ -9260,16 +9387,25 @@
  	/*
  	 * Are we the only task in the tree?
  	 */
@@ -702,7 +702,7 @@ diff --git a/kernel/sched/fair.c b/kernel/sched/fair.c
  	/*
  	 * Tell update_rq_clock() that we've just updated,
  	 * so we don't do microscopic update in schedule()
-@@ -13552,6 +13690,9 @@
+@@ -13552,6 +13688,9 @@
  	SCHED_WARN_ON(p->se.sched_delayed);
  
  	attach_task_cfs_rq(p);

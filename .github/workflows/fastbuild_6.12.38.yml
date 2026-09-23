@@ -1067,7 +1067,7 @@ jobs:
           #     且新文件 bore.h 类型定义与各集成点齐全
           check() { grep -qF "$2" "$1" || { echo "BORE 集成校验失败: $1 缺少 '$2'"; exit 1; }; }
           check include/linux/sched/bore.h 'struct bore_ctx {'
-          check include/linux/sched.h 'struct bore_ctx'
+          check include/linux/sched.h 'struct bore_ctx {'
           check include/linux/sched.h 'ANDROID_KABI_RESERVE(8);'
           check kernel/sched/bore.c 'static_branch_likely(&sched_bore_key)'
           check kernel/futex/waitwake.c 'current->bore.futex_waiting = true;'

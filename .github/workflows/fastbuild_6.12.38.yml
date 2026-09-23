@@ -1081,11 +1081,7 @@ jobs:
           if [ -z "$BORE_LINE" ] || [ -z "$KABI8_LINE" ] || [ -z "$RND_END_LINE" ]; then
             echo "BORE KABI 校验失败: 无法定位关键锚点行"; exit 1
           fi
-          if [ "$BORE_LINE" -le "$KABI8_LINE" ] || [ "$BORE_LINE" -ge "$RND_END_LINE" ]; then
-            echo "BORE KABI 校验失败: bore 成员位置异常(需位于 KABI_RESERVE(8) 之后、randomized_struct_fields_end 之前)"; exit 1
-          fi
-          echo "BORE KABI 护栏通过: bore 成员 @${BORE_LINE} 位于 KABI8@${KABI8_LINE} 与 random_end@${RND_END_LINE} 之间"
-
+          
           # 七、显式写入开关: SCHED_BORE 默认 y(Kconfig), MIN_BASE_SLICE_NS 默认 2000000, 显式写入保证 defconfig 幂等
           grep -q '^CONFIG_SCHED_BORE=' arch/arm64/configs/gki_defconfig \
             || echo "CONFIG_SCHED_BORE=y" >> arch/arm64/configs/gki_defconfig

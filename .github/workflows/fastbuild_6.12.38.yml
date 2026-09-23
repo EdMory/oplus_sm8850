@@ -91,6 +91,11 @@ on:
         required: true
         type: boolean
         default: 'true'
+      bore_enable:
+        description: '是否集成 BORE 调度器'
+        required: true
+        type: boolean
+        default: 'true'
       perf_patch_enable:
         description: '是否集成性能优化补丁集'
         required: true
@@ -968,6 +973,129 @@ jobs:
           echo "提示: 内核代码 include <linux/intfp.h> 即可按需使用; 启动后可用 dmesg | grep intfp 查看内置自检结果"
           echo "intfp 集成完成(零 fuzz 应用 + 零导出符号 + KABI 面未触碰)！"
 
+      - name: 集成 BORE 调度器(6.12.38 KABI 安全移植)
+        if: inputs.bore_enable
+        run: |
+          echo "正在集成 BORE(Burst-Oriented Response Enhancer; 基于 firelzrd/bore-scheduler 6.12.37 原版补丁, 针对本 6.12.38 oplus 树逐 hunk 重建: bore_ctx 成员追加到 task_struct 末尾, 不挪动任何既有成员、不触碰 ANDROID_KABI_RESERVE, KABI 面安全)…"
+          # 任何命令失败时打印出错行号: 避免 set -e 静默退出后失败点无法定位
+          trap 'echo "BORE 集成步骤在脚本第 $LINENO 行失败(退出码 $?)" >&2' ERR
+          cd kernel_workspace/common
+
+          # 一、幂等前置检查: 树内若已有 bore.h(例如重复运行), 直接跳过, 避免 new-file hunk 冲突
+          if [ -e include/linux/sched/bore.h ]; then
+            echo "检测到 include/linux/sched/bore.h 已存在, 跳过 BORE 集成"
+            exit 0
+          fi
+
+          # 二、下载补丁(仓库 other_patch 三源回退)
+          fetch() { # $1=url $2=输出文件 $3=日志文件
+            if command -v curl >/dev/null 2>&1; then
+              curl -fSL --retry 3 --retry-delay 2 --connect-timeout 20 -o "$2" "$1" 2> "$3"
+            else
+              wget -O "$2" --tries=3 --timeout=20 "$1" 2> "$3"
+            fi
+          }
+          get_patch() { # $1=补丁文件名(位于仓库 other_patch/ 目录)
+            local name="$1" u
+            local urls=(
+              "https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/$name"
+              "https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$GITHUB_REF_NAME/other_patch/$name"
+              "https://cdn.jsdelivr.net/gh/$GITHUB_REPOSITORY@$GITHUB_REF_NAME/other_patch/$name"
+            )
+            rm -f "$name"
+            for u in "${urls[@]}"; do
+              echo "尝试下载 BORE 补丁 $name: $u"
+              if fetch "$u" "$name.tmp" "$name.download.log"; then
+                if [ -s "$name.tmp" ] && grep -q '^diff --git ' "$name.tmp"; then
+                  mv "$name.tmp" "$name"
+                  echo "下载成功: $name ($(wc -c < "$name") 字节)"
+                  rm -f "$name.download.log"
+                  return 0
+                fi
+                echo "该源返回内容异常(空文件或非 unified diff), 尝试下一个源"
+              else
+                echo "该源不可用: $(tail -n 2 "$name.download.log" 2>/dev/null | tr '\n' ' ')"
+              fi
+            done
+            rm -f "$name.tmp" "$name.download.log"
+            return 1
+          }
+          BORE_PATCH=bore-6.12.38-kabi-safe.patch
+          get_patch "$BORE_PATCH" || { echo "BORE 补丁下载失败: 仓库 other_patch/$BORE_PATCH 缺失或不可达(见上方诊断)"; exit 1; }
+
+          # 三、ABI/KMI 面静态审计(仅检查补丁新增行):
+          #     1) 禁止触碰 ANDROID_KABI 保留区与 __kabi_reserved;
+          #     2) 本移植为零新增导出: sysctl_sched_base_slice 的 EXPORT_SYMBOL_GPL 保留在非 BORE 分支(上下文行), 补丁不应新增任何 EXPORT_SYMBOL;
+          #     3) 白名单外文件一律中止(允许 12 个既有文件 + 2 个新文件)。
+          if grep -nE '^\+.*(ANDROID_KABI|__kabi_reserved)' "$BORE_PATCH"; then
+            echo "BORE 补丁触碰 KABI 保留区, 已中止"; exit 1
+          fi
+          if grep -nE '^\+.*EXPORT_SYMBOL(_GPL)?\(' "$BORE_PATCH"; then
+            echo "BORE 补丁包含新增导出符号(应零导出), 已中止"; exit 1
+          fi
+          OUT_OF_SCOPE="$(grep -E '^diff --git ' "$BORE_PATCH" \
+            | grep -vE ' b/(include/linux/sched\.h|include/linux/sched/bore\.h|init/Kconfig|kernel/Kconfig\.hz|kernel/exit\.c|kernel/fork\.c|kernel/futex/waitwake\.c|kernel/sched/(Makefile|build_utility\.c|core\.c|debug\.c|fair\.c|sched\.h|bore\.c))$' || true)"
+          if [ -n "$OUT_OF_SCOPE" ]; then
+            echo "BORE 补丁改动了白名单以外的文件, 已中止:"; echo "$OUT_OF_SCOPE"; exit 1
+          fi
+
+          # 四、名称冲突检查(应用前): BORE 新引入的类型/静态分支/函数名不得与本树既有代码重名, 命中即中止
+          for sym in bore_bc bore_ctx sched_bore_key sched_credit_key update_curr_bore bore_credit_ns sysctl_sched_min_base_slice; do
+            hit="$(grep -rlE --include='*.h' --include='*.c' "\b${sym}\b" include kernel 2>/dev/null | head -n 3 || true)"
+            if [ -n "$hit" ]; then
+              echo "BORE 名称冲突: ${sym} 已存在于以下文件, 已中止:"; echo "$hit"; exit 1
+            fi
+          done
+
+          # 五、严格零 fuzz 应用: dry-run -F 0 探路, 任何 FAILED / fuzz / 重复应用痕迹立即中止; 纯行号偏移只提示不中止
+          LOG=/tmp/bore_dryrun.log
+          if ! patch -p1 --dry-run -F 0 < "$BORE_PATCH" > "$LOG" 2>&1; then
+            cat "$LOG"
+            echo "BORE 补丁存在无法应用的 hunk, 已中止"; exit 1
+          fi
+          cat "$LOG"
+          if grep -qE 'with fuzz|FAILED|ignored|Reversed|previously applied' "$LOG"; then
+            echo "BORE 补丁与当前内核树不匹配(fuzz / hunk 失败 / 重复应用), 已中止"; exit 1
+          fi
+          if grep -q 'offset' "$LOG"; then
+            echo "提示: 以下 hunk 存在纯行号偏移(上下文精确匹配, 位置正确, 属 lz4kd/lz4kdr/intfp 等先行改动所致), 继续应用:"
+            grep 'offset' "$LOG"
+          fi
+          patch -p1 -F 0 --no-backup-if-mismatch < "$BORE_PATCH"
+
+          # 六、KABI 护栏校验: bore 成员必须位于 ANDROID_KABI_RESERVE(8) 之后、randomized_struct_fields_end 之前,
+          #     且新文件 bore.h 类型定义与各集成点齐全
+          check() { grep -qF "$2" "$1" || { echo "BORE 集成校验失败: $1 缺少 '$2'"; exit 1; }; }
+          check include/linux/sched/bore.h 'struct bore_ctx {'
+          check include/linux/sched.h 'struct bore_ctx'
+          check include/linux/sched.h 'ANDROID_KABI_RESERVE(8);'
+          check kernel/sched/bore.c 'static_branch_likely(&sched_bore_key)'
+          check kernel/futex/waitwake.c 'current->bore.futex_waiting = true;'
+          check kernel/sched/fair.c 'vslice_found:'
+          check kernel/sched/fair.c 'update_curr_bore(p, delta_exec);'
+          check kernel/sched/core.c 'sched_init_bore();'
+          check kernel/sched/Makefile 'obj-$(CONFIG_SCHED_BORE) += bore.o'
+          check kernel/sched/build_utility.c '#include <linux/sched/bore.h>'
+          check kernel/fork.c 'task_fork_bore(p, current, clone_flags, p->start_time);'
+          BORE_LINE="$(grep -n 'struct bore_ctx' include/linux/sched.h | cut -d: -f1 | head -n1)"
+          KABI8_LINE="$(grep -n 'ANDROID_KABI_RESERVE(8);' include/linux/sched.h | cut -d: -f1 | head -n1)"
+          RND_END_LINE="$(grep -n 'randomized_struct_fields_end' include/linux/sched.h | cut -d: -f1 | head -n1)"
+          if [ -z "$BORE_LINE" ] || [ -z "$KABI8_LINE" ] || [ -z "$RND_END_LINE" ]; then
+            echo "BORE KABI 校验失败: 无法定位关键锚点行"; exit 1
+          fi
+          if [ "$BORE_LINE" -le "$KABI8_LINE" ] || [ "$BORE_LINE" -ge "$RND_END_LINE" ]; then
+            echo "BORE KABI 校验失败: bore 成员位置异常(需位于 KABI_RESERVE(8) 之后、randomized_struct_fields_end 之前)"; exit 1
+          fi
+          echo "BORE KABI 护栏通过: bore 成员 @${BORE_LINE} 位于 KABI8@${KABI8_LINE} 与 random_end@${RND_END_LINE} 之间"
+
+          # 七、显式写入开关: SCHED_BORE 默认 y(Kconfig), MIN_BASE_SLICE_NS 默认 2000000, 显式写入保证 defconfig 幂等
+          grep -q '^CONFIG_SCHED_BORE=' arch/arm64/configs/gki_defconfig \
+            || echo "CONFIG_SCHED_BORE=y" >> arch/arm64/configs/gki_defconfig
+          grep -q '^CONFIG_MIN_BASE_SLICE_NS=' arch/arm64/configs/gki_defconfig \
+            || echo "CONFIG_MIN_BASE_SLICE_NS=2000000" >> arch/arm64/configs/gki_defconfig
+          echo "提示: BORE 默认 base_slice 由 HZ 与 MIN_BASE_SLICE_NS 自动计算; 运行时可用 /proc/sys/kernel/sched_base_slice 查看, dmesg 可查 BORE 自检"
+          echo "BORE 集成完成(零 fuzz 应用 + 零新增导出 + KABI 面未触碰)！"
+
       - name: 添加制作名称
         run: |
           cd kernel_workspace
@@ -1216,6 +1344,7 @@ jobs:
           echo "NoMount: ${{ github.event.inputs.nomount_enable }}" >> ./ak3.log
           echo "ZRAM-IR: ${{ github.event.inputs.zram_ir_enable }}" >> ./ak3.log
           echo "LZ4KDR: ${{ github.event.inputs.lz4kdr_enable }}" >> ./ak3.log
+          echo "BORE: ${{ github.event.inputs.bore_enable }}" >> ./ak3.log
           echo "Kcompressd: ${{ github.event.inputs.kcompress_enable }}" >> ./ak3.log
           zip -z ../$AK3_NAME < ./ak3.log
 
@@ -1303,6 +1432,7 @@ jobs:
           - 内核级基带保护支持：${{ github.event.inputs.baseband_guard }}
           - NoMount(VFS 路径重定向)支持：${{ github.event.inputs.nomount_enable }}
           - LZ4KDR 支持：${{ github.event.inputs.lz4kdr_enable }}（LZ4KD 的高速衍生实现，线格式兼容、重写编码器搜索循环，与 LZ4KD 后端并存）
+          - BORE 调度器支持：${{ github.event.inputs.bore_enable }}（Burst-Oriented Response Enhancer，基于 burst 时间区分任务优先级，提升交互响应；KABI 安全移植：bore_ctx 追加到 task_struct 末尾，不触碰 ANDROID_KABI_RESERVE）
           - 性能优化补丁集：${{ github.event.inputs.perf_patch_enable }}（TCP 初始窗口锁定 64K、IRQ 默认亲和性收敛到 CPU0、workqueue flush 减少自旋锁、关闭 debug_locks 全局锁调试开关；F2FS GC idle 优化随移植补丁集）
           - O3 构建优化：${{ github.event.inputs.o3_enable }}（内核整体 -O3 + arm64 额外代码生成优化，镜像体积会增大）
           - ReSukiSU管理器下载：[ReSukiSU_CI](https://github.com/cctv18/ReSukiSU_CI/releases)

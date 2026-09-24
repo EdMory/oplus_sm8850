@@ -96,21 +96,6 @@ diff --git a/kernel/Kconfig.hz b/kernel/Kconfig.hz
 +	 an unnecessarily large base slice, resulting in high scheduling
 +	 latency and poor system responsiveness.
 +
-diff --git a/kernel/exit.c b/kernel/exit.c
---- a/kernel/exit.c
-+++ b/kernel/exit.c
-@@ -135,7 +135,11 @@
- 		detach_pid(p, PIDTYPE_SID);
- 
- 		list_del_rcu(&p->tasks);
-+#ifdef CONFIG_SCHED_BORE
-+		list_del_rcu(&p->sibling);
-+#else /* !CONFIG_SCHED_BORE */
- 		list_del_init(&p->sibling);
-+#endif /* CONFIG_SCHED_BORE */
- 		__this_cpu_dec(process_counts);
- 	}
- 	list_del_rcu(&p->thread_node);
 diff --git a/kernel/fork.c b/kernel/fork.c
 --- a/kernel/fork.c
 +++ b/kernel/fork.c
@@ -137,48 +122,6 @@ diff --git a/kernel/fork.c b/kernel/fork.c
  	/*
  	 * Make it visible to the rest of the system, but dont wake it up yet.
  	 * Need tasklist lock for parent etc handling!
-@@ -2600,7 +2609,11 @@
- 			 */
- 			p->signal->has_child_subreaper = p->real_parent->signal->has_child_subreaper ||
- 							 p->real_parent->signal->is_child_subreaper;
-+#ifdef CONFIG_SCHED_BORE
-+			list_add_tail_rcu(&p->sibling, &p->real_parent->children);
-+#else /* !CONFIG_SCHED_BORE */
- 			list_add_tail(&p->sibling, &p->real_parent->children);
-+#endif /* CONFIG_SCHED_BORE */
- 			list_add_tail_rcu(&p->tasks, &init_task.tasks);
- 			attach_pid(p, PIDTYPE_TGID);
- 			attach_pid(p, PIDTYPE_PGID);
-diff --git a/kernel/futex/waitwake.c b/kernel/futex/waitwake.c
---- a/kernel/futex/waitwake.c
-+++ b/kernel/futex/waitwake.c
-@@ -4,6 +4,9 @@
- #include <linux/sched/task.h>
- #include <linux/sched/signal.h>
- #include <linux/freezer.h>
-+#ifdef CONFIG_SCHED_BORE
-+#include <linux/sched/bore.h>
-+#endif /* CONFIG_SCHED_BORE */
- 
- #include "futex.h"
- #include <trace/hooks/futex.h>
-@@ -373,7 +376,13 @@
- 		 */
- 		if (!timeout || timeout->task) {
- 			trace_android_vh_futex_sleep_start(current);
-+#ifdef CONFIG_SCHED_BORE
-+			current->bore.futex_waiting = true;
-+#endif /* CONFIG_SCHED_BORE */
- 			schedule();
-+#ifdef CONFIG_SCHED_BORE
-+			current->bore.futex_waiting = false;
-+#endif /* CONFIG_SCHED_BORE */
- 		}
- 	}
- 	__set_current_state(TASK_RUNNING);
-diff --git a/kernel/sched/Makefile b/kernel/sched/Makefile
---- a/kernel/sched/Makefile
-+++ b/kernel/sched/Makefile
 @@ -32,4 +32,5 @@
  obj-y += fair.o
  obj-y += build_policy.o
@@ -225,20 +168,6 @@ diff --git a/kernel/sched/core.c b/kernel/sched/core.c
  	struct load_weight lw;
  
  	if (task_has_idle_policy(p)) {
-@@ -9506,6 +9514,10 @@
- 	BUG_ON(!sched_class_above(&ext_sched_class, &idle_sched_class));
- #endif
- 
-+#ifdef CONFIG_SCHED_BORE
-+	sched_init_bore();
-+#endif /* CONFIG_SCHED_BORE */
-+
- 	wait_bit_init();
- 
- #ifdef CONFIG_FAIR_GROUP_SCHED
-diff --git a/kernel/sched/debug.c b/kernel/sched/debug.c
---- a/kernel/sched/debug.c
-+++ b/kernel/sched/debug.c
 @@ -169,7 +169,53 @@
  };
  
@@ -807,7 +736,7 @@ diff --git a/kernel/sched/bore.c b/kernel/sched/bore.c
 new file mode 100644
 --- /dev/null
 +++ b/kernel/sched/bore.c
-@@ -0,0 +1,521 @@
+@@ -0,0 +1,528 @@
 +/*
 + *  Burst-Oriented Response Enhancer (BORE) CPU Scheduler
 + *  Copyright (C) 2021-2025 Masahito Suzuki <firelzrd@gmail.com>
@@ -858,6 +787,7 @@ new file mode 100644
 +
 +void bore_note_sleep(struct task_struct *p, u64 now)
 +{
++	if (!static_branch_likely(&sched_bore_key)) return;
 +	p->bore.credit_sleep = now;
 +}
 +
@@ -945,6 +875,7 @@ new file mode 100644
 +}
 +
 +void update_curr_bore(struct task_struct *p, u64 delta_exec) {
++	if (!static_branch_likely(&sched_bore_key)) return;
 +	struct bore_ctx *ctx = &p->bore;
 +	if (ctx->stop_update) return;
 +
@@ -956,6 +887,7 @@ new file mode 100644
 +}
 +
 +void restart_burst_bore(struct task_struct *p) {
++	if (!static_branch_likely(&sched_bore_key)) return;
 +	struct bore_ctx *ctx = &p->bore;
 +	u32 new_penalty = binary_smooth(ctx->curr_penalty, ctx->prev_penalty);
 +	ctx->prev_penalty = new_penalty;
@@ -965,6 +897,7 @@ new file mode 100644
 +}
 +
 +void restart_burst_rescale_deadline_bore(struct task_struct *p) {
++	if (!static_branch_likely(&sched_bore_key)) return;
 +	struct sched_entity *se = &p->se;
 +	s64 vscaled, vremain = se->deadline - se->vruntime;
 +
@@ -981,7 +914,10 @@ new file mode 100644
 +}
 +
 +static inline bool task_is_bore_eligible(struct task_struct *p)
-+{return p && p->sched_class == &fair_sched_class && !p->exit_state;}
++{
++	if (!static_branch_likely(&sched_bore_key)) return;
++	if (!static_branch_likely(&sched_bore_key)) return;
++	if (!static_branch_likely(&sched_bore_key)) return;return p && p->sched_class == &fair_sched_class && !p->exit_state;}
 +
 +#ifndef for_each_child_task
 +#define for_each_child_task(p, t) \
@@ -1329,36 +1265,3 @@ new file mode 100644
 +
 +#endif // CONFIG_SYSCTL
 +#endif /* CONFIG_SCHED_BORE */
-diff --git a/kernel/sched/bore.c b/kernel/sched/bore.c
-@@ -48,6 +48,7 @@
- 
- void bore_note_sleep(struct task_struct *p, u64 now)
- {
-+	if (!static_branch_likely(&sched_bore_key)) return;
- 	p->bore.credit_sleep = now;
- }
- 
-@@ -136,7 +137,7 @@
- 
- void update_curr_bore(struct task_struct *p, u64 delta_exec) {
- 	struct bore_ctx *ctx = &p->bore;
--	if (ctx->stop_update) return;
-+	if (!static_branch_likely(&sched_bore_key) || ctx->stop_update) return;
- 
- 	ctx->burst_time += delta_exec;
- 	u32 curr_penalty = ctx->curr_penalty = calc_burst_penalty(ctx->burst_time);
-@@ -146,6 +147,7 @@
- }
- 
- void restart_burst_bore(struct task_struct *p) {
-+	if (!static_branch_likely(&sched_bore_key)) return;
- 	struct bore_ctx *ctx = &p->bore;
- 	u32 new_penalty = binary_smooth(ctx->curr_penalty, ctx->prev_penalty);
- 	ctx->prev_penalty = new_penalty;
-@@ -155,6 +157,7 @@
- }
- 
- void restart_burst_rescale_deadline_bore(struct task_struct *p) {
-+	if (!static_branch_likely(&sched_bore_key)) return;
- 	struct sched_entity *se = &p->se;
- 	s64 vscaled, vremain = se->deadline - se->vruntime;

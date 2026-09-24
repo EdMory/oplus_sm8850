@@ -74,7 +74,7 @@ diff --git a/init/Kconfig b/init/Kconfig
 diff --git a/kernel/Kconfig.hz b/kernel/Kconfig.hz
 --- a/kernel/Kconfig.hz
 +++ b/kernel/Kconfig.hz
-@@ -57,3 +57,20 @@
+@@ -57,3 +57,21 @@
  
  config SCHED_HRTICK
  	def_bool HIGH_RES_TIMERS
@@ -742,7 +742,7 @@ diff --git a/kernel/sched/bore.c b/kernel/sched/bore.c
 new file mode 100644
 --- /dev/null
 +++ b/kernel/sched/bore.c
-@@ -0,0 +1,528 @@
+@@ -0,0 +1,529 @@
 +/*
 + *  Burst-Oriented Response Enhancer (BORE) CPU Scheduler
 + *  Copyright (C) 2021-2025 Masahito Suzuki <firelzrd@gmail.com>

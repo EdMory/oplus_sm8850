@@ -1329,3 +1329,36 @@ new file mode 100644
 +
 +#endif // CONFIG_SYSCTL
 +#endif /* CONFIG_SCHED_BORE */
+diff --git a/kernel/sched/bore.c b/kernel/sched/bore.c
+@@ -48,6 +48,7 @@
+ 
+ void bore_note_sleep(struct task_struct *p, u64 now)
+ {
++	if (!static_branch_likely(&sched_bore_key)) return;
+ 	p->bore.credit_sleep = now;
+ }
+ 
+@@ -136,7 +137,7 @@
+ 
+ void update_curr_bore(struct task_struct *p, u64 delta_exec) {
+ 	struct bore_ctx *ctx = &p->bore;
+-	if (ctx->stop_update) return;
++	if (!static_branch_likely(&sched_bore_key) || ctx->stop_update) return;
+ 
+ 	ctx->burst_time += delta_exec;
+ 	u32 curr_penalty = ctx->curr_penalty = calc_burst_penalty(ctx->burst_time);
+@@ -146,6 +147,7 @@
+ }
+ 
+ void restart_burst_bore(struct task_struct *p) {
++	if (!static_branch_likely(&sched_bore_key)) return;
+ 	struct bore_ctx *ctx = &p->bore;
+ 	u32 new_penalty = binary_smooth(ctx->curr_penalty, ctx->prev_penalty);
+ 	ctx->prev_penalty = new_penalty;
+@@ -155,6 +157,7 @@
+ }
+ 
+ void restart_burst_rescale_deadline_bore(struct task_struct *p) {
++	if (!static_branch_likely(&sched_bore_key)) return;
+ 	struct sched_entity *se = &p->se;
+ 	s64 vscaled, vremain = se->deadline - se->vruntime;

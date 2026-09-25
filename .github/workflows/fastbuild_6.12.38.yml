@@ -96,6 +96,11 @@ on:
         required: true
         type: boolean
         default: 'true'
+      cambyses_enable:
+        description: '是否集成 Cambyses 调度器'
+        required: true
+        type: boolean
+        default: 'true'
       perf_patch_enable:
         description: '是否集成性能优化补丁集'
         required: true
@@ -973,7 +978,7 @@ jobs:
           echo "提示: 内核代码 include <linux/intfp.h> 即可按需使用; 启动后可用 dmesg | grep intfp 查看内置自检结果"
           echo "intfp 集成完成(零 fuzz 应用 + 零导出符号 + KABI 面未触碰)！"
 
-      - name: 集成 BORE 调度器(6.12.38 KABI 安全移植)
+      - name: 集成 BORE 调度器
         if: inputs.bore_enable
         run: |
           echo "正在集成 BORE(Burst-Oriented Response Enhancer; 基于 firelzrd/bore-scheduler 6.12.37 原版补丁, 针对本 6.12.38 oplus 树逐 hunk 重建: bore_ctx 成员追加到 task_struct 末尾, 不挪动任何既有成员、不触碰 ANDROID_KABI_RESERVE, KABI 面安全)…"
@@ -1017,6 +1022,25 @@ jobs:
           BORE_PATCH=bore-6.12.38-kabi-safe.patch
           get_patch "$BORE_PATCH" || { echo "BORE 补丁下载失败: 仓库 other_patch/$BORE_PATCH 缺失或不可达(见上方诊断)"; exit 1; }
           patch -p1 -F 0 --no-backup-if-mismatch < "$BORE_PATCH"
+
+          # 三、ABI/KMI 面静态审计(仅检查补丁新增行):
+          #     1) KABI 保留区布局审计: 禁止删除/改动既有保留字段(减行), 禁止新增 ANDROID_KABI_RESERVE 宏(加行, 排除注释); 允许经 __kabi_reserved1 引用读写保留槽位(指针方案, 布局不变);
+          #     2) 本移植为零新增导出: sysctl_sched_base_slice 的 EXPORT_SYMBOL_GPL 保留在非 BORE 分支(上下文行), 补丁不应新增任何 EXPORT_SYMBOL;
+          #     3) 白名单外文件一律中止(允许 12 个既有文件 + 2 个新文件)。
+          if grep -nE '^\-.*(ANDROID_KABI|__kabi_reserved)' "$BORE_PATCH"; then
+            echo "BORE 补丁删除/改动 KABI 保留区, 已中止"; exit 1
+          fi
+          if grep -nE '^\+.*ANDROID_KABI_RESERVE' "$BORE_PATCH" | grep -qvE '^[0-9]+:\+[[:space:]]*[*/]'; then
+            echo "BORE 补丁新增 ANDROID_KABI_RESERVE, 已中止"; exit 1
+          fi
+          if grep -nE '^\+.*EXPORT_SYMBOL(_GPL)?\(' "$BORE_PATCH"; then
+            echo "BORE 补丁包含新增导出符号(应零导出), 已中止"; exit 1
+          fi
+          OUT_OF_SCOPE="$(grep -E '^diff --git ' "$BORE_PATCH" \
+            | grep -vE ' b/(include/linux/sched\.h|include/linux/sched/bore\.h|init/Kconfig|kernel/Kconfig\.hz|kernel/exit\.c|kernel/fork\.c|kernel/futex/waitwake\.c|kernel/sched/(Makefile|build_utility\.c|core\.c|debug\.c|fair\.c|sched\.h|bore\.c))$' || true)"
+          if [ -n "$OUT_OF_SCOPE" ]; then
+            echo "BORE 补丁改动了白名单以外的文件, 已中止:"; echo "$OUT_OF_SCOPE"; exit 1
+          fi
           
           # 七、显式写入开关: SCHED_BORE 默认 y(Kconfig), MIN_BASE_SLICE_NS 默认 2000000, 显式写入保证 defconfig 幂等
           grep -q '^CONFIG_SCHED_BORE=' arch/arm64/configs/gki_defconfig \
@@ -1025,6 +1049,58 @@ jobs:
             || echo "CONFIG_MIN_BASE_SLICE_NS=2000000" >> arch/arm64/configs/gki_defconfig
           echo "提示: BORE 默认 base_slice 由 HZ 与 MIN_BASE_SLICE_NS 自动计算; 运行时可用 /proc/sys/kernel/sched_base_slice 查看, dmesg 可查 BORE 自检"
           echo "BORE 集成完成(零 fuzz 应用 + 零新增导出 + KABI 面未触碰)！"
+
+      - name: 集成 Cambyses 调度器(6.12.38 移植)
+        if: inputs.cambyses_enable
+        run: |
+          echo "正在集成 Cambyses(CFS 负载均衡增强; 基于 firelzrd/cambyses v0.6.0 原版补丁, 针对本 6.12.38 oplus 树重建: 仅改 kernel/sched/fair.c 的 detach_tasks() 与 features.h 新增 2 个 SCHED_FEAT, 不触碰 task_struct/无 per-task 状态/KABI 面天然安全)…"
+          trap 'echo "Cambyses 集成步骤在脚本第 $LINENO 行失败(退出码 $?)" >&2' ERR
+          cd kernel_workspace/common
+
+          CAMBYSES_PATCH=cambyses-6.12.38-v0.6.0.patch
+          CAMBYSES_URLS=(
+            "https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/$CAMBYSES_PATCH"
+            "https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$GITHUB_REF_NAME/other_patch/$CAMBYSES_PATCH"
+            "https://cdn.jsdelivr.net/gh/$GITHUB_REPOSITORY@$GITHUB_REF_NAME/other_patch/$CAMBYSES_PATCH"
+          )
+          rm -f "$CAMBYSES_PATCH"
+          for u in "${CAMBYSES_URLS[@]}"; do
+            echo "尝试下载 Cambyses 补丁: $u"
+            if curl -fSL --retry 3 --retry-delay 2 --connect-timeout 20 -o "$CAMBYSES_PATCH.tmp" "$u" 2>/dev/null; then
+              if [ -s "$CAMBYSES_PATCH.tmp" ] && grep -q '^diff --git ' "$CAMBYSES_PATCH.tmp"; then
+                mv "$CAMBYSES_PATCH.tmp" "$CAMBYSES_PATCH"
+                echo "下载成功: $CAMBYSES_PATCH ($(wc -c < "$CAMBYSES_PATCH") 字节)"
+                break
+              fi
+              echo "该源返回内容异常(空文件或非 unified diff), 尝试下一个源"
+            else
+              echo "该源不可用, 尝试下一个源"
+            fi
+          done
+          if [ ! -f "$CAMBYSES_PATCH" ]; then
+            echo "Cambyses 补丁下载失败: 仓库 other_patch/$CAMBYSES_PATCH 缺失或不可达"; exit 1
+          fi
+
+          # 零 fuzz 应用(与本地 GNU patch -F 0 校验同口径)
+          patch -p1 -F 0 --no-backup-if-mismatch < "$CAMBYSES_PATCH"
+
+          # 白名单审计: 仅允许 kernel/sched/fair.c 与 kernel/sched/features.h, 零 KABI/零导出
+          if grep -nE '^\+.*(ANDROID_KABI|__kabi_reserved|EXPORT_SYMBOL(_GPL)?\()' "$CAMBYSES_PATCH"; then
+            echo "Cambyses 补丁包含 KABI/导出符号触碰, 已中止"; exit 1
+          fi
+          OUT_OF_SCOPE="$(grep -E '^diff --git ' "$CAMBYSES_PATCH" \
+            | grep -vE ' b/(kernel/sched/(fair\.c|features\.h))$' || true)"
+          if [ -n "$OUT_OF_SCOPE" ]; then
+            echo "Cambyses 补丁改动了白名单以外的文件, 已中止:"; echo "$OUT_OF_SCOPE"; exit 1
+          fi
+
+          # 无 Kconfig 开关: 两个 SCHED_FEAT(LB_ROTATE_BLOCK / LB_STRICT_BUDGET) 默认 true 即生效
+          grep -q 'SCHED_FEAT(LB_ROTATE_BLOCK, true)' kernel/sched/features.h \
+            || { echo "Cambyses 集成后未检出 LB_ROTATE_BLOCK 特性, 已中止"; exit 1; }
+          grep -q 'SCHED_FEAT(LB_STRICT_BUDGET, true)' kernel/sched/features.h \
+            || { echo "Cambyses 集成后未检出 LB_STRICT_BUDGET 特性, 已中止"; exit 1; }
+          echo "提示: Cambyses 默认启用(LB_ROTATE_BLOCK / LB_STRICT_BUDGET); 运行时可用 /sys/kernel/debug/sched/features 查看/关闭, dmesg 可查 Cambyses 横幅"
+          echo "Cambyses 集成完成(零 fuzz 应用 + 零 KABI 触碰 + 零新增导出)！"
 
       - name: 添加制作名称
         run: |

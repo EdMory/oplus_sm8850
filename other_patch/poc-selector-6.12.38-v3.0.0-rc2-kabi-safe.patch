@@ -31,53 +31,6 @@ diff --git a/include/linux/sched.h b/include/linux/sched.h
  enum blocked_on_state {
  	BO_RUNNABLE,
  	BO_BLOCKED,
-
-diff --git a/include/linux/sched/topology.h b/include/linux/sched/topology.h
---- a/include/linux/sched/topology.h
-+++ b/include/linux/sched/topology.h
-@@ -81,8 +81,39 @@ struct sched_group;
- struct sched_domain_shared {
- 	atomic_t	ref;
- 	atomic_t	nr_busy_cpus;
--	int		has_idle_cores;
--	int		nr_idle_scan;
-+	int			has_idle_cores;
-+	int			nr_idle_scan;
-+#ifdef CONFIG_SCHED_POC_SELECTOR
-+	/*
-+	 * POC Selector: per-LLC idle CPU tracking
-+	 */
-+	u64		poc_llc_members;	/* bitmask of valid CPUs (relative to base) */
-+	int		poc_cpu_base;		/* smallest CPU ID in this LLC */
-+	u8		poc_affinity_shift;	/* bit shift for cpumask alignment */
-+	bool	poc_fast_eligible;	/* true when LLC CPU count <= 64 */
-+	bool	poc_cluster_valid;	/* true when cluster mask is usable */
-+#ifdef CONFIG_SCHED_SMT
-+	u8		poc_smt_shift;		/* bit distance between SMT siblings */
-+	u64		poc_primary_mask;	/* bitmask of core representative CPUs */
-+#endif
-+
-+	/*
-+	 * Lazy commit: reader-facing busy mask + pending bits.
-+	 * Readers: single atomic64_read (MOV on x86); idle = ~busy.
-+	 * Writers: atomic_or / atomic64_set on the shared cacheline.
-+	 */
-+	atomic64_t	poc_busy_mask ____cacheline_aligned;
-+	atomic_t	poc_pending[8] ____cacheline_aligned;	/* 8 chunks x 8 LLC CPUs */
-+
-+	/*
-+	 * Read-only lookup tables (written once at init).
-+	 * Cacheline-aligned for exact prefetch targeting.
-+	 */
-+	u64		poc_cluster_mask[64] ____cacheline_aligned;
-+#ifdef CONFIG_SCHED_SMT
-+	u64		poc_smt_mask[64] ____cacheline_aligned;
-+#endif /* CONFIG_SCHED_SMT */
-+#endif /* CONFIG_SCHED_POC_SELECTOR */
- };
- 
- struct sched_domain {
-
 diff --git a/init/Kconfig b/init/Kconfig
 --- a/init/Kconfig
 +++ b/init/Kconfig
@@ -101,7 +54,6 @@ diff --git a/init/Kconfig b/init/Kconfig
  config RT_SOFTIRQ_AWARE_SCHED
  	bool "Improve RT scheduling during long softirq execution"
  	depends on SMP && !PREEMPT_RT
-
 diff --git a/kernel/fork.c b/kernel/fork.c
 --- a/kernel/fork.c
 +++ b/kernel/fork.c
@@ -137,7 +89,6 @@ diff --git a/kernel/fork.c b/kernel/fork.c
  
  	/*
  	 * Make it visible to the rest of the system, but dont wake it up yet.
-
 diff --git a/kernel/sched/core.c b/kernel/sched/core.c
 --- a/kernel/sched/core.c
 +++ b/kernel/sched/core.c
@@ -161,32 +112,6 @@ diff --git a/kernel/sched/core.c b/kernel/sched/core.c
  	calc_load_update = jiffies + LOAD_FREQ;
  
  #ifdef CONFIG_SMP
-
-diff --git a/kernel/sched/ext.c b/kernel/sched/ext.c
---- a/kernel/sched/ext.c
-+++ b/kernel/sched/ext.c
-@@ -4762,6 +4762,9 @@ static void scx_ops_disable_workfn(struct kthread_work *work)
- 	WARN_ON_ONCE(scx_ops_set_enable_state(SCX_OPS_DISABLED) !=
- 		     SCX_OPS_DISABLING);
- 	trace_android_vh_scx_ops_enable_state(SCX_OPS_DISABLED);
-+#ifdef CONFIG_SCHED_POC_SELECTOR
-+	poc_notify_scx(false);
-+#endif
- done:
- 	scx_ops_bypass(false);
- }
-@@ -5428,6 +5431,10 @@ static int scx_ops_enable(struct sched_ext_ops *ops, struct bpf_link *link)
- 	if (!(ops->flags & SCX_OPS_SWITCH_PARTIAL))
- 		static_branch_enable(&__scx_switched_all);
- 
-+#ifdef CONFIG_SCHED_POC_SELECTOR
-+	poc_notify_scx(true);
-+#endif
-+
- 	pr_info("sched_ext: BPF scheduler \"%s\" enabled%s\n",
- 		scx_ops.name, scx_switched_all() ? "" : " (partial)");
- 	kobject_uevent(scx_root_kobj, KOBJ_ADD);
-
 diff --git a/kernel/sched/fair.c b/kernel/sched/fair.c
 --- a/kernel/sched/fair.c
 +++ b/kernel/sched/fair.c
@@ -644,23 +569,235 @@ diff --git a/kernel/sched/fair.c b/kernel/sched/fair.c
  	if (unlikely(se == pse))
  		return;
  	trace_android_rvh_check_preempt_wakeup_ignore(donor, &ignore);
+diff --git a/kernel/sched/sched.h b/kernel/sched/sched.h
+--- a/kernel/sched/sched.h
++++ b/kernel/sched/sched.h
+@@ -1149,6 +1149,10 @@ struct rq {
+ 
+ #ifdef CONFIG_SMP
+ 	unsigned int		ttwu_pending;
++#endif
++#ifdef CONFIG_SCHED_POC_SELECTOR
++	unsigned int		poc_idle_committed;
++	u64			poc_busy_bit;	/* lazy commit: pre-shifted busy bit (0 = idle), lazy mode */
+ #endif
+ 	u64			nr_switches;
+ 
+@@ -2216,6 +2220,121 @@ static inline struct task_group *task_group(struct task_struct *p)
+ 
+ #endif /* !CONFIG_CGROUP_SCHED */
+ 
++#ifdef CONFIG_SCHED_POC_SELECTOR
++extern struct static_key_true poc_selector_active;
++#ifdef CONFIG_SCHED_CLASS_EXT
++extern void poc_notify_scx(bool scx_active);
++extern void poc_check_skip_fallback(void);
++#else
++static inline void poc_check_skip_fallback(void) {}
++#endif
++extern struct static_key_true sched_poc_aligned;
++extern struct static_key_true sched_poc_smt_consecutive;
++extern struct static_key_true sched_poc_smt_uniform;
++extern struct static_key_false sched_poc_target_sticky;
++extern struct static_key_true sched_poc_packed;
++extern void __set_cpu_idle_state_poc(int cpu, int state);
++extern struct static_key_true sched_poc_waker_yield;
++void poc_aggregate(struct sched_domain_shared *sd_share);
++void poc_commit_cpu(int cpu);
++extern unsigned int poc_pull_budget;
++static __always_inline void set_cpu_idle_state_poc(int cpu, int state)
++{
++	if (static_branch_likely(&poc_selector_active) &&
++	    !sched_asym_cpucap_active())
++		__set_cpu_idle_state_poc(cpu, state);
++}
++
++/*
++ * POC_CTZ64 - Count trailing zeros (find first set bit)
++ *
++ * Architecture-optimized CTZ for POC idle CPU selection.
++ * Returns 64 for input 0 (important for BSF-based implementations).
++ */
++#if defined(__x86_64__) && defined(__BMI__)
++/* Tier 1: x86-64 with BMI1 - TZCNT is zero-safe */
++#define POC_CTZ64(v) ((int)__builtin_ctzll(v))
++
++#elif defined(__aarch64__)
++/* Tier 1: ARM64 - RBIT+CLZ is zero-safe */
++#define POC_CTZ64(v) ((int)__builtin_ctzll(v))
++
++#elif defined(__riscv) && defined(__riscv_zbb)
++/* Tier 1: RISC-V with Zbb - CTZ is zero-safe */
++#define POC_CTZ64(v) ((int)__builtin_ctzll(v))
++
++#elif defined(__x86_64__)
++/* Tier 2: x86-64 without BMI1 - BSF needs zero check */
++static __always_inline int poc_ctz64_bsf(u64 v)
++{
++	if (unlikely(!v))
++		return 64;
++	return (int)__builtin_ctzll(v);
++}
++#define POC_CTZ64(v) poc_ctz64_bsf(v)
++
++#else
++/* Tier 3: De Bruijn fallback for other architectures */
++#define POC_DEBRUIJN_CTZ64_CONST 0x03F79D71B4CA8B09ULL
++static const u8 poc_debruijn_ctz64_tab[64] = {
++	 0,  1, 56,  2, 57, 49, 28,  3,
++	61, 58, 42, 50, 38, 29, 17,  4,
++	62, 47, 59, 36, 45, 43, 51, 22,
++	53, 39, 33, 30, 24, 18, 12,  5,
++	63, 55, 48, 27, 60, 41, 37, 16,
++	46, 35, 44, 21, 52, 32, 23, 11,
++	54, 26, 40, 15, 34, 20, 31, 10,
++	25, 14, 19,  9, 13,  8,  7,  6,
++};
++static __always_inline int poc_debruijn_ctz64(u64 v)
++{
++	u64 lsb;
++	u32 idx;
++
++	if (unlikely(!v))
++		return 64;
++	lsb = v & (-(s64)v);
++	idx = (u32)((lsb * POC_DEBRUIJN_CTZ64_CONST) >> 58);
++	return (int)poc_debruijn_ctz64_tab[idx & 63];
++}
++#define POC_CTZ64(v) poc_debruijn_ctz64(v)
++
++#endif /* POC_CTZ64 */
++
++/*
++ * POC helper: convert cpumask region to POC-relative u64
++ *
++ * Extracts the 64-bit region of @mask corresponding to this LLC's
++ * CPU range and shifts it to align with POC's bit positions.
++ *
++ * Used by load balancer functions that need to intersect cpumasks
++ * with POC idle bitmaps.
++ */
++static __always_inline u64 poc_cpumask_to_u64(const struct cpumask *mask,
++					      struct sched_domain_shared *sd_share)
++{
++	int base = sd_share->poc_cpu_base;
++	int base_word = base >> 6;
++	int shift = sd_share->poc_affinity_shift;
++
++	if (likely(shift == 0)) {
++		/*
++		 * Fast path: this LLC's own base is 64-aligned, so no
++		 * cross-word shift is needed here even if some other LLC
++		 * in the system is misaligned (sched_poc_aligned is a
++		 * single system-wide flag and must not gate this branch).
++		 */
++		return cpumask_bits(mask)[base_word];
++	} else {
++		/* Slow path: shift required (e.g., Threadripper) */
++		u64 lo = cpumask_bits(mask)[base_word];
++		u64 hi = (base_word + 1 < BITS_TO_LONGS(nr_cpumask_bits)) ?
++			 cpumask_bits(mask)[base_word + 1] : 0;
++		return (lo >> shift) | (hi << (64 - shift));
++	}
++}
++#endif /* CONFIG_SCHED_POC_SELECTOR */
++
+ static inline void __set_task_cpu(struct task_struct *p, unsigned int cpu)
+ {
+ 	set_task_rq(p, cpu);
+@@ -3313,6 +3432,7 @@ extern void nohz_run_idle_balance(int cpu);
+ static inline void nohz_run_idle_balance(int cpu) { }
+ #endif
+ 
++
+ #include "stats.h"
+ 
+ #if defined(CONFIG_SCHED_CORE) && defined(CONFIG_SCHEDSTATS)
 
-diff --git a/kernel/sched/idle.c b/kernel/sched/idle.c
+--- a/include/linux/sched/topology.h
++++ b/include/linux/sched/topology.h
+@@ -81,8 +81,39 @@
+ struct sched_domain_shared {
+ 	atomic_t	ref;
+ 	atomic_t	nr_busy_cpus;
+-	int		has_idle_cores;
+-	int		nr_idle_scan;
++	int			has_idle_cores;
++	int			nr_idle_scan;
++#ifdef CONFIG_SCHED_POC_SELECTOR
++	/*
++	 * POC Selector: per-LLC idle CPU tracking
++	 */
++	u64		poc_llc_members;	/* bitmask of valid CPUs (relative to base) */
++	int		poc_cpu_base;		/* smallest CPU ID in this LLC */
++	u8		poc_affinity_shift;	/* bit shift for cpumask alignment */
++	bool	poc_fast_eligible;	/* true when LLC CPU count <= 64 */
++	bool	poc_cluster_valid;	/* true when cluster mask is usable */
++#ifdef CONFIG_SCHED_SMT
++	u8		poc_smt_shift;		/* bit distance between SMT siblings */
++	u64		poc_primary_mask;	/* bitmask of core representative CPUs */
++#endif
++
++	/*
++	 * Lazy commit: reader-facing busy mask + pending bits.
++	 * Readers: single atomic64_read (MOV on x86); idle = ~busy.
++	 * Writers: atomic_or / atomic64_set on the shared cacheline.
++	 */
++	atomic64_t	poc_busy_mask ____cacheline_aligned;
++	atomic_t	poc_pending[8] ____cacheline_aligned;	/* 8 chunks x 8 LLC CPUs */
++
++	/*
++	 * Read-only lookup tables (written once at init).
++	 * Cacheline-aligned for exact prefetch targeting.
++	 */
++	u64		poc_cluster_mask[64] ____cacheline_aligned;
++#ifdef CONFIG_SCHED_SMT
++	u64		poc_smt_mask[64] ____cacheline_aligned;
++#endif /* CONFIG_SCHED_SMT */
++#endif /* CONFIG_SCHED_POC_SELECTOR */
+ };
+ 
+ struct sched_domain {
+
+--- a/kernel/sched/ext.c
++++ b/kernel/sched/ext.c
+@@ -4762,6 +4762,9 @@
+ 	WARN_ON_ONCE(scx_ops_set_enable_state(SCX_OPS_DISABLED) !=
+ 		     SCX_OPS_DISABLING);
+ 	trace_android_vh_scx_ops_enable_state(SCX_OPS_DISABLED);
++#ifdef CONFIG_SCHED_POC_SELECTOR
++	poc_notify_scx(false);
++#endif
+ done:
+ 	scx_ops_bypass(false);
+ }
+@@ -5427,6 +5430,10 @@
+ 
+ 	if (!(ops->flags & SCX_OPS_SWITCH_PARTIAL))
+ 		static_branch_enable(&__scx_switched_all);
++
++#ifdef CONFIG_SCHED_POC_SELECTOR
++	poc_notify_scx(true);
++#endif
+ 
+ 	pr_info("sched_ext: BPF scheduler \"%s\" enabled%s\n",
+ 		scx_ops.name, scx_switched_all() ? "" : " (partial)");
+
 --- a/kernel/sched/idle.c
 +++ b/kernel/sched/idle.c
-@@ -270,6 +270,11 @@ static void do_idle(void)
+@@ -269,6 +269,11 @@
+ 
  	__current_set_polling();
  	tick_nohz_idle_enter();
- 
++
 +#ifdef CONFIG_SCHED_POC_SELECTOR
 +	/* POC Selector: mark CPU as idle */
 +	set_cpu_idle_state_poc(cpu, 1);
 +#endif /* CONFIG_SCHED_POC_SELECTOR */
-+
+ 
  	while (!need_resched()) {
  		rmb();
- 
-@@ -328,6 +333,11 @@ static void do_idle(void)
+@@ -328,6 +333,11 @@
  		arch_cpu_idle_exit();
  	}
  
@@ -673,8 +810,291 @@ diff --git a/kernel/sched/idle.c b/kernel/sched/idle.c
  	 * Since we fell out of the loop above, we know TIF_NEED_RESCHED must
  	 * be set, propagate it into PREEMPT_NEED_RESCHED.
 
-diff --git a/kernel/sched/poc_selector.c b/kernel/sched/poc_selector.c
-new file mode 100644
+--- a/kernel/sched/topology.c
++++ b/kernel/sched/topology.c
+@@ -1698,6 +1698,281 @@
+ 		sd->shared = *per_cpu_ptr(sdd->sds, sd_id);
+ 		atomic_inc(&sd->shared->ref);
+ 		atomic_set(&sd->shared->nr_busy_cpus, sd_weight);
++
++#ifdef CONFIG_SCHED_POC_SELECTOR
++		int range = cpumask_last(sd_span) - sd_id + 1;
++
++		sd->shared->poc_cpu_base = sd_id;
++		sd->shared->poc_affinity_shift = sd_id & 63;
++
++		if (range <= 64) {
++			sd->shared->poc_fast_eligible = true;
++			/*
++			 * Disable aligned optimization if this LLC's base CPU
++			 * is not 64-aligned (e.g., Threadripper CCDs).
++			 */
++			if (sd_id & 63)
++				static_branch_disable_cpuslocked(&sched_poc_aligned);
++			/*
++			 * Disable packed priority search if this LLC
++			 * has more than 32 CPUs.
++			 */
++			if (range > 32)
++				static_branch_disable_cpuslocked(&sched_poc_packed);
++		} else {
++			sd->shared->poc_fast_eligible = false;
++			static_branch_disable_cpuslocked(&sched_poc_packed);
++		}
++
++		/* One-time: MSHR pull budget from the boot CPU's microarchitecture */
++		{
++			static bool poc_budget_init_done;
++
++			if (!poc_budget_init_done) {
++				poc_budget_init_done = true;
++#ifdef CONFIG_X86
++				switch (boot_cpu_data.x86) {
++				case 0x1a:	/* Zen4/5: L2 MSHR ~32 */
++					poc_pull_budget = 16;
++					break;
++				case 0x19:	/* Zen3: L2 MSHR ~24 */
++					poc_pull_budget = 12;
++					break;
++				case 0x17:	/* Zen1/2: L2 MSHR ~20 */
++					poc_pull_budget = 10;
++					break;
++				case 0x15:	/* Excavator: L2 MSHR ~12 */
++					poc_pull_budget = 6;
++					break;
++				case 0x06:	/* Intel */
++					if (boot_cpu_data.x86_model >= 0x4e)
++						poc_pull_budget = 12;	/* Skylake+: MSHR 24+ */
++					else
++						poc_pull_budget = 4;	/* pre-Skylake: MSHR <= 16 */
++					break;
++				default:	/* unknown: minimal MSHR */
++					poc_pull_budget = 4;
++					break;
++				}
++#else
++				/* non-x86 (e.g. arm64): keep the minimal default budget(4) */
++#endif
++			}
++		}
++		/* Build LLC member bitmask for reader-side aggregation */
++		{
++			u64 members = 0;
++			int cpu_iter;
++
++			for_each_cpu(cpu_iter, sd_span) {
++				int bit = cpu_iter - sd_id;
++
++				if ((unsigned int)bit < 64) {
++					members |= 1ULL << bit;
++					/*
++					 * Exact initial state from the idle_cpu() snapshot.  The
++					 * lazy commit mode only converges from an exact start:
++					 * an all-busy start plus the commit-skip check would
++					 * publish nothing and pin the busy mask all-busy.
++					 */
++					cpu_rq(cpu_iter)->poc_busy_bit =
++						idle_cpu(cpu_iter) ? 0ULL : (1ULL << bit);
++				}
++			}
++			sd->shared->poc_llc_members = members;
++			{
++				u64 busy = 0;
++				u64 t = members;
++
++				while (t) {
++					int b = POC_CTZ64(t);
++
++					busy |= cpu_rq(sd_id + b)->poc_busy_bit;
++					t &= t - 1;
++				}
++				atomic64_set(&sd->shared->poc_busy_mask, busy);
++			}
++			for (int pi = 0; pi < 8; pi++)
++				atomic_set(&sd->shared->poc_pending[pi], 0);
++		}
++
++#ifdef CONFIG_SCHED_SMT
++		/*
++		 * Pre-compute SMT sibling masks for Level 4.
++		 * Each entry contains a bitmask of SMT siblings (including self)
++		 * for O(1) lookup via CTZ during wakeup.
++		 */
++		memset(sd->shared->poc_smt_mask, 0,
++		       sizeof(sd->shared->poc_smt_mask));
++		if (sd->shared->poc_fast_eligible) {
++			int cpu_iter;
++
++			for_each_cpu(cpu_iter, sd_span) {
++				int bit = cpu_iter - sd_id;
++				int sibling;
++				u64 mask = 0;
++
++				for_each_cpu(sibling, cpu_smt_mask(cpu_iter)) {
++					int sib_bit;
++
++					sib_bit = sibling - sd_id;
++					if (sib_bit >= 0 && sib_bit < 64)
++						mask |= 1ULL << sib_bit;
++				}
++				if (bit >= 0 && bit < 64)
++					sd->shared->poc_smt_mask[bit] = mask;
++			}
++		}
++
++		/*
++		 * Detect SMT topology and classify for poc_idle_core_mask():
++		 *
++		 *   Tier 1 (consecutive): uniform 2-way SMT, siblings at
++		 *     consecutive bit positions (e.g., 0,1 / 2,3).
++		 *     Uses compile-time constants: shift=1, mask=0x5555...
++		 *
++		 *   Tier 2 (uniform stride-N): uniform 2-way SMT with
++		 *     constant stride between siblings (e.g., Intel Xeon
++		 *     stride-8: CPU 0,8 / 1,9 / ...).  Uses precomputed
++		 *     poc_smt_shift and poc_primary_mask for read-time
++		 *     derivation without write-path overhead.
++		 *
++		 *   Tier 3 (exotic): >2-way SMT, non-uniform topology,
++		 *     or mixed SMT ways.  Falls back to read-time
++		 *     derivation from the per-CPU SMT sibling masks.
++		 *
++		 * On pure non-SMT systems, the key values are irrelevant
++		 * because sched_smt_active() gates all SMT paths.
++		 */
++		sd->shared->poc_smt_shift = 1;
++		sd->shared->poc_primary_mask = 0;
++
++		if (sd->shared->poc_fast_eligible) {
++			int cpu_iter;
++			bool all_2way = true;
++			bool all_consecutive = true;
++			int uniform_stride = -1;
++			u64 primary_mask = 0;
++
++			for_each_cpu(cpu_iter, sd_span) {
++				int bit = cpu_iter - sd_id;
++
++				if (bit < 0 || bit >= 64)
++					continue;
++				u64 mask = sd->shared->poc_smt_mask[bit];
++				int ways = hweight64(mask);
++
++				if (ways != 2) {
++					all_2way = false;
++					all_consecutive = false;
++					break;
++				}
++
++				int lo = __ffs(mask);
++				int hi = __fls(mask);
++				int stride = hi - lo;
++
++				/* Track primary (lowest-numbered sibling) */
++				primary_mask |= 1ULL << lo;
++
++				/* Check consecutive: 0b11 at even position */
++				if ((lo & 1) || mask != (3ULL << lo))
++					all_consecutive = false;
++
++				/* Check uniform stride */
++				if (uniform_stride < 0)
++					uniform_stride = stride;
++				else if (stride != uniform_stride)
++					all_2way = false;
++			}
++
++			if (!all_consecutive)
++				static_branch_disable_cpuslocked(
++					&sched_poc_smt_consecutive);
++
++			if (all_2way && uniform_stride > 0) {
++				sd->shared->poc_smt_shift =
++					(u8)uniform_stride;
++				sd->shared->poc_primary_mask = primary_mask;
++			} else {
++				static_branch_disable_cpuslocked(
++					&sched_poc_smt_consecutive);
++				static_branch_disable_cpuslocked(
++					&sched_poc_smt_uniform);
++			}
++		}
++#endif /* CONFIG_SCHED_SMT */
++
++		memset(sd->shared->poc_cluster_mask, 0,
++		       sizeof(sd->shared->poc_cluster_mask));
++
++		sd->shared->poc_cluster_valid = false;
++
++#ifdef CONFIG_SCHED_CLUSTER
++		/*
++		 * Detect cluster (L2-sharing) topology for Level 2/5
++		 * cluster-local search in POC selector.
++		 *
++		 * Uses cpu_clustergroup_mask() which returns the L2
++		 * cache sharing mask on x86.  Validates that all
++		 * clusters are uniform (same size, power-of-2, and
++		 * naturally aligned in POC bit space).
++		 */
++		if (sd->shared->poc_fast_eligible) {
++			const struct cpumask *cls_mask =
++				cpu_clustergroup_mask(sd_id);
++			int cls_size = cpumask_weight(cls_mask);
++			int smt_size = cpumask_weight(cpu_smt_mask(sd_id));
++
++			if (cls_size > smt_size &&
++			    is_power_of_2(cls_size)) {
++				bool valid = true;
++				int cpu_iter;
++
++				for_each_cpu(cpu_iter, sd_span) {
++					const struct cpumask *m =
++						cpu_clustergroup_mask(cpu_iter);
++					int first = cpumask_first(m);
++					int rel = first - sd_id;
++
++					if (cpumask_weight(m) != cls_size ||
++					    (rel & (cls_size - 1)) != 0) {
++						valid = false;
++						break;
++					}
++				}
++				if (valid) {
++					sd->shared->poc_cluster_valid = true;
++
++					/*
++					 * Pre-compute cluster masks for O(1) lookup.
++					 * Each entry contains a bitmask of cluster
++					 * members (excluding self) for fast search.
++					 */
++					for_each_cpu(cpu_iter, sd_span) {
++						const struct cpumask *m =
++							cpu_clustergroup_mask(cpu_iter);
++						int bit = cpu_iter - sd_id;
++						int member;
++						u64 cmask = 0;
++
++						for_each_cpu(member, m) {
++							int mbit;
++
++							if (member == cpu_iter)
++								continue;
++							mbit = member - sd_id;
++							if (mbit >= 0 && mbit < 64)
++								cmask |= 1ULL << mbit;
++						}
++						if (bit >= 0 && bit < 64)
++							sd->shared->poc_cluster_mask[bit] = cmask;
++					}
++				}
++			}
++		}
++#endif /* CONFIG_SCHED_CLUSTER */
++#endif /* CONFIG_SCHED_POC_SELECTOR */
+ 	}
+ 
+ 	sd->private = sdd;
+
 --- /dev/null
 +++ b/kernel/sched/poc_selector.c
 @@ -0,0 +1,1865 @@
@@ -2543,430 +2963,3 @@ new file mode 100644
 +
 +#endif /* CONFIG_SYSFS */
 +#endif /* CONFIG_SCHED_POC_SELECTOR */
-
-diff --git a/kernel/sched/sched.h b/kernel/sched/sched.h
---- a/kernel/sched/sched.h
-+++ b/kernel/sched/sched.h
-@@ -1149,6 +1149,10 @@ struct rq {
- 
- #ifdef CONFIG_SMP
- 	unsigned int		ttwu_pending;
-+#endif
-+#ifdef CONFIG_SCHED_POC_SELECTOR
-+	unsigned int		poc_idle_committed;
-+	u64			poc_busy_bit;	/* lazy commit: pre-shifted busy bit (0 = idle), lazy mode */
- #endif
- 	u64			nr_switches;
- 
-@@ -2216,6 +2220,121 @@ static inline struct task_group *task_group(struct task_struct *p)
- 
- #endif /* !CONFIG_CGROUP_SCHED */
- 
-+#ifdef CONFIG_SCHED_POC_SELECTOR
-+extern struct static_key_true poc_selector_active;
-+#ifdef CONFIG_SCHED_CLASS_EXT
-+extern void poc_notify_scx(bool scx_active);
-+extern void poc_check_skip_fallback(void);
-+#else
-+static inline void poc_check_skip_fallback(void) {}
-+#endif
-+extern struct static_key_true sched_poc_aligned;
-+extern struct static_key_true sched_poc_smt_consecutive;
-+extern struct static_key_true sched_poc_smt_uniform;
-+extern struct static_key_false sched_poc_target_sticky;
-+extern struct static_key_true sched_poc_packed;
-+extern void __set_cpu_idle_state_poc(int cpu, int state);
-+extern struct static_key_true sched_poc_waker_yield;
-+void poc_aggregate(struct sched_domain_shared *sd_share);
-+void poc_commit_cpu(int cpu);
-+extern unsigned int poc_pull_budget;
-+static __always_inline void set_cpu_idle_state_poc(int cpu, int state)
-+{
-+	if (static_branch_likely(&poc_selector_active) &&
-+	    !sched_asym_cpucap_active())
-+		__set_cpu_idle_state_poc(cpu, state);
-+}
-+
-+/*
-+ * POC_CTZ64 - Count trailing zeros (find first set bit)
-+ *
-+ * Architecture-optimized CTZ for POC idle CPU selection.
-+ * Returns 64 for input 0 (important for BSF-based implementations).
-+ */
-+#if defined(__x86_64__) && defined(__BMI__)
-+/* Tier 1: x86-64 with BMI1 - TZCNT is zero-safe */
-+#define POC_CTZ64(v) ((int)__builtin_ctzll(v))
-+
-+#elif defined(__aarch64__)
-+/* Tier 1: ARM64 - RBIT+CLZ is zero-safe */
-+#define POC_CTZ64(v) ((int)__builtin_ctzll(v))
-+
-+#elif defined(__riscv) && defined(__riscv_zbb)
-+/* Tier 1: RISC-V with Zbb - CTZ is zero-safe */
-+#define POC_CTZ64(v) ((int)__builtin_ctzll(v))
-+
-+#elif defined(__x86_64__)
-+/* Tier 2: x86-64 without BMI1 - BSF needs zero check */
-+static __always_inline int poc_ctz64_bsf(u64 v)
-+{
-+	if (unlikely(!v))
-+		return 64;
-+	return (int)__builtin_ctzll(v);
-+}
-+#define POC_CTZ64(v) poc_ctz64_bsf(v)
-+
-+#else
-+/* Tier 3: De Bruijn fallback for other architectures */
-+#define POC_DEBRUIJN_CTZ64_CONST 0x03F79D71B4CA8B09ULL
-+static const u8 poc_debruijn_ctz64_tab[64] = {
-+	 0,  1, 56,  2, 57, 49, 28,  3,
-+	61, 58, 42, 50, 38, 29, 17,  4,
-+	62, 47, 59, 36, 45, 43, 51, 22,
-+	53, 39, 33, 30, 24, 18, 12,  5,
-+	63, 55, 48, 27, 60, 41, 37, 16,
-+	46, 35, 44, 21, 52, 32, 23, 11,
-+	54, 26, 40, 15, 34, 20, 31, 10,
-+	25, 14, 19,  9, 13,  8,  7,  6,
-+};
-+static __always_inline int poc_debruijn_ctz64(u64 v)
-+{
-+	u64 lsb;
-+	u32 idx;
-+
-+	if (unlikely(!v))
-+		return 64;
-+	lsb = v & (-(s64)v);
-+	idx = (u32)((lsb * POC_DEBRUIJN_CTZ64_CONST) >> 58);
-+	return (int)poc_debruijn_ctz64_tab[idx & 63];
-+}
-+#define POC_CTZ64(v) poc_debruijn_ctz64(v)
-+
-+#endif /* POC_CTZ64 */
-+
-+/*
-+ * POC helper: convert cpumask region to POC-relative u64
-+ *
-+ * Extracts the 64-bit region of @mask corresponding to this LLC's
-+ * CPU range and shifts it to align with POC's bit positions.
-+ *
-+ * Used by load balancer functions that need to intersect cpumasks
-+ * with POC idle bitmaps.
-+ */
-+static __always_inline u64 poc_cpumask_to_u64(const struct cpumask *mask,
-+					      struct sched_domain_shared *sd_share)
-+{
-+	int base = sd_share->poc_cpu_base;
-+	int base_word = base >> 6;
-+	int shift = sd_share->poc_affinity_shift;
-+
-+	if (likely(shift == 0)) {
-+		/*
-+		 * Fast path: this LLC's own base is 64-aligned, so no
-+		 * cross-word shift is needed here even if some other LLC
-+		 * in the system is misaligned (sched_poc_aligned is a
-+		 * single system-wide flag and must not gate this branch).
-+		 */
-+		return cpumask_bits(mask)[base_word];
-+	} else {
-+		/* Slow path: shift required (e.g., Threadripper) */
-+		u64 lo = cpumask_bits(mask)[base_word];
-+		u64 hi = (base_word + 1 < BITS_TO_LONGS(nr_cpumask_bits)) ?
-+			 cpumask_bits(mask)[base_word + 1] : 0;
-+		return (lo >> shift) | (hi << (64 - shift));
-+	}
-+}
-+#endif /* CONFIG_SCHED_POC_SELECTOR */
-+
- static inline void __set_task_cpu(struct task_struct *p, unsigned int cpu)
- {
- 	set_task_rq(p, cpu);
-@@ -3313,6 +3432,7 @@ extern void nohz_run_idle_balance(int cpu);
- static inline void nohz_run_idle_balance(int cpu) { }
- #endif
- 
-+
- #include "stats.h"
- 
- #if defined(CONFIG_SCHED_CORE) && defined(CONFIG_SCHEDSTATS)
-
-diff --git a/kernel/sched/topology.c b/kernel/sched/topology.c
---- a/kernel/sched/topology.c
-+++ b/kernel/sched/topology.c
-@@ -1698,6 +1698,277 @@ sd_init(struct sched_domain_topology_level *tl,
- 		sd->shared = *per_cpu_ptr(sdd->sds, sd_id);
- 		atomic_inc(&sd->shared->ref);
- 		atomic_set(&sd->shared->nr_busy_cpus, sd_weight);
-+
-+#ifdef CONFIG_SCHED_POC_SELECTOR
-+		int range = cpumask_last(sd_span) - sd_id + 1;
-+
-+		sd->shared->poc_cpu_base = sd_id;
-+		sd->shared->poc_affinity_shift = sd_id & 63;
-+
-+		if (range <= 64) {
-+			sd->shared->poc_fast_eligible = true;
-+			/*
-+			 * Disable aligned optimization if this LLC's base CPU
-+			 * is not 64-aligned (e.g., Threadripper CCDs).
-+			 */
-+			if (sd_id & 63)
-+				static_branch_disable_cpuslocked(&sched_poc_aligned);
-+			/*
-+			 * Disable packed priority search if this LLC
-+			 * has more than 32 CPUs.
-+			 */
-+			if (range > 32)
-+				static_branch_disable_cpuslocked(&sched_poc_packed);
-+		} else {
-+			sd->shared->poc_fast_eligible = false;
-+			static_branch_disable_cpuslocked(&sched_poc_packed);
-+		}
-+
-+		/* One-time: MSHR pull budget from the boot CPU's microarchitecture */
-+		{
-+			static bool poc_budget_init_done;
-+
-+			if (!poc_budget_init_done) {
-+				poc_budget_init_done = true;
-+				switch (boot_cpu_data.x86) {
-+				case 0x1a:	/* Zen4/5: L2 MSHR ~32 */
-+					poc_pull_budget = 16;
-+					break;
-+				case 0x19:	/* Zen3: L2 MSHR ~24 */
-+					poc_pull_budget = 12;
-+					break;
-+				case 0x17:	/* Zen1/2: L2 MSHR ~20 */
-+					poc_pull_budget = 10;
-+					break;
-+				case 0x15:	/* Excavator: L2 MSHR ~12 */
-+					poc_pull_budget = 6;
-+					break;
-+				case 0x06:	/* Intel */
-+					if (boot_cpu_data.x86_model >= 0x4e)
-+						poc_pull_budget = 12;	/* Skylake+: MSHR 24+ */
-+					else
-+						poc_pull_budget = 4;	/* pre-Skylake: MSHR <= 16 */
-+					break;
-+				default:	/* unknown: minimal MSHR */
-+					poc_pull_budget = 4;
-+					break;
-+				}
-+			}
-+		}
-+		/* Build LLC member bitmask for reader-side aggregation */
-+		{
-+			u64 members = 0;
-+			int cpu_iter;
-+
-+			for_each_cpu(cpu_iter, sd_span) {
-+				int bit = cpu_iter - sd_id;
-+
-+				if ((unsigned int)bit < 64) {
-+					members |= 1ULL << bit;
-+					/*
-+					 * Exact initial state from the idle_cpu() snapshot.  The
-+					 * lazy commit mode only converges from an exact start:
-+					 * an all-busy start plus the commit-skip check would
-+					 * publish nothing and pin the busy mask all-busy.
-+					 */
-+					cpu_rq(cpu_iter)->poc_busy_bit =
-+						idle_cpu(cpu_iter) ? 0ULL : (1ULL << bit);
-+				}
-+			}
-+			sd->shared->poc_llc_members = members;
-+			{
-+				u64 busy = 0;
-+				u64 t = members;
-+
-+				while (t) {
-+					int b = POC_CTZ64(t);
-+
-+					busy |= cpu_rq(sd_id + b)->poc_busy_bit;
-+					t &= t - 1;
-+				}
-+				atomic64_set(&sd->shared->poc_busy_mask, busy);
-+			}
-+			for (int pi = 0; pi < 8; pi++)
-+				atomic_set(&sd->shared->poc_pending[pi], 0);
-+		}
-+
-+#ifdef CONFIG_SCHED_SMT
-+		/*
-+		 * Pre-compute SMT sibling masks for Level 4.
-+		 * Each entry contains a bitmask of SMT siblings (including self)
-+		 * for O(1) lookup via CTZ during wakeup.
-+		 */
-+		memset(sd->shared->poc_smt_mask, 0,
-+		       sizeof(sd->shared->poc_smt_mask));
-+		if (sd->shared->poc_fast_eligible) {
-+			int cpu_iter;
-+
-+			for_each_cpu(cpu_iter, sd_span) {
-+				int bit = cpu_iter - sd_id;
-+				int sibling;
-+				u64 mask = 0;
-+
-+				for_each_cpu(sibling, cpu_smt_mask(cpu_iter)) {
-+					int sib_bit;
-+
-+					sib_bit = sibling - sd_id;
-+					if (sib_bit >= 0 && sib_bit < 64)
-+						mask |= 1ULL << sib_bit;
-+				}
-+				if (bit >= 0 && bit < 64)
-+					sd->shared->poc_smt_mask[bit] = mask;
-+			}
-+		}
-+
-+		/*
-+		 * Detect SMT topology and classify for poc_idle_core_mask():
-+		 *
-+		 *   Tier 1 (consecutive): uniform 2-way SMT, siblings at
-+		 *     consecutive bit positions (e.g., 0,1 / 2,3).
-+		 *     Uses compile-time constants: shift=1, mask=0x5555...
-+		 *
-+		 *   Tier 2 (uniform stride-N): uniform 2-way SMT with
-+		 *     constant stride between siblings (e.g., Intel Xeon
-+		 *     stride-8: CPU 0,8 / 1,9 / ...).  Uses precomputed
-+		 *     poc_smt_shift and poc_primary_mask for read-time
-+		 *     derivation without write-path overhead.
-+		 *
-+		 *   Tier 3 (exotic): >2-way SMT, non-uniform topology,
-+		 *     or mixed SMT ways.  Falls back to read-time
-+		 *     derivation from the per-CPU SMT sibling masks.
-+		 *
-+		 * On pure non-SMT systems, the key values are irrelevant
-+		 * because sched_smt_active() gates all SMT paths.
-+		 */
-+		sd->shared->poc_smt_shift = 1;
-+		sd->shared->poc_primary_mask = 0;
-+
-+		if (sd->shared->poc_fast_eligible) {
-+			int cpu_iter;
-+			bool all_2way = true;
-+			bool all_consecutive = true;
-+			int uniform_stride = -1;
-+			u64 primary_mask = 0;
-+
-+			for_each_cpu(cpu_iter, sd_span) {
-+				int bit = cpu_iter - sd_id;
-+
-+				if (bit < 0 || bit >= 64)
-+					continue;
-+				u64 mask = sd->shared->poc_smt_mask[bit];
-+				int ways = hweight64(mask);
-+
-+				if (ways != 2) {
-+					all_2way = false;
-+					all_consecutive = false;
-+					break;
-+				}
-+
-+				int lo = __ffs(mask);
-+				int hi = __fls(mask);
-+				int stride = hi - lo;
-+
-+				/* Track primary (lowest-numbered sibling) */
-+				primary_mask |= 1ULL << lo;
-+
-+				/* Check consecutive: 0b11 at even position */
-+				if ((lo & 1) || mask != (3ULL << lo))
-+					all_consecutive = false;
-+
-+				/* Check uniform stride */
-+				if (uniform_stride < 0)
-+					uniform_stride = stride;
-+				else if (stride != uniform_stride)
-+					all_2way = false;
-+			}
-+
-+			if (!all_consecutive)
-+				static_branch_disable_cpuslocked(
-+					&sched_poc_smt_consecutive);
-+
-+			if (all_2way && uniform_stride > 0) {
-+				sd->shared->poc_smt_shift =
-+					(u8)uniform_stride;
-+				sd->shared->poc_primary_mask = primary_mask;
-+			} else {
-+				static_branch_disable_cpuslocked(
-+					&sched_poc_smt_consecutive);
-+				static_branch_disable_cpuslocked(
-+					&sched_poc_smt_uniform);
-+			}
-+		}
-+#endif /* CONFIG_SCHED_SMT */
-+
-+		memset(sd->shared->poc_cluster_mask, 0,
-+		       sizeof(sd->shared->poc_cluster_mask));
-+
-+		sd->shared->poc_cluster_valid = false;
-+
-+#ifdef CONFIG_SCHED_CLUSTER
-+		/*
-+		 * Detect cluster (L2-sharing) topology for Level 2/5
-+		 * cluster-local search in POC selector.
-+		 *
-+		 * Uses cpu_clustergroup_mask() which returns the L2
-+		 * cache sharing mask on x86.  Validates that all
-+		 * clusters are uniform (same size, power-of-2, and
-+		 * naturally aligned in POC bit space).
-+		 */
-+		if (sd->shared->poc_fast_eligible) {
-+			const struct cpumask *cls_mask =
-+				cpu_clustergroup_mask(sd_id);
-+			int cls_size = cpumask_weight(cls_mask);
-+			int smt_size = cpumask_weight(cpu_smt_mask(sd_id));
-+
-+			if (cls_size > smt_size &&
-+			    is_power_of_2(cls_size)) {
-+				bool valid = true;
-+				int cpu_iter;
-+
-+				for_each_cpu(cpu_iter, sd_span) {
-+					const struct cpumask *m =
-+						cpu_clustergroup_mask(cpu_iter);
-+					int first = cpumask_first(m);
-+					int rel = first - sd_id;
-+
-+					if (cpumask_weight(m) != cls_size ||
-+					    (rel & (cls_size - 1)) != 0) {
-+						valid = false;
-+						break;
-+					}
-+				}
-+				if (valid) {
-+					sd->shared->poc_cluster_valid = true;
-+
-+					/*
-+					 * Pre-compute cluster masks for O(1) lookup.
-+					 * Each entry contains a bitmask of cluster
-+					 * members (excluding self) for fast search.
-+					 */
-+					for_each_cpu(cpu_iter, sd_span) {
-+						const struct cpumask *m =
-+							cpu_clustergroup_mask(cpu_iter);
-+						int bit = cpu_iter - sd_id;
-+						int member;
-+						u64 cmask = 0;
-+
-+						for_each_cpu(member, m) {
-+							int mbit;
-+
-+							if (member == cpu_iter)
-+								continue;
-+							mbit = member - sd_id;
-+							if (mbit >= 0 && mbit < 64)
-+								cmask |= 1ULL << mbit;
-+						}
-+						if (bit >= 0 && bit < 64)
-+							sd->shared->poc_cluster_mask[bit] = cmask;
-+					}
-+				}
-+			}
-+		}
-+#endif /* CONFIG_SCHED_CLUSTER */
-+#endif /* CONFIG_SCHED_POC_SELECTOR */
- 	}
- 
- 	sd->private = sdd;

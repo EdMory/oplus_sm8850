@@ -1019,11 +1019,14 @@ jobs:
           patch -p1 -F 0 --no-backup-if-mismatch < "$BORE_PATCH"
 
           # 三、ABI/KMI 面静态审计(仅检查补丁新增行):
-          #     1) 禁止触碰 ANDROID_KABI 保留区与 __kabi_reserved;
+          #     1) KABI 保留区布局审计: 禁止删除/改动既有保留字段(减行), 禁止新增 ANDROID_KABI_RESERVE 宏(加行, 排除注释); 允许经 __kabi_reserved1 引用读写保留槽位(指针方案, 布局不变);
           #     2) 本移植为零新增导出: sysctl_sched_base_slice 的 EXPORT_SYMBOL_GPL 保留在非 BORE 分支(上下文行), 补丁不应新增任何 EXPORT_SYMBOL;
           #     3) 白名单外文件一律中止(允许 12 个既有文件 + 2 个新文件)。
-          if grep -nE '^\+.*(ANDROID_KABI|__kabi_reserved)' "$BORE_PATCH"; then
-            echo "BORE 补丁触碰 KABI 保留区, 已中止"; exit 1
+          if grep -nE '^\-.*(ANDROID_KABI|__kabi_reserved)' "$BORE_PATCH"; then
+            echo "BORE 补丁删除/改动 KABI 保留区, 已中止"; exit 1
+          fi
+          if grep -nE '^\+.*ANDROID_KABI_RESERVE' "$BORE_PATCH" | grep -qvE '^[0-9]+:\+[[:space:]]*[*/]'; then
+            echo "BORE 补丁新增 ANDROID_KABI_RESERVE, 已中止"; exit 1
           fi
           if grep -nE '^\+.*EXPORT_SYMBOL(_GPL)?\(' "$BORE_PATCH"; then
             echo "BORE 补丁包含新增导出符号(应零导出), 已中止"; exit 1

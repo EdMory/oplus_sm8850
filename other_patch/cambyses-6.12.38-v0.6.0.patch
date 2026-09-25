@@ -10,7 +10,6 @@ This isolates enum-offset side effects from mere feature existence.
 
 ---
 diff --git a/kernel/sched/features.h b/kernel/sched/features.h
-index 4ecf51e29b..0000000000 100644
 --- a/kernel/sched/features.h
 +++ b/kernel/sched/features.h
 @@ -122,3 +122,43 @@ SCHED_FEAT(WA_BIAS, true)

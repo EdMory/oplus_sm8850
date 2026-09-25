@@ -264,7 +264,7 @@ index da8ec0c23f..82c197e3e7 100644
 + *
 + * Turn off to get the upstream per-reject list_move() behaviour.
 + */
-+SCHED_FEAT(LB_ROTATE_BLOCK, true)
++SCHED_FEAT(LB_ROTATE_BLOCK, false)
 +
 +/*
 + * Compare a migration candidate's cost against the remaining imbalance budget

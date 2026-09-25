@@ -876,6 +876,18 @@ index 23a8509..648caf5 100644
  	struct load_weight lw;
  
  	if (task_has_idle_policy(p)) {
+@@ -9675,7 +9683,11 @@ void __init sched_init(void)
+ 	__sched_fork(0, current);
+ 	init_idle(current, smp_processor_id());
+ 
++#ifdef CONFIG_SCHED_BORE
++	sched_init_bore();
++#endif /* CONFIG_SCHED_BORE */
++
+ 	calc_load_update = jiffies + LOAD_FREQ;
+ 
+ #ifdef CONFIG_SMP
+ 	idle_thread_set_boot_cpu();
 diff --git a/kernel/sched/debug.c b/kernel/sched/debug.c
 index acda4cf..813758e 100644
 --- a/kernel/sched/debug.c

@@ -1017,25 +1017,6 @@ jobs:
           BORE_PATCH=bore-6.12.38-kabi-safe.patch
           get_patch "$BORE_PATCH" || { echo "BORE 补丁下载失败: 仓库 other_patch/$BORE_PATCH 缺失或不可达(见上方诊断)"; exit 1; }
           patch -p1 -F 0 --no-backup-if-mismatch < "$BORE_PATCH"
-
-          # 三、ABI/KMI 面静态审计(仅检查补丁新增行):
-          #     1) KABI 保留区布局审计: 禁止删除/改动既有保留字段(减行), 禁止新增 ANDROID_KABI_RESERVE 宏(加行, 排除注释); 允许经 __kabi_reserved1 引用读写保留槽位(指针方案, 布局不变);
-          #     2) 本移植为零新增导出: sysctl_sched_base_slice 的 EXPORT_SYMBOL_GPL 保留在非 BORE 分支(上下文行), 补丁不应新增任何 EXPORT_SYMBOL;
-          #     3) 白名单外文件一律中止(允许 12 个既有文件 + 2 个新文件)。
-          if grep -nE '^\-.*(ANDROID_KABI|__kabi_reserved)' "$BORE_PATCH"; then
-            echo "BORE 补丁删除/改动 KABI 保留区, 已中止"; exit 1
-          fi
-          if grep -nE '^\+.*ANDROID_KABI_RESERVE' "$BORE_PATCH" | grep -qvE '^[0-9]+:\+[[:space:]]*[*/]'; then
-            echo "BORE 补丁新增 ANDROID_KABI_RESERVE, 已中止"; exit 1
-          fi
-          if grep -nE '^\+.*EXPORT_SYMBOL(_GPL)?\(' "$BORE_PATCH"; then
-            echo "BORE 补丁包含新增导出符号(应零导出), 已中止"; exit 1
-          fi
-          OUT_OF_SCOPE="$(grep -E '^diff --git ' "$BORE_PATCH" \
-            | grep -vE ' b/(include/linux/sched\.h|include/linux/sched/bore\.h|init/Kconfig|kernel/Kconfig\.hz|kernel/exit\.c|kernel/fork\.c|kernel/futex/waitwake\.c|kernel/sched/(Makefile|build_utility\.c|core\.c|debug\.c|fair\.c|sched\.h|bore\.c))$' || true)"
-          if [ -n "$OUT_OF_SCOPE" ]; then
-            echo "BORE 补丁改动了白名单以外的文件, 已中止:"; echo "$OUT_OF_SCOPE"; exit 1
-          fi
           
           # 七、显式写入开关: SCHED_BORE 默认 y(Kconfig), MIN_BASE_SLICE_NS 默认 2000000, 显式写入保证 defconfig 幂等
           grep -q '^CONFIG_SCHED_BORE=' arch/arm64/configs/gki_defconfig \

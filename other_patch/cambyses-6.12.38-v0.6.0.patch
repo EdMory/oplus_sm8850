@@ -1,21 +1,23 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Marvis
 Date: Fri, 25 Sep 2026 00:00:00 +0800
-Subject: [PATCH] 6.12.38-oplus fh-only: features.h defines only (both off)
+Subject: [PATCH] 6.12.38-oplus fh-tail: features.h defines only, APPENDED AT END (both off)
 
-Control variant R1: touch ONLY kernel/sched/features.h, adding the two
-Cambyses SCHED_FEAT definitions with defaults off. kernel/sched/fair.c is
-untouched (stock OPLUS while-loop detach_tasks with shr_bound relaxation).
+Control variant R2: touch ONLY kernel/sched/features.h, appending the two
+Cambyses SCHED_FEAT definitions AT THE END of the file (after LATENCY_WARN).
+Existing feature enum values are UNCHANGED; only __SCHED_FEAT_NR grows by 2.
+This isolates enum-offset side effects from mere feature existence.
 
 ---
 diff --git a/kernel/sched/features.h b/kernel/sched/features.h
-index da8ec0c23f..82c197e3e7 100644
+index 4ecf51e29b..0000000000 100644
 --- a/kernel/sched/features.h
 +++ b/kernel/sched/features.h
-@@ -112,6 +112,45 @@ SCHED_FEAT(RT_RUNTIME_SHARE, false)
- SCHED_FEAT(LB_MIN, false)
- SCHED_FEAT(ATTACH_AGE_LOAD, true)
+@@ -122,3 +122,43 @@ SCHED_FEAT(WA_BIAS, true)
+ SCHED_FEAT(UTIL_EST, true)
  
+ SCHED_FEAT(LATENCY_WARN, false)
++
 +/*
 + * Advance detach_tasks()' scan window by rotating the examined block to the
 + * head of cfs_tasks, instead of moving each rejected task there one by one.
@@ -55,9 +57,6 @@ index da8ec0c23f..82c197e3e7 100644
 + */
 +SCHED_FEAT(LB_STRICT_BUDGET, false)
 +
- SCHED_FEAT(WA_IDLE, true)
- SCHED_FEAT(WA_WEIGHT, true)
- SCHED_FEAT(WA_BIAS, true)
+
 -- 
 2.34.1
-

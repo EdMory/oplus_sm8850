@@ -92,7 +92,7 @@ on:
         type: boolean
         default: 'true'
       isqrt_enable:
-        description: '是否集成 ISQRT 快速整数平方根库'
+        description: '是否集成 ISQRT 整数平方根快速库'
         required: true
         type: boolean
         default: 'true'
@@ -978,10 +978,10 @@ jobs:
           echo "提示: 内核代码 include <linux/intfp.h> 即可按需使用; 启动后可用 dmesg | grep intfp 查看内置自检结果"
           echo "intfp 集成完成(零 fuzz 应用 + 零导出符号 + KABI 面未触碰)！"
 
-      - name: 集成 isqrt 整数平方根库(header-only)
+      - name: 集成 isqrt 整数平方根快速库(header-only)
         if: inputs.isqrt_enable
         run: |
-          echo "正在集成 isqrt 1.0(firelzrd/isqrt: 快速整数平方根库, 通过 CLZ+查表+Newton-Raphson 计算精确 floor(sqrt(v)), 相比循环式 int_sqrt 提速数倍; 内核侧为 header-only 移植: 全部 static inline + static const 表, 零导出符号、不触碰 KABI)…"
+          echo "正在集成 isqrt 1.0(firelzrd/isqrt: isqrt8/16/32/64 四种位宽精确 floor(sqrt), __builtin_clz 定位 + LUT + Newton-Raphson, 比内核 int_sqrt 快 2~8 倍; 内核侧为 header-only 移植: 全部 static inline + static const 表, 零导出符号、不触碰 KABI)…"
           # 任何命令失败时打印出错行号: 避免 set -e 静默退出后失败点无法定位
           trap 'echo "isqrt 集成步骤在脚本第 $LINENO 行失败(退出码 $?)" >&2' ERR
           cd kernel_workspace/common
@@ -995,8 +995,7 @@ jobs:
           #     lib/isqrt/isqrt.c                late_initcall 数值自检(让整库在真实内核工具链下实例化)
           #     lib/isqrt/isqrt_kunit.c          可选 KUnit 用例(需 CONFIG_KUNIT)
           #     lib/isqrt/isqrt_selftest_host.c  host 侧数值自检(不进内核镜像, 仅供本步骤在 runner 上运行)
-          #   isqrt-6.12-glue.patch (glue) 仅在 lib/Kconfig(lib/math 段)、lib/Makefile(mpi 段)的既有锚点之后
-          #     各插入 1 行接入点, 与 lz4kd/lz4kdr/intfp 的 glue 区域完全错开, 互不干扰。
+          #   isqrt-6.12-glue.patch (glue) 仅在 lib/Kconfig、lib/Makefile 的既有锚点之后各插入 2 行接入点。
           # 两补丁都不含 EXPORT_SYMBOL、不触碰 KABI 保留区(见下方静态审计), 故不破坏 ABI/KMI。
 
           # 一、幂等前置检查: 树内若已有 isqrt(例如重复运行), 直接跳过, 避免 new-file hunk 冲突
@@ -1060,15 +1059,16 @@ jobs:
             echo "isqrt 补丁包含导出符号(该库应零导出), 已中止"; exit 1
           fi
           # 注意: 白名单全部命中时 grep -vE 无输出返回码为 1, 必须 || true 兜底, 否则 bash -e 下静默退出
-          OUT_OF_SCOPE="$(grep -E '^diff --git ' "$PATCH_DIR/isqrt_all.patch" | grep -vE ' b/(include/linux/isqrt\.h|lib/isqrt/[^/]+|lib/Kconfig|lib/Makefile)$' || true)"
+          OUT_OF_SCOPE="$(grep -E '^diff --git ' "$PATCH_DIR/isqrt_all.patch" \
+            | grep -vE ' b/(include/linux/isqrt\.h|lib/isqrt/[^/]+|lib/Kconfig|lib/Makefile)$' || true)"
           if [ -n "$OUT_OF_SCOPE" ]; then
             echo "isqrt 补丁改动了白名单以外的文件, 已中止:"; echo "$OUT_OF_SCOPE"; exit 1
           fi
           ABI_HASHES="$(md5sum include/linux/sched.h kernel/sched/sched.h | md5sum)"
 
-          # 四、名称冲突检查(应用前): isqrt 的公共函数/表/宏名不得与本树既有代码重名, 命中即中止,
+          # 四、名称冲突检查(应用前): isqrt 的公共类型/宏名不得与本树既有代码重名, 命中即中止,
           #     避免内核编译期出现重复定义; 限定 include/ 与 lib/ 两处, 秒级完成。
-          for sym in isqrt8 isqrt16 isqrt32 isqrt64 _isqrt8_lut _isqrt16_delta_lut _isqrt_est_lut _isqrt_clz; do
+          for sym in isqrt8 isqrt16 isqrt32 isqrt64 _isqrt8_lut _isqrt16_delta_lut _isqrt_est_lut; do
             hit="$(grep -rlE --include='*.h' --include='*.c' "\b${sym}\b" include lib 2>/dev/null | head -n 3 || true)"
             if [ -n "$hit" ]; then
               echo "isqrt 名称冲突: ${sym} 已存在于以下文件, 已中止:"; echo "$hit"; exit 1
@@ -1086,8 +1086,8 @@ jobs:
             if grep -qE 'with fuzz|FAILED|ignored|Reversed|previously applied' "$LOG"; then
               echo "isqrt 补丁 $p 与当前内核树不匹配(fuzz / hunk 失败 / 重复应用), 已中止"; exit 1
             fi
-            # core 补丁是纯新增文件, 与既有改动无交互; glue 补丁的两个锚点位于 lib/Kconfig(lib/math 段)
-            # 与 lib/Makefile(mpi 段)中部, 其前方已被 lz4kd/lz4kdr/intfp 各插入若干行, 因此会产生纯行号偏移
+            # core 补丁是纯新增文件, 与既有改动无交互; glue 补丁的两个锚点位于 lib/Kconfig(lib/fonts 段)
+            # 与 lib/Makefile(pldmfw 段)中部, 其前方已被 lz4kd/lz4kdr/intfp 各插入若干行, 因此会产生纯行号偏移
             # (上下文仍逐字符精确匹配、落点正确), 这里只提示不中止。
             if grep -q 'offset' "$LOG"; then
               echo "提示: 以下 hunk 存在纯行号偏移(上下文精确匹配, 位置正确, 属 lz4kd/lz4kdr/intfp 等先行改动所致), 继续应用:"
@@ -1097,13 +1097,14 @@ jobs:
           done
 
           # 六、ABI 复核: 结构体布局相关文件必须与打补丁前逐字节一致
-          [ "$(md5sum include/linux/sched.h kernel/sched/sched.h | md5sum)" = "$ABI_HASHES" ]             || { echo "isqrt ABI 校验失败: 结构体布局相关文件被改动"; exit 1; }
+          [ "$(md5sum include/linux/sched.h kernel/sched/sched.h | md5sum)" = "$ABI_HASHES" ] \
+            || { echo "isqrt ABI 校验失败: 结构体布局相关文件被改动"; exit 1; }
 
           # 七、集成结果校验: 头文件 / Kconfig 开关 / 构建接入点 / 自检单元必须齐全
           check() { grep -qF "$2" "$1" || { echo "isqrt 集成校验失败: $1 缺少 '$2'"; exit 1; }; }
           check include/linux/isqrt.h '#define _LINUX_ISQRT_H'
-          check include/linux/isqrt.h 'isqrt64('
-          check include/linux/isqrt.h 'static const s8 _isqrt16_delta_lut'
+          check include/linux/isqrt.h 'isqrt64'
+          check include/linux/isqrt.h 'ISQRT_DEFINE('
           check lib/isqrt/Kconfig 'config ISQRT_KUNIT_TEST'
           check lib/isqrt/isqrt.c 'late_initcall(isqrt_selftest_init);'
           check lib/Kconfig 'source "lib/isqrt/Kconfig"'
@@ -1128,12 +1129,14 @@ jobs:
           typedef long long s64;
           #endif /* _ISQRT_HOST_STUB_TYPES_H */
           EOF_TYPES
-          gcc -std=gnu11 -O2 -Wall -Wextra -I/tmp/isqrt_host -Iinclude             -o /tmp/isqrt_host/isqrt_selftest lib/isqrt/isqrt_selftest_host.c
+          gcc -std=gnu11 -O2 -Wall -Wextra -I/tmp/isqrt_host -Iinclude \
+            -o /tmp/isqrt_host/isqrt_selftest lib/isqrt/isqrt_selftest_host.c
           /tmp/isqrt_host/isqrt_selftest
 
           # 九、显式写入开关: ISQRT=y(库本身零开销: 全部 static inline, 未被使用即被编译器丢弃);
           #     KUnit 用例保持关闭(依赖 CONFIG_KUNIT, 生产内核无必要)
-          grep -q '^CONFIG_ISQRT=' arch/arm64/configs/gki_defconfig             || echo "CONFIG_ISQRT=y" >> arch/arm64/configs/gki_defconfig
+          grep -q '^CONFIG_ISQRT=' arch/arm64/configs/gki_defconfig \
+            || echo "CONFIG_ISQRT=y" >> arch/arm64/configs/gki_defconfig
           echo "提示: 内核代码 include <linux/isqrt.h> 即可按需使用; 启动后可用 dmesg | grep isqrt 查看内置自检结果"
           echo "isqrt 集成完成(零 fuzz 应用 + 零导出符号 + KABI 面未触碰)！"
 
@@ -1458,7 +1461,6 @@ jobs:
           echo "ZRAM-IR: ${{ github.event.inputs.zram_ir_enable }}" >> ./ak3.log
           echo "LZ4KDR: ${{ github.event.inputs.lz4kdr_enable }}" >> ./ak3.log
           echo "BORE: ${{ github.event.inputs.bore_enable }}" >> ./ak3.log
-          echo "ISQRT: ${{ github.event.inputs.isqrt_enable }}" >> ./ak3.log
           echo "POC: ${{ github.event.inputs.poc_enable }}" >> ./ak3.log
           echo "Kcompressd: ${{ github.event.inputs.kcompress_enable }}" >> ./ak3.log
           zip -z ../$AK3_NAME < ./ak3.log
@@ -1548,7 +1550,6 @@ jobs:
           - NoMount(VFS 路径重定向)支持：${{ github.event.inputs.nomount_enable }}
           - LZ4KDR 支持：${{ github.event.inputs.lz4kdr_enable }}（LZ4KD 的高速衍生实现，线格式兼容、重写编码器搜索循环，与 LZ4KD 后端并存）
           - BORE 调度器支持：${{ github.event.inputs.bore_enable }}（Burst-Oriented Response Enhancer，基于 burst 时间区分任务优先级，提升交互响应；KABI 安全移植：bore_ctx 追加到 task_struct 末尾，不触碰 ANDROID_KABI_RESERVE）
-          - ISQRT 支持：${{ github.event.inputs.isqrt_enable }}（快速整数平方根库，CLZ+查表+Newton-Raphson 实现精确 floor(sqrt(v))，比循环式 int_sqrt 快数倍；header-only、零导出符号、KABI 面未触碰）
           - POC Selector 调度器支持：${{ github.event.inputs.poc_enable }}（Piece-Of-Cake Fast Idle CPU Selector，快速空闲 CPU 选择优化唤醒路径；KABI 安全移植：per-task 上下文经 __kabi_reserved2 保留槽指针访问，布局不变、零新增导出）
           - 性能优化补丁集：${{ github.event.inputs.perf_patch_enable }}（TCP 初始窗口锁定 64K、IRQ 默认亲和性收敛到 CPU0、workqueue flush 减少自旋锁、关闭 debug_locks 全局锁调试开关；F2FS GC idle 优化随移植补丁集）
           - O3 构建优化：${{ github.event.inputs.o3_enable }}（内核整体 -O3 + arm64 额外代码生成优化，镜像体积会增大）

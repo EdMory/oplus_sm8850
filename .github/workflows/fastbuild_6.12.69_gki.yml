@@ -1489,25 +1489,28 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           cat << 'EOF' > release_notes.md
-          ### 📱 米系/其他 GKI 机型 ${{ env.KSU_TYPENAME }} sm8850 通用内核 | 构建信息
+          ### 📱  ${{ env.KSU_TYPENAME }} sm8850 通用内核 | 构建信息
           - 内核版本号: ${{ env.FULL_VERSION }}
           - 编译时间: ${{ env.TIME_FORM }}
-          - 机型：欧加真骁龙8E Gen5通用 ${{ env.KERNEL_VERSION }}.${{ env.SUB_VERSION }} 内核（基于 AOSP 官方 android16-6.12-2026-03 源码分支）
+          - 机型：骁龙8E Gen5通用 ${{ env.KERNEL_VERSION }}.${{ env.SUB_VERSION }} 内核（基于一加Ace6t ${{ env.KERNEL_VERSION }}.${{ env.SUB_VERSION }} 版官方源码）
           - KSU分支：${{ env.KSU_TYPENAME }}
-          - susfs支持：${{ github.event.inputs.susfs_enable }}
+          - SuSFS支持：${{ github.event.inputs.susfs_enable }}
+          - NoMount支持：${{ github.event.inputs.nomount_enable }}
           - KPM支持 ：${{ github.event.inputs.kpm_enable }}
           - LZ4支持：${{ github.event.inputs.lz4_enable }}
           - LZ4KD支持：${{ github.event.inputs.lz4kd_enable }}
-          - 网络功能增强：${{ github.event.inputs.better_net }}
-          - BBR/Brutal 等拥塞控制算法支持：${{ github.event.inputs.bbr_enable }}
+          - LZ4KDR支持：${{ github.event.inputs.lz4kd_enable }}
           - Droidspaces 容器支持：${{ github.event.inputs.droidspaces_enable }}
-          - ADIOS IO调度器支持：${{ github.event.inputs.adios_enable }}
+          - 网络功能增强：${{ github.event.inputs.better_net }}
+          - BBR 等拥塞控制算法支持：${{ github.event.inputs.bbr_enable }}
           - Re-Kernel支持：${{ github.event.inputs.rekernel_enable }}
-          - 内核级基带保护支持：${{ github.event.inputs.baseband_guard }}
+          - BBG支持：${{ github.event.inputs.baseband_guard }}
+          - INTFP支持：${{ github.event.inputs.intfp_enable }}
+          - ISQRT支持：${{ github.event.inputs.isqrt_enable }}
+          - ADIOS IO调度器支持：${{ github.event.inputs.adios_enable }}
+          - BORE 调度器支持：${{ github.event.inputs.bore_enable }}
+          - O3 构建优化：${{ github.event.inputs.o3_enable }}
           - ReSukiSU管理器下载：[ReSukiSU_CI](https://github.com/cctv18/ReSukiSU_CI/releases)
-          - SukiSU Ultra管理器下载：[SukiSU-Ultra](https://github.com/SukiSU-Ultra/SukiSU-Ultra/releases)
-          - KernelSU Next管理器下载：[KernelSU-Next](https://github.com/KernelSU-Next/KernelSU-Next/releases)
-          - KSU原版管理器下载：[KernelSU](https://github.com/tiann/KernelSU/releases)
           
           ### ⏫️ 更新内容：
           - 更新${{ env.KSU_TYPENAME }}至最新版本（${{ needs.build.outputs.ksuver }}）

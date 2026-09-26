@@ -1,4 +1,4 @@
-name: 6.12.38 欧加真OKI内核快速构建
+name: 6.12.38 OKI内核快速构建
 
 env:
   TZ: Asia/Shanghai
@@ -12,7 +12,7 @@ on:
   workflow_dispatch:
     inputs:
       ksu_type:
-        description: 'KernelSU分支(ReSukiSU/SukiSU Ultra/KernelSU Next/KSU(原版)/无内置KSU,默认ReSukiSU)'
+        description: '选择KernelSU分支'
         required: true
         type: choice
         default: 'resukisu'
@@ -23,22 +23,32 @@ on:
           - 'ksu'
           - 'none'
       susfs_enable:
-        description: '是否开启susfs(用于增强隐藏环境挂载功能; 可能轻微增加耗电，上游更新导致不稳定时或不需要可关闭)'
+        description: '是否开启SuSFS(用于增强隐藏环境挂载功能)'
         required: true
         type: boolean
         default: 'false'
+      nomount_enable:
+        description: '是否开启 NoMount (以VFS替代传统挂载式模块注入)'
+        required: true
+        type: boolean
+        default: 'true'
       kpm_enable:
-        description: '是否开启kpm(使用KpatchNext独立实现kpm(支持任意KSU/面具环境); 不需要可保持默认关闭)'
+        description: '是否开启KPN(使用KpatchNext独立实现)'
         required: true
         type: boolean
         default: 'false'
       lz4_enable:
-        description: '是否安装 lz4 1.10.0+zstd 1.5.7 补丁'
+        description: '是否安装 lz4 1.10.0和zstd 1.5.7 补丁'
         required: true
         type: boolean
         default: 'true'
       lz4kd_enable:
-        description: '是否安装 LZ4KD 补丁(若已开启lz4+zstd补丁则可不开启)'
+        description: '是否安装 LZ4KD 补丁'
+        required: true
+        type: boolean
+        default: 'true'
+      lz4kdr_enable:
+        description: '是否安装 LZ4KDR 补丁'
         required: true
         type: boolean
         default: 'true'
@@ -51,6 +61,16 @@ on:
           - 'false'
           - 'standard'
           - 'extend'
+      rekernel_enable:
+        description: '是否启用Re-Kernel支持(与Freezer/NoActive等LSP模块配合, 提升应用冻结能力)'
+        required: true
+        type: boolean
+        default: 'true'
+      baseband_guard:
+        description: '是否开启BBG(内核级分区保护，防止格机)'
+        required: true
+        type: boolean
+        default: 'true'
       better_net:
         description: '是否开启网络功能拓展配置(用于为ipset及需要iptables等高级网络功能内核支持的程序提供支持)'
         required: true
@@ -61,31 +81,6 @@ on:
         required: true
         type: boolean
         default: 'true'
-      adios_enable:
-        description: '是否启用ADIOS IO调度器支持'
-        required: true
-        type: boolean
-        default: 'true'
-      rekernel_enable:
-        description: '是否启用Re-Kernel支持(与Freezer/NoActive等软件配合, 提升应用冻结能力)'
-        required: true
-        type: boolean
-        default: 'true'
-      baseband_guard:
-        description: '是否开启内核级基带保护(阻止一切对非用户分区的写入，有效防止格机)'
-        required: true
-        type: boolean
-        default: 'true'
-      nomount_enable:
-        description: '是否按 GKI 方式将 NoMount 内置编译进内核(NoMount 用于替代传统挂载式模块注入)'
-        required: true
-        type: boolean
-        default: 'true'
-      lz4kdr_enable:
-        description: '是否集成 LZ4KDR 压缩算法（LZ4KD 的高速衍生实现)'
-        required: true
-        type: boolean
-        default: 'true'
       intfp_enable:
         description: '是否集成 INTFP '
         required: true
@@ -93,6 +88,11 @@ on:
         default: 'true'
       isqrt_enable:
         description: '是否集成 ISQRT 整数平方根快速库'
+        required: true
+        type: boolean
+        default: 'true'
+      adios_enable:
+        description: '是否启用ADIOS IO调度器支持'
         required: true
         type: boolean
         default: 'true'

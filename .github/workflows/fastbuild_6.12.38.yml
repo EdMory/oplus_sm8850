@@ -12,7 +12,7 @@ on:
   workflow_dispatch:
     inputs:
       ksu_type:
-        description: '选择KernelSU分支'
+        description: '选择 KernelSU 分支'
         required: true
         type: choice
         default: 'resukisu'
@@ -23,7 +23,7 @@ on:
           - 'ksu'
           - 'none'
       susfs_enable:
-        description: '是否开启SuSFS(用于增强隐藏环境挂载功能)'
+        description: '是否开启 SuSFS (用于增强隐藏环境挂载功能)'
         required: true
         type: boolean
         default: 'false'
@@ -33,12 +33,12 @@ on:
         type: boolean
         default: 'true'
       kpm_enable:
-        description: '是否开启KPN(使用KpatchNext独立实现)'
+        description: '是否开启 KPN (使用KpatchNext独立实现)'
         required: true
         type: boolean
         default: 'false'
       lz4_enable:
-        description: '是否安装 lz4 1.10.0和zstd 1.5.7 补丁'
+        description: '是否安装 LZ4 1.10.0 和 ZSTD 1.5.7 补丁'
         required: true
         type: boolean
         default: 'true'
@@ -53,7 +53,7 @@ on:
         type: boolean
         default: 'true'
       droidspaces_enable:
-        description: '是否启用Droidspaces容器支持(轻量化的完整Linux容器支持;false关闭,standard开启容器+ntsync支持,extend开启更多测试支持项)'
+        description: '是否开启 Droidspaces 容器支持(轻量化的完整Linux容器支持)'
         required: true
         type: choice
         default: 'extend'
@@ -62,47 +62,47 @@ on:
           - 'standard'
           - 'extend'
       rekernel_enable:
-        description: '是否启用Re-Kernel支持(与Freezer/NoActive等LSP模块配合, 提升应用冻结能力)'
+        description: '是否启用 Re-Kernel 支持(与 Freezer / NoActive 等LSP模块配合, 提升应用冻结能力)'
         required: true
         type: boolean
         default: 'true'
       baseband_guard:
-        description: '是否开启BBG(内核级分区保护，防止格机)'
+        description: '是否开启 BBG (内核级分区保护，防止格机)'
         required: true
         type: boolean
         default: 'true'
       better_net:
-        description: '是否开启网络功能拓展配置(用于为ipset及需要iptables等高级网络功能内核支持的程序提供支持)'
+        description: '是否开启网络功能拓展配置(用于为 ipset 及需要 iptables 等高级网络功能内核支持的程序提供支持)'
         required: true
         type: boolean
         default: 'true'
       bbr_enable:
-        description: '是否集成 BBR 拥塞控制补丁'
+        description: '是否安装 BBR 拥塞控制补丁'
         required: true
         type: boolean
         default: 'true'
       intfp_enable:
-        description: '是否集成 INTFP '
+        description: '是否安装 INTFP '
         required: true
         type: boolean
         default: 'true'
       isqrt_enable:
-        description: '是否集成 ISQRT 整数平方根快速库'
+        description: '是否安装 ISQRT 整数平方根快速库'
         required: true
         type: boolean
         default: 'true'
       adios_enable:
-        description: '是否启用ADIOS IO调度器支持'
+        description: '是否安装 ADIOS IO 调度器'
         required: true
         type: boolean
         default: 'true'
       bore_enable:
-        description: '是否集成 BORE 调度器'
+        description: '是否安装 BORE 调度器'
         required: true
         type: boolean
         default: 'true'
       perf_patch_enable:
-        description: '是否集成性能优化补丁集'
+        description: '是否安装性能优化补丁集'
         required: true
         type: boolean
         default: 'true'
@@ -112,12 +112,12 @@ on:
         type: boolean
         default: 'true'
       ccache_update:
-        description: '更新ccache缓存(将本次编译生成的ccache缓存覆盖至仓库缓存，在更改编译配置、源码或需要刷新缓存时开启)'
+        description: '更新 ccache 缓存(将本次编译生成的ccache缓存覆盖至仓库缓存)'
         required: true
         type: boolean
         default: 'true'
       ccache_debug:
-        description: '是否上传 Ccache调试日志(用于调试, 无需要不必开启)'
+        description: '是否上传 Ccache 调试日志(用于调试, 无需要不必开启)'
         required: true
         type: boolean
         default: 'false'
@@ -1447,22 +1447,22 @@ jobs:
           echo "Kernel Ver: $FULL_VERSION" >> ./ak3.log
           echo "KSU Branch: ${KSU_TYPENAME}" >> ./ak3.log
           echo "KSU Ver: ${KSUVER}" >> ./ak3.log
-          echo "susfs: ${{ github.event.inputs.susfs_enable }}" >> ./ak3.log
+          echo "SuSFS: ${{ github.event.inputs.susfs_enable }}" >> ./ak3.log
+          echo "NoMount: ${{ github.event.inputs.nomount_enable }}" >> ./ak3.log
           echo "KPM: ${{ github.event.inputs.kpm_enable }}" >> ./ak3.log
           echo "LZ4: ${{ github.event.inputs.lz4_enable }}" >> ./ak3.log
           echo "LZ4KD: ${{ github.event.inputs.lz4kd_enable }}" >> ./ak3.log
-          echo "IPset: ${{ github.event.inputs.better_net }}" >> ./ak3.log
-          echo "BBR&Brutal: ${{ github.event.inputs.bbr_enable }}" >> ./ak3.log
-          echo "Droidspaces: ${{ github.event.inputs.droidspaces_enable }}" >> ./ak3.log
-          echo "ADIOS: ${{ github.event.inputs.adios_enable }} (v3.3.0)" >> ./ak3.log
+          echo "LZ4KDR: ${{ github.event.inputs.lz4kdr_enable }}" >> ./ak3.log
           echo "Re-Kernel: ${{ github.event.inputs.rekernel_enable }}" >> ./ak3.log
           echo "BBG: ${{ github.event.inputs.baseband_guard }}" >> ./ak3.log
-          echo "NoMount: ${{ github.event.inputs.nomount_enable }}" >> ./ak3.log
-          echo "ZRAM-IR: ${{ github.event.inputs.zram_ir_enable }}" >> ./ak3.log
-          echo "LZ4KDR: ${{ github.event.inputs.lz4kdr_enable }}" >> ./ak3.log
+          echo "IPset: ${{ github.event.inputs.better_net }}" >> ./ak3.log
+          echo "BBR: ${{ github.event.inputs.bbr_enable }}" >> ./ak3.log
+          echo "Droidspaces: ${{ github.event.inputs.droidspaces_enable }}" >> ./ak3.log
+          echo "INTFP: ${{ github.event.inputs.intfp_enable }}" >> ./ak3.log
+          echo "ISQRT: ${{ github.event.inputs.isqrt_enable }}" >> ./ak3.log
+          echo "ADIOS: ${{ github.event.inputs.adios_enable }}" >> ./ak3.log
           echo "BORE: ${{ github.event.inputs.bore_enable }}" >> ./ak3.log
-          echo "POC: ${{ github.event.inputs.poc_enable }}" >> ./ak3.log
-          echo "Kcompressd: ${{ github.event.inputs.kcompress_enable }}" >> ./ak3.log
+          echo "O3: ${{ github.event.inputs.o3_enable }}" >> ./ak3.log
           zip -z ../$AK3_NAME < ./ak3.log
 
       - name: 上传 Ccache 调试日志

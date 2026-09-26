@@ -1,4 +1,4 @@
-diff --git a/include/linux/isqrt.h b/include/linux/isqrt.h
+﻿diff --git a/include/linux/isqrt.h b/include/linux/isqrt.h
 new file mode 100644
 --- /dev/null
 +++ b/include/linux/isqrt.h
@@ -30,8 +30,8 @@ new file mode 100644
 + *        u64 root64 = isqrt64(v64);
 + */
 +
-+#ifndef _ISQRT_H
-+#define _ISQRT_H
++#ifndef _LINUX_ISQRT_H
++#define _LINUX_ISQRT_H
 +/*
 + * Fast Integer Square Root Library (isqrt)
 + * Version: 1.0
@@ -68,10 +68,10 @@ new file mode 100644
 + * Four functions are provided, each using the optimal strategy for its
 + * bit-width:
 + *
-+ *   isqrt8(v)  — u8  -> u8   (~ 1 cy, pure LUT)
-+ *   isqrt16(v) — u16 -> u16  (~ 7 cy, 0 divisions)
-+ *   isqrt32(v) — u32 -> u32  (~10 cy, 1 division)
-+ *   isqrt64(v) — u64 -> u64  (~38 cy, 2 divisions)
++ *   isqrt8(v)  鈥?u8  -> u8   (~ 1 cy, pure LUT)
++ *   isqrt16(v) 鈥?u16 -> u16  (~ 7 cy, 0 divisions)
++ *   isqrt32(v) 鈥?u32 -> u32  (~10 cy, 1 division)
++ *   isqrt64(v) 鈥?u64 -> u64  (~38 cy, 2 divisions)
 + *
 + * All functions return exact floor(sqrt(v)). Decode is simply h * h
 + * (a single integer multiply), requiring no special decoder.
@@ -147,7 +147,7 @@ new file mode 100644
 +/**
 + * @brief Computes exact floor(sqrt(v)) for u8.
 + *
-+ * Pure table lookup — the fastest possible implementation.
++ * Pure table lookup 鈥?the fastest possible implementation.
 + * Cost: ~1 cycle (single indexed memory load).
 + *
 + * @param v The input value (0..255).
@@ -223,8 +223,8 @@ new file mode 100644
 + *
 + * Indexed by (exponent_parity << 6 | top_6_mantissa_bits).
 + * Each entry stores floor(sqrt((1 or 2) * (1 + i/64)) * 256):
-+ *   entries 0..63:   even exponent — sqrt(1 + i/64) * 256
-+ *   entries 64..127: odd exponent  — sqrt(2 * (1 + i/64)) * 256
++ *   entries 0..63:   even exponent 鈥?sqrt(1 + i/64) * 256
++ *   entries 64..127: odd exponent  鈥?sqrt(2 * (1 + i/64)) * 256
 + *
 + * The initial estimate is computed as:
 + *   y = _isqrt_est_lut[index] << (exponent / 2) >> 8
@@ -289,7 +289,7 @@ new file mode 100644
 +/** @brief Computes exact floor(sqrt(v)) for u64. ~38 cy, 2 divisions. */
 +_ISQRT_DEFINE(64, 2)
 +
-+#endif /* _ISQRT_H */
++#endif /* _LINUX_ISQRT_H */
 +
 diff --git a/lib/isqrt/Kconfig b/lib/isqrt/Kconfig
 new file mode 100644

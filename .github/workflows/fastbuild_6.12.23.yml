@@ -1,4 +1,4 @@
-name: 6.12.23 欧加真OKI内核快速构建
+name: 6.12.23 OKI内核快速构建
 
 env:
   TZ: Asia/Shanghai

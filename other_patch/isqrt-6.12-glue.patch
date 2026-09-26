@@ -1,12 +1,23 @@
 diff --git a/lib/Kconfig b/lib/Kconfig
 --- a/lib/Kconfig
 +++ b/lib/Kconfig
-@@ -1 +1,2 @@
+@@ -65,7 +65,8 @@
+ config GENERIC_NET_UTILS
+ 	bool
+ 
  source "lib/math/Kconfig"
 +source "lib/isqrt/Kconfig"
+ 
+ config NO_GENERIC_PCI_IOPORT_MAP
+ 	bool
 diff --git a/lib/Makefile b/lib/Makefile
 --- a/lib/Makefile
 +++ b/lib/Makefile
-@@ -1 +1,2 @@
- obj-$(CONFIG_MPILIB) += mpi/
+@@ -129,6 +129,7 @@
+ obj-$(CONFIG_DEBUG_INFO_REDUCED) += debug_info.o
+ CFLAGS_debug_info.o += $(call cc-option, -femit-struct-debug-detailed=any)
+ 
+ obj-y += math/ crypto/
 +obj-$(CONFIG_ISQRT) += isqrt/
+ 
+ obj-$(CONFIG_GENERIC_IOMAP) += iomap.o

@@ -96,11 +96,6 @@ on:
         required: true
         type: boolean
         default: 'true'
-      poc_enable:
-        description: '是否集成 POC Selector 调度器'
-        required: true
-        type: boolean
-        default: 'true'
       perf_patch_enable:
         description: '是否集成性能优化补丁集'
         required: true
@@ -1049,66 +1044,7 @@ jobs:
             || echo "CONFIG_MIN_BASE_SLICE_NS=2000000" >> arch/arm64/configs/gki_defconfig
           echo "提示: BORE 默认 base_slice 由 HZ 与 MIN_BASE_SLICE_NS 自动计算; 运行时可用 /proc/sys/kernel/sched_base_slice 查看, dmesg 可查 BORE 自检"
           echo "BORE 集成完成(零 fuzz 应用 + 零新增导出 + KABI 面未触碰)！"
-
-      - name: 集成 POC Selector 调度器(6.12.38 KABI 安全移植)
-        if: inputs.poc_enable
-        run: |
-          echo "正在集成 POC Selector(Piece-Of-Cake Fast Idle CPU Selector; 基于 firelzrd/poc-selector v3.0.0-rc2 6.12.74 原版补丁, 针对本 6.12.38 oplus 树重建: per-task 上下文经 __kabi_reserved2 保留槽指针访问(布局不变), per-LLC 状态内联 sched_domain_shared(CONFIG_SCHED_POC_SELECTOR 保护, 该结构非导出 ABI), 不触碰 ANDROID_KABI_RESERVE 既有槽、零新增导出符号)…"
-          trap 'echo "POC 集成步骤在脚本第 $LINENO 行失败(退出码 $?)" >&2' ERR
-          cd kernel_workspace/common
-
-          POC_PATCH=poc-selector-6.12.38-v3.0.0-rc2-kabi-safe.patch
-          POC_URLS=(
-            "https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/$POC_PATCH"
-            "https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$GITHUB_REF_NAME/other_patch/$POC_PATCH"
-            "https://cdn.jsdelivr.net/gh/$GITHUB_REPOSITORY@$GITHUB_REF_NAME/other_patch/$POC_PATCH"
-          )
-          rm -f "$POC_PATCH"
-          for u in "${POC_URLS[@]}"; do
-            echo "尝试下载 POC 补丁: $u"
-            if curl -fSL --retry 3 --retry-delay 2 --connect-timeout 20 -o "$POC_PATCH.tmp" "$u" 2>/dev/null; then
-              if [ -s "$POC_PATCH.tmp" ] && grep -q '^diff --git ' "$POC_PATCH.tmp"; then
-                mv "$POC_PATCH.tmp" "$POC_PATCH"
-                echo "下载成功: $POC_PATCH ($(wc -c < "$POC_PATCH") 字节)"
-                break
-              fi
-              echo "该源返回内容异常(空文件或非 unified diff), 尝试下一个源"
-            else
-              echo "该源不可用, 尝试下一个源"
-            fi
-          done
-          if [ ! -f "$POC_PATCH" ]; then
-            echo "POC 补丁下载失败: 仓库 other_patch/$POC_PATCH 缺失或不可达"; exit 1
-          fi
-
-          # 零 fuzz 应用(与本地 GNU patch -F 0 校验同口径)
-          patch -p1 -F 0 --no-backup-if-mismatch < "$POC_PATCH"
-
-          # ABI/KMI 面静态审计(与 BORE 同口径, 允许经 __kabi_reserved2 指针读写保留槽):
-          #     1) 禁止删除/改动既有 KABI 保留字段(减行);
-          #     2) 禁止新增 ANDROID_KABI_RESERVE 宏(加行, 排除注释);
-          #     3) 零新增导出符号。
-          if grep -nE '^\-.*(ANDROID_KABI|__kabi_reserved)' "$POC_PATCH"; then
-            echo "POC 补丁删除/改动 KABI 保留区, 已中止"; exit 1
-          fi
-          if grep -nE '^\+.*ANDROID_KABI_RESERVE' "$POC_PATCH" | grep -qvE '^[0-9]+:\+[[:space:]]*[*/]'; then
-            echo "POC 补丁新增 ANDROID_KABI_RESERVE, 已中止"; exit 1
-          fi
-          if grep -nE '^\+.*EXPORT_SYMBOL(_GPL)?\(' "$POC_PATCH"; then
-            echo "POC 补丁包含新增导出符号(应零导出), 已中止"; exit 1
-          fi
-          OUT_OF_SCOPE="$(grep -E '^diff --git ' "$POC_PATCH" \
-            | grep -vE ' b/(include/linux/(sched\.h|sched/topology\.h)|init/Kconfig|kernel/fork\.c|kernel/sched/(core\.c|ext\.c|fair\.c|idle\.c|sched\.h|topology\.c|poc_selector\.c))$' || true)"
-          if [ -n "$OUT_OF_SCOPE" ]; then
-            echo "POC 补丁改动了白名单以外的文件, 已中止:"; echo "$OUT_OF_SCOPE"; exit 1
-          fi
-
-          # 显式写入开关: SCHED_POC_SELECTOR 默认 y(Kconfig), 显式写入保证 defconfig 幂等
-          grep -q '^CONFIG_SCHED_POC_SELECTOR=' arch/arm64/configs/gki_defconfig \
-            || echo "CONFIG_SCHED_POC_SELECTOR=y" >> arch/arm64/configs/gki_defconfig
-          echo "提示: POC Selector 默认启用; 运行时可用 /sys/kernel/sched_poc 查看统计, dmesg 可查 POC 自检"
-          echo "POC Selector 集成完成(零 fuzz 应用 + 零新增导出 + KABI 面未触碰)！"
-
+          
       - name: 添加制作名称
         run: |
           cd kernel_workspace

@@ -351,7 +351,7 @@ diff --git a/lib/isqrt/isqrt.c b/lib/isqrt/isqrt.c
 new file mode 100644
 --- /dev/null
 +++ b/lib/isqrt/isqrt.c
-@@ -0,0 +1,148 @@
+@@ -0,0 +1,141 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * isqrt kernel integration unit and boot self-test.
@@ -419,8 +419,7 @@ new file mode 100644
 +	for (v = 0; v <= 255; v++) {
 +		r = isqrt8((u8)v);
 +		if (!isqrt_ok(v, r)) {
-+			pr_err("isqrt selftest: isqrt8(%llu) = %llu
-+", v, r);
++			pr_err("isqrt selftest: isqrt8(%llu) = %llu\n", v, r);
 +			fails++;
 +		}
 +	}
@@ -429,8 +428,7 @@ new file mode 100644
 +	for (v = 0; v <= 65535; v++) {
 +		r = isqrt16((u16)v);
 +		if (!isqrt_ok(v, r)) {
-+			pr_err("isqrt selftest: isqrt16(%llu) = %llu
-+", v, r);
++			pr_err("isqrt selftest: isqrt16(%llu) = %llu\n", v, r);
 +			fails++;
 +		}
 +	}
@@ -445,8 +443,7 @@ new file mode 100644
 +			v = edges[i];
 +			r = isqrt32((u32)v);
 +			if (!isqrt_ok(v, r)) {
-+				pr_err("isqrt selftest: isqrt32(%llu) = %llu
-+", v, r);
++				pr_err("isqrt selftest: isqrt32(%llu) = %llu\n", v, r);
 +				fails++;
 +			}
 +		}
@@ -454,8 +451,7 @@ new file mode 100644
 +			v = isqrt_prng(&state) & 0xffffffffULL;
 +			r = isqrt32((u32)v);
 +			if (!isqrt_ok(v, r)) {
-+				pr_err("isqrt selftest: isqrt32(%llu) = %llu
-+", v, r);
++				pr_err("isqrt selftest: isqrt32(%llu) = %llu\n", v, r);
 +				fails++;
 +			}
 +		}
@@ -475,8 +471,7 @@ new file mode 100644
 +			v = edges[i];
 +			r = isqrt64(v);
 +			if (!isqrt_ok(v, r)) {
-+				pr_err("isqrt selftest: isqrt64(%llu) = %llu
-+", v, r);
++				pr_err("isqrt selftest: isqrt64(%llu) = %llu\n", v, r);
 +				fails++;
 +			}
 +		}
@@ -484,16 +479,14 @@ new file mode 100644
 +			v = isqrt_prng(&state);
 +			r = isqrt64(v);
 +			if (!isqrt_ok(v, r)) {
-+				pr_err("isqrt selftest: isqrt64(%llu) = %llu
-+", v, r);
++				pr_err("isqrt selftest: isqrt64(%llu) = %llu\n", v, r);
 +				fails++;
 +			}
 +		}
 +	}
 +
 +	if (fails) {
-+		pr_err("isqrt selftest: %d FAILURES
-+", fails);
++		pr_err("isqrt selftest: %d FAILURES\n", fails);
 +		return -EINVAL;
 +	}
 +	pr_debug("isqrt selftest: all checks passed (8-bit x256, 16-bit x65536, 32/64-bit edges + 25k samples)\n");

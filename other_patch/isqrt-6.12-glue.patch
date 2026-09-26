@@ -1,23 +1,26 @@
 diff --git a/lib/Kconfig b/lib/Kconfig
+index c883045..e269ec2 100644
 --- a/lib/Kconfig
 +++ b/lib/Kconfig
-@@ -65,7 +65,8 @@
- config GENERIC_NET_UTILS
- 	bool
+@@ -652,6 +652,8 @@ source "lib/fonts/Kconfig"
  
- source "lib/math/Kconfig"
+ source "lib/intfp/Kconfig"
+ 
 +source "lib/isqrt/Kconfig"
- 
- config NO_GENERIC_PCI_IOPORT_MAP
- 	bool
++
+ config SG_SPLIT
+ 	def_bool n
+ 	help
 diff --git a/lib/Makefile b/lib/Makefile
+index f873a86..53913f1 100644
 --- a/lib/Makefile
 +++ b/lib/Makefile
-@@ -129,6 +129,7 @@
- obj-$(CONFIG_DEBUG_INFO_REDUCED) += debug_info.o
- CFLAGS_debug_info.o += $(call cc-option, -femit-struct-debug-detailed=any)
+@@ -368,6 +368,8 @@ obj-$(CONFIG_PLDMFW) += pldmfw/
  
- obj-y += math/ crypto/
+ obj-$(CONFIG_INTFP) += intfp/
+ 
 +obj-$(CONFIG_ISQRT) += isqrt/
- 
- obj-$(CONFIG_GENERIC_IOMAP) += iomap.o
++
+ # KUnit tests
+ CFLAGS_bitfield_kunit.o := $(DISABLE_STRUCTLEAK_PLUGIN)
+ obj-$(CONFIG_BITFIELD_KUNIT) += bitfield_kunit.o

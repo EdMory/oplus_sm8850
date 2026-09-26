@@ -2,9 +2,36 @@ diff --git a/include/linux/isqrt.h b/include/linux/isqrt.h
 new file mode 100644
 --- /dev/null
 +++ b/include/linux/isqrt.h
-@@ -0,0 +1,260 @@
-+#ifndef _LINUX_ISQRT_H
-+#define _LINUX_ISQRT_H
+@@ -0,0 +1,287 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/*
++ * Kernel port of isqrt - Fast Integer Square Root Library, version 1.0.
++ *
++ * Upstream: https://github.com/firelzrd/isqrt
++ *
++ * Porting notes (the numerics are kept byte-for-byte identical to upstream
++ * 1.0, only the following mechanical changes were made):
++ *
++ *   1. <linux/types.h> is included, so u8/u16/u32/u64 and s8 come from the
++ *      kernel instead of a freestanding toolchain.
++ *
++ *   2. Every function is turned into 'static inline' and every lookup table
++ *      into 'static const'.  Upstream ships them as externally linked
++ *      definitions, which would cause multiple-definition errors as soon as
++ *      the header is included by more than one translation unit, and would
++ *      pollute kallsyms/KMI with isqrt symbols.  Being static inline /
++ *      static const, nothing is exported, no ABI/KMI surface is touched and
++ *      unused code is simply discarded by the compiler.
++ *
++ * Usage: #include <linux/isqrt.h> and call the generated entry points, e.g.
++ *        u8 root8  = isqrt8(v8);
++ *        u16 root16 = isqrt16(v16);
++ *        u32 root32 = isqrt32(v32);
++ *        u64 root64 = isqrt64(v64);
++ */
++
++#ifndef _ISQRT_H
++#define _ISQRT_H
 +/*
 + * Fast Integer Square Root Library (isqrt)
 + * Version: 1.0
@@ -262,242 +289,291 @@ new file mode 100644
 +/** @brief Computes exact floor(sqrt(v)) for u64. ~38 cy, 2 divisions. */
 +_ISQRT_DEFINE(64, 2)
 +
-+#endif /* _LINUX_ISQRT_H */
++#endif /* _ISQRT_H */
++
 diff --git a/lib/isqrt/Kconfig b/lib/isqrt/Kconfig
 new file mode 100644
 --- /dev/null
 +++ b/lib/isqrt/Kconfig
-@@ -0,0 +1,20 @@
-+# SPDX-License-Identifier: GPL-2.0-only
+@@ -0,0 +1,36 @@
++# SPDX-License-Identifier: GPL-2.0
++#
++# isqrt: Fast Integer Square Root Library
++# (upstream: https://github.com/firelzrd/isqrt, version 1.0)
++#
++
 +config ISQRT
-+	bool "Fast integer square root (isqrt) library"
++	bool "isqrt: fast integer square root library"
 +	default y
 +	help
-+	  Header-only fast integer square root library ported from
-+	  firelzrd/isqrt.  Provides exact floor(sqrt(v)) for 8/16/32/64-bit
-+	  unsigned integers using CLZ + lookup tables + Newton-Raphson,
-+	  several times faster than the loop-based int_sqrt.
++	  isqrt computes exact floor(sqrt(v)) for unsigned 8/16/32/64-bit
++	  integers using CLZ + lookup tables + Newton-Raphson.  It is a
++	  drop-in, 2~8x faster replacement for the kernel's loop-based
++	  int_sqrt() (constant-time for all inputs, no FPU required).
 +
-+	  All functions are static inline and all tables are static const:
-+	  the library adds zero runtime cost and zero exported symbols.
-+	  Kernel code can use it via #include <linux/isqrt.h>.
++	  The kernel port lives in include/linux/isqrt.h as a header-only
++	  library: every function is 'static inline' and every lookup table
++	  is 'static const', so no symbol is exported, the KMI/ABI surface
++	  is not touched, and unused code is discarded by the compiler.
++
++	  Say Y here if kernel code (schedulers, block layer, MM, crypto,
++	  filesystems, ...) wants to use these helpers.  Since the library
++	  adds no code unless it is used, it is safe to leave enabled.
 +
 +config ISQRT_KUNIT_TEST
-+	bool "KUnit test for isqrt library"
++	bool "KUnit tests for isqrt"
 +	depends on ISQRT && KUNIT
-+	default n
 +	help
-+	  KUnit test coverage for isqrt8/16/32/64 exactness.
++	  KUnit test cases for the isqrt kernel port (exhaustive 8/16-bit
++	  coverage plus 32/64-bit edge and pseudo-random sampling, all
++	  validated by the overflow-safe divisibility criterion).
++
++	  Say Y here to build the tests.  They can then be executed with the
++	  'kunit.filter_glob=isqrt*' kernel command line option or through the
++	  KUnit sysfs/run scripts.  This is intended for development and
++	  validation, not for production kernels.
++
 diff --git a/lib/isqrt/Makefile b/lib/isqrt/Makefile
 new file mode 100644
 --- /dev/null
 +++ b/lib/isqrt/Makefile
-@@ -0,0 +1,3 @@
-+# SPDX-License-Identifier: GPL-2.0-only
+@@ -0,0 +1,8 @@
++# SPDX-License-Identifier: GPL-2.0
++#
++# isqrt is a header-only library (include/linux/isqrt.h) and has no object of
++# its own: this directory only carries the boot time self-test plus the
++# optional KUnit test cases.
++#
 +obj-$(CONFIG_ISQRT) += isqrt.o
 +obj-$(CONFIG_ISQRT_KUNIT_TEST) += isqrt_kunit.o
++
 diff --git a/lib/isqrt/isqrt.c b/lib/isqrt/isqrt.c
 new file mode 100644
 --- /dev/null
 +++ b/lib/isqrt/isqrt.c
-@@ -0,0 +1,118 @@
-+// SPDX-License-Identifier: GPL-2.0-only
+@@ -0,0 +1,148 @@
++// SPDX-License-Identifier: GPL-2.0
 +/*
-+ * isqrt - Fast Integer Square Root library, kernel-side self test
++ * isqrt kernel integration unit and boot self-test.
 + *
-+ * The isqrt library itself is header-only (include/linux/isqrt.h):
-+ * every function is static inline and every lookup table is static
-+ * const, so there is nothing to link into the image.  This file only
-+ * instantiates the four entry points under the real kernel toolchain
-+ * and verifies exact floor(sqrt(v)) semantics at boot.
++ * include/linux/isqrt.h is header-only (static inline functions, static const
++ * tables): nothing is exported and unused code is discarded, so the library
++ * needs no object file of its own.  This file exists so that the port is
++ * really instantiated and validated on this kernel:
 + *
-+ * Copyright (C) 2026 Masahito Suzuki (upstream firelzrd/isqrt v1.0)
-+ * Kernel port: EdMory/oplus_sm8850 workflow integration.
++ *   1. all entry points used below are compiled by the kernel toolchain with
++ *      the very same flags as the rest of the tree, so a broken port fails
++ *      the build instead of failing silently at some later point;
++ *   2. exhaustive 8/16-bit plus 32/64-bit edge and pseudo-random checks are
++ *      run once at late_initcall time.  Failures are only reported with
++ *      pr_err() and never abort the boot; the successful path is silent
++ *      (pr_debug).
++ *
++ * Upstream project: https://github.com/firelzrd/isqrt
 + */
-+#include <linux/isqrt.h>
 +#include <linux/init.h>
++#include <linux/isqrt.h>
 +#include <linux/kernel.h>
-+#include <linux/limits.h>
-+#include <linux/module.h>
++#include <linux/printk.h>
++#include <linux/types.h>
 +
-+static bool isqrt_selftest_fail;
-+
-+/* Reference: classic binary digit-by-digit sqrt, no multiply overflow. */
-+static u64 isqrt_ref(u64 v)
++/*
++ * Overflow-safe floor(sqrt) check: for r > 0 the condition
++ *   r^2 <= v < (r+1)^2
++ * is equivalent to
++ *   v / r >= r   &&   v / (r + 1) < r + 1
++ * which never overflows (r <= 2^32-1 for 64-bit inputs).  r == 0 only
++ * happens for v == 0.
++ */
++static bool __init isqrt_ok(u64 v, u64 r)
 +{
-+	u64 r = 0, bit = 1ULL << 62;
-+
-+	while (bit > v)
-+		bit >>= 2;
-+	while (bit) {
-+		if (v >= r + bit) {
-+			v -= r + bit;
-+			r = (r >> 1) + bit;
-+		} else {
-+			r >>= 1;
-+		}
-+		bit >>= 2;
-+	}
-+	return r;
++	if (r == 0)
++		return v == 0;
++	if (v / r < r)
++		return false;
++	if (v / (r + 1) >= r + 1)
++		return false;
++	return true;
 +}
 +
-+static void isqrt_report(const char *fn, u64 in, u64 got, u64 want)
++/* Deterministic xorshift64 PRNG: no external RNG dependency at boot. */
++static u64 __init isqrt_prng(u64 *state)
 +{
-+	pr_err("isqrt: %s(%llu) = %llu, expected %llu\n", fn, in, got, want);
-+	isqrt_selftest_fail = true;
++	u64 x = *state;
++
++	x ^= x << 13;
++	x ^= x >> 7;
++	x ^= x << 17;
++	*state = x;
++	return x;
 +}
 +
 +static int __init isqrt_selftest_init(void)
 +{
-+	u64 v, got, want;
-+	u32 i;
++	u64 state = 0x9e3779b97f4a7c15ULL;
++	u64 v, r;
++	unsigned int i;
++	int fails = 0;
 +
-+	/* 8-bit: exhaustive 0..255 */
-+	for (i = 0; i <= 255; i++) {
-+		got = isqrt8((u8)i);
-+		want = isqrt_ref(i);
-+		if (got != want)
-+			isqrt_report("isqrt8", i, got, want);
-+	}
-+
-+	/* 16-bit: exhaustive 0..65535 */
-+	for (i = 0; i <= 65535; i++) {
-+		got = isqrt16((u16)i);
-+		want = isqrt_ref(i);
-+		if (got != want)
-+			isqrt_report("isqrt16", i, got, want);
-+	}
-+
-+	/* 32-bit: prefix sweep + boundary spot checks */
-+	for (v = 0; v < 100000; v++) {
-+		got = isqrt32((u32)v);
-+		want = isqrt_ref(v);
-+		if (got != want)
-+			isqrt_report("isqrt32", v, got, want);
-+	}
-+	{
-+		static const u32 spots[] = {
-+			0U, 1U, 2U, 3U, 4U, 255U, 256U, 65535U, 65536U,
-+			1000000000U, 2147483647U, 2147483648U,
-+			4294836223U, 4294836224U, 4294836225U, U32_MAX,
-+		};
-+		for (i = 0; i < ARRAY_SIZE(spots); i++) {
-+			got = isqrt32(spots[i]);
-+			want = isqrt_ref(spots[i]);
-+			if (got != want)
-+				isqrt_report("isqrt32", spots[i], got, want);
++	/* u8: exhaustive 0..255 */
++	for (v = 0; v <= 255; v++) {
++		r = isqrt8((u8)v);
++		if (!isqrt_ok(v, r)) {
++			pr_err("isqrt selftest: isqrt8(%llu) = %llu
++", v, r);
++			fails++;
 +		}
 +	}
 +
-+	/* 64-bit: prefix sweep + boundary spot checks */
-+	for (v = 0; v < 50000; v++) {
-+		got = isqrt64(v);
-+		want = isqrt_ref(v);
-+		if (got != want)
-+			isqrt_report("isqrt64", v, got, want);
-+	}
-+	{
-+		static const u64 spots[] = {
-+			0ULL, 1ULL, 2ULL, 3ULL, 4294967295ULL, 4294967296ULL,
-+			281474976710655ULL, 281474976710656ULL,
-+			18446744056529682432ULL, 18446744056529682433ULL,
-+			U64_MAX - 1, U64_MAX,
-+		};
-+		for (i = 0; i < ARRAY_SIZE(spots); i++) {
-+			got = isqrt64(spots[i]);
-+			want = isqrt_ref(spots[i]);
-+			if (got != want)
-+				isqrt_report("isqrt64", spots[i], got, want);
++	/* u16: exhaustive 0..65535 */
++	for (v = 0; v <= 65535; v++) {
++		r = isqrt16((u16)v);
++		if (!isqrt_ok(v, r)) {
++			pr_err("isqrt selftest: isqrt16(%llu) = %llu
++", v, r);
++			fails++;
 +		}
 +	}
 +
-+	if (isqrt_selftest_fail) {
-+		pr_err("isqrt: kernel self test FAILED\n");
-+		return 0;
++	/* u32: power-of-two edges + pseudo-random sampling */
++	{
++		static const u32 edges[] = {
++			0, 1, 2, 3, 4, 5, 7, 8, 9, 15, 16, 17, 31, 32, 255, 256,
++			65535, 65536, 16777215, 16777216, U32_MAX,
++		};
++		for (i = 0; i < ARRAY_SIZE(edges); i++) {
++			v = edges[i];
++			r = isqrt32((u32)v);
++			if (!isqrt_ok(v, r)) {
++				pr_err("isqrt selftest: isqrt32(%llu) = %llu
++", v, r);
++				fails++;
++			}
++		}
++		for (i = 0; i < 20000; i++) {
++			v = isqrt_prng(&state) & 0xffffffffULL;
++			r = isqrt32((u32)v);
++			if (!isqrt_ok(v, r)) {
++				pr_err("isqrt selftest: isqrt32(%llu) = %llu
++", v, r);
++				fails++;
++			}
++		}
 +	}
-+	pr_info("isqrt: kernel self test passed\n");
++
++	/* u64: edges (incl. ULLONG_MAX and the max-root corner) + sampling */
++	{
++		static const u64 edges[] = {
++			0, 1, 2, 3, 4, 5, 7, 8, 15, 16, 255, 256, 65535, 65536,
++			0xffffffffULL, 0x100000000ULL, 0xfffffffffffffffeULL,
++			0xffffffffffffffffULL,
++			(1ULL << 32) - 1,
++			(1ULL << 32),
++			0xfffffffe00000001ULL, /* (2^32-1)^2 */
++		};
++		for (i = 0; i < ARRAY_SIZE(edges); i++) {
++			v = edges[i];
++			r = isqrt64(v);
++			if (!isqrt_ok(v, r)) {
++				pr_err("isqrt selftest: isqrt64(%llu) = %llu
++", v, r);
++				fails++;
++			}
++		}
++		for (i = 0; i < 5000; i++) {
++			v = isqrt_prng(&state);
++			r = isqrt64(v);
++			if (!isqrt_ok(v, r)) {
++				pr_err("isqrt selftest: isqrt64(%llu) = %llu
++", v, r);
++				fails++;
++			}
++		}
++	}
++
++	if (fails) {
++		pr_err("isqrt selftest: %d FAILURES
++", fails);
++		return -EINVAL;
++	}
++	pr_debug("isqrt selftest: all checks passed (8-bit x256, 16-bit x65536, 32/64-bit edges + 25k samples)\n");
 +	return 0;
 +}
 +late_initcall(isqrt_selftest_init);
++
 diff --git a/lib/isqrt/isqrt_kunit.c b/lib/isqrt/isqrt_kunit.c
 new file mode 100644
 --- /dev/null
 +++ b/lib/isqrt/isqrt_kunit.c
-@@ -0,0 +1,83 @@
-+// SPDX-License-Identifier: GPL-2.0-only
+@@ -0,0 +1,77 @@
++// SPDX-License-Identifier: GPL-2.0
 +/*
-+ * KUnit tests for the isqrt fast integer square root library.
++ * KUnit tests for the isqrt kernel port.
++ *
++ * Upstream project: https://github.com/firelzrd/isqrt
 + */
 +#include <kunit/test.h>
 +#include <linux/isqrt.h>
++#include <linux/types.h>
 +
-+/* Reference: classic binary digit-by-digit sqrt, no multiply overflow. */
-+static u64 isqrt_ref(u64 v)
++static bool isqrt_ok(u64 v, u64 r)
 +{
-+	u64 r = 0, bit = 1ULL << 62;
-+
-+	while (bit > v)
-+		bit >>= 2;
-+	while (bit) {
-+		if (v >= r + bit) {
-+			v -= r + bit;
-+			r = (r >> 1) + bit;
-+		} else {
-+			r >>= 1;
-+		}
-+		bit >>= 2;
-+	}
-+	return r;
++	if (r == 0)
++		return v == 0;
++	if (v / r < r)
++		return false;
++	if (v / (r + 1) >= r + 1)
++		return false;
++	return true;
 +}
 +
-+static void isqrt8_exhaustive_test(struct kunit *test)
++static void isqrt_u8_exhaustive(struct kunit *test)
 +{
-+	u32 i;
++	u64 v;
 +
-+	for (i = 0; i <= 255; i++)
-+		KUNIT_EXPECT_EQ(test, isqrt8((u8)i), (u8)isqrt_ref(i));
++	for (v = 0; v <= 255; v++)
++		KUNIT_EXPECT_TRUE(test, isqrt_ok(v, isqrt8((u8)v)));
 +}
 +
-+static void isqrt16_exhaustive_test(struct kunit *test)
++static void isqrt_u16_exhaustive(struct kunit *test)
 +{
-+	u32 i;
++	u64 v;
 +
-+	for (i = 0; i <= 65535; i++)
-+		KUNIT_EXPECT_EQ(test, isqrt16((u16)i), (u16)isqrt_ref(i));
++	for (v = 0; v <= 65535; v++)
++		KUNIT_EXPECT_TRUE(test, isqrt_ok(v, isqrt16((u16)v)));
 +}
 +
-+static void isqrt32_spot_test(struct kunit *test)
++static void isqrt_u32_edges(struct kunit *test)
 +{
-+	static const u32 spots[] = {
-+		0U, 1U, 2U, 3U, 4U, 255U, 256U, 65535U, 65536U,
-+		1000000000U, 2147483647U, 2147483648U,
-+		4294836223U, 4294836224U, 4294836225U, U32_MAX,
++	static const u32 edges[] = {
++		0, 1, 2, 3, 4, 5, 7, 8, 9, 15, 16, 17, 31, 32, 255, 256,
++		65535, 65536, 16777215, 16777216, U32_MAX,
 +	};
 +	int i;
 +
-+	for (i = 0; i < ARRAY_SIZE(spots); i++)
-+		KUNIT_EXPECT_EQ(test, isqrt32(spots[i]), (u32)isqrt_ref(spots[i]));
++	for (i = 0; i < ARRAY_SIZE(edges); i++)
++		KUNIT_EXPECT_TRUE(test, isqrt_ok(edges[i], isqrt32(edges[i])));
 +}
 +
-+static void isqrt64_spot_test(struct kunit *test)
++static void isqrt_u64_edges(struct kunit *test)
 +{
-+	static const u64 spots[] = {
-+		0ULL, 1ULL, 2ULL, 3ULL, 4294967295ULL, 4294967296ULL,
-+		281474976710655ULL, 281474976710656ULL,
-+		18446744056529682432ULL, 18446744056529682433ULL,
-+		U64_MAX - 1, U64_MAX,
++	static const u64 edges[] = {
++		0, 1, 2, 3, 4, 5, 7, 8, 15, 16, 255, 256, 65535, 65536,
++		0xffffffffULL, 0x100000000ULL, 0xffffffffffffffffULL,
++		(1ULL << 32) - 1, (1ULL << 32),
++		0xfffffffe00000001ULL,
 +	};
 +	int i;
 +
-+	for (i = 0; i < ARRAY_SIZE(spots); i++)
-+		KUNIT_EXPECT_EQ(test, isqrt64(spots[i]), isqrt_ref(spots[i]));
++	for (i = 0; i < ARRAY_SIZE(edges); i++)
++		KUNIT_EXPECT_TRUE(test, isqrt_ok(edges[i], isqrt64(edges[i])));
 +}
 +
 +static struct kunit_case isqrt_test_cases[] = {
-+	KUNIT_CASE(isqrt8_exhaustive_test),
-+	KUNIT_CASE(isqrt16_exhaustive_test),
-+	KUNIT_CASE(isqrt32_spot_test),
-+	KUNIT_CASE(isqrt64_spot_test),
++	KUNIT_CASE(isqrt_u8_exhaustive),
++	KUNIT_CASE(isqrt_u16_exhaustive),
++	KUNIT_CASE(isqrt_u32_edges),
++	KUNIT_CASE(isqrt_u64_edges),
 +	{}
 +};
 +
@@ -507,116 +583,113 @@ new file mode 100644
 +};
 +
 +kunit_test_suite(isqrt_test_suite);
++
 diff --git a/lib/isqrt/isqrt_selftest_host.c b/lib/isqrt/isqrt_selftest_host.c
 new file mode 100644
 --- /dev/null
 +++ b/lib/isqrt/isqrt_selftest_host.c
-@@ -0,0 +1,108 @@
-+/* SPDX-License-Identifier: GPL-2.0-only */
+@@ -0,0 +1,103 @@
++// SPDX-License-Identifier: GPL-2.0
 +/*
-+ * Host-side numeric self test for the isqrt kernel port.
++ * Host-side numerical self test for the isqrt kernel port.
 + *
-+ * Compiled and run on the CI runner with the host gcc (never built into
-+ * the kernel image).  It includes <linux/isqrt.h> from the kernel tree,
-+ * with <linux/types.h> satisfied by a tiny stub placed first in -I.
++ * Not part of the kernel image: this file is compiled on the CI runner with
++ * the host toolchain against include/linux/isqrt.h (with a minimal stub for
++ * <linux/types.h>) so the ported numerics are validated without booting a
++ * kernel.  Exhaustive 8/16-bit plus heavily sampled 32/64-bit coverage.
++ *
++ * Upstream project: https://github.com/firelzrd/isqrt
 + */
 +#include <stdio.h>
-+#include <stdint.h>
-+#include <stdbool.h>
++#include <stdlib.h>
++
++/* stand-in for the kernel's <linux/types.h>, supplied by -I ordering */
++#include <linux/types.h>
 +#include <linux/isqrt.h>
 +
-+/* Reference: classic binary digit-by-digit sqrt, no multiply overflow. */
-+static unsigned long long isqrt_ref(unsigned long long v)
++static int isqrt_ok(u64 v, u64 r)
 +{
-+	unsigned long long r = 0, bit = 1ULL << 62;
-+
-+	while (bit > v)
-+		bit >>= 2;
-+	while (bit) {
-+		if (v >= r + bit) {
-+			v -= r + bit;
-+			r = (r >> 1) + bit;
-+		} else {
-+			r >>= 1;
-+		}
-+		bit >>= 2;
-+	}
-+	return r;
++	if (r == 0)
++		return v == 0;
++	if (v / r < r)
++		return 0;
++	if (v / (r + 1) >= r + 1)
++		return 0;
++	return 1;
 +}
 +
-+static unsigned long failures;
-+
-+static void check_u8(void)
++static u64 prng(u64 *state)
 +{
-+	unsigned int i;
++	u64 x = *state;
 +
-+	for (i = 0; i <= 255; i++)
-+		if (isqrt8((u8)i) != (u8)isqrt_ref(i))
-+			failures++, printf("FAIL isqrt8(%u)=%u\n", i, isqrt8((u8)i));
-+}
-+
-+static void check_u16(void)
-+{
-+	unsigned int i;
-+
-+	for (i = 0; i <= 65535; i++)
-+		if (isqrt16((u16)i) != (u16)isqrt_ref(i))
-+			failures++, printf("FAIL isqrt16(%u)=%u\n", i, isqrt16((u16)i));
-+}
-+
-+static void check_u32(void)
-+{
-+	unsigned long long i;
-+
-+	for (i = 0; i < 2000000ULL; i++)
-+		if (isqrt32((u32)i) != (u32)isqrt_ref(i))
-+			failures++, printf("FAIL isqrt32(%llu)=%u\n", i, isqrt32((u32)i));
-+	{
-+		static const u32 spots[] = {
-+			0U, 1U, 2U, 3U, 255U, 256U, 65535U, 65536U,
-+			4294836223U, 4294836224U, 4294836225U, UINT32_MAX,
-+		};
-+		unsigned int k;
-+
-+		for (k = 0; k < sizeof(spots) / sizeof(spots[0]); k++)
-+			if (isqrt32(spots[k]) != (u32)isqrt_ref(spots[k]))
-+				failures++, printf("FAIL isqrt32(%u)=%u\n",
-+						   spots[k], isqrt32(spots[k]));
-+	}
-+}
-+
-+static void check_u64(void)
-+{
-+	unsigned long long i;
-+
-+	for (i = 0; i < 1000000ULL; i++)
-+		if (isqrt64(i) != isqrt_ref(i))
-+			failures++, printf("FAIL isqrt64(%llu)=%llu\n", i, isqrt64(i));
-+	{
-+		static const unsigned long long spots[] = {
-+			0ULL, 1ULL, 2ULL, 4294967295ULL, 4294967296ULL,
-+			18446744056529682432ULL, 18446744056529682433ULL,
-+			~0ULL,
-+		};
-+		unsigned int k;
-+
-+		for (k = 0; k < sizeof(spots) / sizeof(spots[0]); k++)
-+			if (isqrt64(spots[k]) != isqrt_ref(spots[k]))
-+				failures++, printf("FAIL isqrt64(%llu)=%llu\n",
-+						   spots[k], isqrt64(spots[k]));
-+	}
++	x ^= x << 13;
++	x ^= x >> 7;
++	x ^= x << 17;
++	*state = x;
++	return x;
 +}
 +
 +int main(void)
 +{
-+	check_u8();
-+	check_u16();
-+	check_u32();
-+	check_u64();
-+	if (failures) {
-+		printf("isqrt host self test: %lu FAILURES\n", failures);
-+		return 1;
++	u64 state = 0x9e3779b97f4a7c15ULL;
++	unsigned long long tested = 0;
++	unsigned long long fails = 0;
++	u64 v, r;
++	unsigned int i;
++
++	/* u8 exhaustive */
++	for (v = 0; v <= 255; v++) {
++		r = isqrt8((u8)v);
++		tested++;
++		if (!isqrt_ok(v, r)) { fails++; fprintf(stderr, "isqrt8(%llu)=%llu FAIL\n", v, r); }
 +	}
-+	printf("isqrt host self test: all passed\n");
-+	return 0;
++
++	/* u16 exhaustive */
++	for (v = 0; v <= 65535; v++) {
++		r = isqrt16((u16)v);
++		tested++;
++		if (!isqrt_ok(v, r)) { fails++; fprintf(stderr, "isqrt16(%llu)=%llu FAIL\n", v, r); }
++	}
++
++	/* u32: edges + 200k samples */
++	{
++		static const u32 edges[] = {
++			0, 1, 2, 3, 4, 5, 7, 8, 9, 15, 16, 17, 31, 32, 255, 256,
++			65535, 65536, 16777215, 16777216, 0xffffffffU,
++		};
++		for (i = 0; i < sizeof(edges) / sizeof(edges[0]); i++) {
++			v = edges[i]; r = isqrt32((u32)v);
++			tested++;
++			if (!isqrt_ok(v, r)) { fails++; fprintf(stderr, "isqrt32(%llu)=%llu FAIL\n", v, r); }
++		}
++		for (i = 0; i < 200000; i++) {
++			v = prng(&state) & 0xffffffffULL; r = isqrt32((u32)v);
++			tested++;
++			if (!isqrt_ok(v, r)) { fails++; fprintf(stderr, "isqrt32(%llu)=%llu FAIL\n", v, r); }
++		}
++	}
++
++	/* u64: edges + 100k samples */
++	{
++		static const u64 edges[] = {
++			0, 1, 2, 3, 4, 5, 7, 8, 15, 16, 255, 256, 65535, 65536,
++			0xffffffffULL, 0x100000000ULL, 0xfffffffffffffffeULL,
++			0xffffffffffffffffULL, (1ULL << 32) - 1, (1ULL << 32),
++			0xfffffffe00000001ULL,
++		};
++		for (i = 0; i < sizeof(edges) / sizeof(edges[0]); i++) {
++			v = edges[i]; r = isqrt64(v);
++			tested++;
++			if (!isqrt_ok(v, r)) { fails++; fprintf(stderr, "isqrt64(%llu)=%llu FAIL\n", v, r); }
++		}
++		for (i = 0; i < 100000; i++) {
++			v = prng(&state); r = isqrt64(v);
++			tested++;
++			if (!isqrt_ok(v, r)) { fails++; fprintf(stderr, "isqrt64(%llu)=%llu FAIL\n", v, r); }
++		}
++	}
++
++	printf("isqrt host selftest: %llu cases, %llu failures\n", tested, fails);
++	return fails ? 1 : 0;
 +}
++

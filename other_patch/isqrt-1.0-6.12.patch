@@ -351,7 +351,7 @@ diff --git a/lib/isqrt/isqrt.c b/lib/isqrt/isqrt.c
 new file mode 100644
 --- /dev/null
 +++ b/lib/isqrt/isqrt.c
-@@ -0,0 +1,141 @@
+@@ -0,0 +1,142 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * isqrt kernel integration unit and boot self-test.
@@ -371,6 +371,7 @@ new file mode 100644
 + *
 + * Upstream project: https://github.com/firelzrd/isqrt
 + */
++#include <linux/errno.h>
 +#include <linux/init.h>
 +#include <linux/isqrt.h>
 +#include <linux/kernel.h>

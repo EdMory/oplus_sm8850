@@ -1057,7 +1057,7 @@ jobs:
       - name: 集成 BORE 调度器
         if: inputs.bore_enable
         run: |
-          echo "正在集成 BORE(Burst-Oriented Response Enhancer; 基于 firelzrd/bore-scheduler 6.12.37 原版补丁, 针对本 6.12.38 oplus 树逐 hunk 重建: bore_ctx 成员追加到 task_struct 末尾, 不挪动任何既有成员、不触碰 ANDROID_KABI_RESERVE, KABI 面安全)…"
+          echo "正在集成 BORE(Burst-Oriented Response Enhancer; 基于 firelzrd/bore-scheduler 6.12.37 原版补丁, 针对本 6.12.69 oplus 树逐 hunk 重建: bore_ctx 成员追加到 task_struct 末尾, 不挪动任何既有成员、不触碰 ANDROID_KABI_RESERVE, KABI 面安全)…"
           # 任何命令失败时打印出错行号: 避免 set -e 静默退出后失败点无法定位
           trap 'echo "BORE 集成步骤在脚本第 $LINENO 行失败(退出码 $?)" >&2' ERR
           cd kernel_workspace/common
@@ -1095,7 +1095,7 @@ jobs:
             rm -f "$name.tmp" "$name.download.log"
             return 1
           }
-          BORE_PATCH=bore-6.12.38-kabi-safe.patch
+          BORE_PATCH=bore-6.12.69-kabi-safe.patch
           get_patch "$BORE_PATCH" || { echo "BORE 补丁下载失败: 仓库 other_patch/$BORE_PATCH 缺失或不可达(见上方诊断)"; exit 1; }
           patch -p1 -F 0 --no-backup-if-mismatch < "$BORE_PATCH"
 

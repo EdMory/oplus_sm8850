@@ -372,7 +372,7 @@ diff --git a/kernel/sched/debug.c b/kernel/sched/debug.c
 diff --git a/kernel/sched/fair.c b/kernel/sched/fair.c
 --- a/kernel/sched/fair.c
 +++ b/kernel/sched/fair.c
-@@ -57,7 +57,11 @@
+@@ -57,8 +57,12 @@
  
  #include <trace/hooks/sched.h>
  #include <trace/hooks/dtask.h>
@@ -384,7 +384,8 @@ diff --git a/kernel/sched/fair.c b/kernel/sched/fair.c
  EXPORT_TRACEPOINT_SYMBOL_GPL(sched_stat_runtime);
  
  /*
-@@ -89,18 +89,33 @@
+  * Targeted preemption latency for CPU-bound tasks:
+@@ -85,18 +89,33 @@
   *   SCHED_TUNABLESCALING_LOG - scaled logarithmically, *1+ilog(ncpus)
   *   SCHED_TUNABLESCALING_LINEAR - scaled linear, *ncpus
   *
@@ -418,7 +419,7 @@ diff --git a/kernel/sched/fair.c b/kernel/sched/fair.c
  
  /*
   * After fork, child runs first. If set to 0 (default) then
-@@ -242,6 +242,13 @@
+@@ -223,6 +242,13 @@
   *
   * This idea comes from the SD scheduler of Con Kolivas:
   */
@@ -432,7 +433,7 @@ diff --git a/kernel/sched/fair.c b/kernel/sched/fair.c
  static unsigned int get_update_sysctl_factor(void)
  {
  	unsigned int cpus = min_t(unsigned int, num_online_cpus(), 8);
-@@ -279,6 +279,7 @@
+@@ -253,6 +279,7 @@
  	SET_SYSCTL(sched_base_slice);
  #undef SET_SYSCTL
  }
@@ -440,7 +441,7 @@ diff --git a/kernel/sched/fair.c b/kernel/sched/fair.c
  
  void __init sched_init_granularity(void)
  {
-@@ -794,6 +794,10 @@
+@@ -767,6 +794,10 @@
  
  	vlag = avruntime - se->vruntime;
  	limit = calc_delta_fair(max_t(u64, 2*se->slice, TICK_NSEC), se);
@@ -451,7 +452,7 @@ diff --git a/kernel/sched/fair.c b/kernel/sched/fair.c
  
  	return clamp(vlag, -limit, limit);
  }
-@@ -1058,8 +1058,17 @@
+@@ -1027,8 +1058,17 @@
  	if (curr && (!curr->on_rq || !entity_eligible(cfs_rq, curr)))
  		curr = NULL;
  
@@ -471,7 +472,7 @@ diff --git a/kernel/sched/fair.c b/kernel/sched/fair.c
  
  	/* Pick the leftmost entity if it's eligible */
  	if (se && entity_eligible(cfs_rq, se)) {
-@@ -1137,6 +1137,7 @@
+@@ -1097,6 +1137,7 @@
   * Scheduling class statistics methods:
   */
  #ifdef CONFIG_SMP
@@ -479,7 +480,7 @@ diff --git a/kernel/sched/fair.c b/kernel/sched/fair.c
  int sched_update_scaling(void)
  {
  	unsigned int factor = get_update_sysctl_factor();
-@@ -1149,6 +1149,7 @@
+@@ -1108,6 +1149,7 @@
  
  	return 0;
  }
@@ -487,7 +488,7 @@ diff --git a/kernel/sched/fair.c b/kernel/sched/fair.c
  #endif
  #endif
  
-@@ -1349,4 +1349,35 @@
+@@ -1307,4 +1349,35 @@
   * Update the current task's runtime statistics.
   */
 +#ifdef CONFIG_SCHED_BORE
@@ -523,7 +524,7 @@ diff --git a/kernel/sched/fair.c b/kernel/sched/fair.c
 +
  static void update_curr(struct cfs_rq *cfs_rq)
  {
-@@ -1403,6 +1403,11 @@
+@@ -1330,8 +1403,13 @@
  	curr->vruntime += calc_delta_fair(delta_exec, curr);
  	resched = update_deadline(cfs_rq, curr);
  
@@ -535,7 +536,9 @@ diff --git a/kernel/sched/fair.c b/kernel/sched/fair.c
 +#endif /* CONFIG_SCHED_BORE */
  		/*
  		 * If the fair_server is active, we need to account for the
-@@ -4060,7 +4060,7 @@
+ 		 * fair_server time whether or not the task is running on
+ 		 * behalf of fair_server or not:
+@@ -3982,7 +4060,7 @@
  	se->deadline = avruntime + vslice;
  }
  
@@ -544,7 +547,7 @@ diff --git a/kernel/sched/fair.c b/kernel/sched/fair.c
  			    unsigned long weight)
  {
  	bool curr = cfs_rq->curr == se;
-@@ -5496,12 +5496,11 @@
+@@ -5418,12 +5496,11 @@
  static void
  place_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
  {
@@ -558,7 +561,7 @@ diff --git a/kernel/sched/fair.c b/kernel/sched/fair.c
  
  	/*
  	 * Due to how V is constructed as the weighted average of entities,
-@@ -5585,7 +5585,18 @@
+@@ -5508,7 +5585,18 @@
  		se->rel_deadline = 0;
  		return;
  	}
@@ -578,7 +581,7 @@ diff --git a/kernel/sched/fair.c b/kernel/sched/fair.c
  	/*
  	 * When joining the competition; the existing tasks will be,
  	 * on average, halfway through their slice, as such start tasks
-@@ -5605,10 +5605,23 @@
+@@ -5517,10 +5605,23 @@
  	if (sched_feat(PLACE_DEADLINE_INITIAL) && (flags & ENQUEUE_INITIAL))
  		vslice /= 2;
  
@@ -602,7 +605,7 @@ diff --git a/kernel/sched/fair.c b/kernel/sched/fair.c
  	trace_android_rvh_place_entity(cfs_rq, se, flags, &vruntime);
  }
  
-@@ -5631,7 +5631,7 @@
+@@ -5530,7 +5631,7 @@
  static inline bool cfs_bandwidth_used(void);
  
  static void
@@ -611,7 +614,7 @@ diff --git a/kernel/sched/fair.c b/kernel/sched/fair.c
  
  static void
  enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
-@@ -5797,6 +5797,10 @@
+@@ -5696,6 +5797,10 @@
  		if (sched_feat(DELAY_DEQUEUE) && delay &&
  		    !entity_eligible(cfs_rq, se)) {
  			update_load_avg(cfs_rq, se, 0);
@@ -622,7 +625,7 @@ diff --git a/kernel/sched/fair.c b/kernel/sched/fair.c
  			set_delayed(se);
  			return false;
  		}
-@@ -7226,7 +7226,7 @@
+@@ -7121,7 +7226,7 @@
  #endif
  
  static void
@@ -631,7 +634,7 @@ diff --git a/kernel/sched/fair.c b/kernel/sched/fair.c
  {
  	struct cfs_rq *cfs_rq = cfs_rq_of(se);
  
-@@ -7239,13 +7239,22 @@
+@@ -7134,13 +7239,22 @@
  	SCHED_WARN_ON(!se->on_rq);
  
  	if (sched_feat(DELAY_ZERO)) {
@@ -655,7 +658,7 @@ diff --git a/kernel/sched/fair.c b/kernel/sched/fair.c
  			if (se != cfs_rq->curr)
  				__enqueue_entity(cfs_rq, se);
  			cfs_rq->nr_running++;
-@@ -7292,7 +7292,7 @@
+@@ -7178,7 +7292,7 @@
  		util_est_enqueue(&rq->cfs, p);
  
  	if (flags & ENQUEUE_DELAYED) {
@@ -664,7 +667,7 @@ diff --git a/kernel/sched/fair.c b/kernel/sched/fair.c
  		return;
  	}
  
-@@ -7312,7 +7312,7 @@
+@@ -7198,7 +7312,7 @@
  	for_each_sched_entity(se) {
  		if (se->on_rq) {
  			if (se->sched_delayed)
@@ -673,7 +676,7 @@ diff --git a/kernel/sched/fair.c b/kernel/sched/fair.c
  			break;
  		}
  		cfs_rq = cfs_rq_of(se);
-@@ -7543,6 +7543,16 @@
+@@ -7429,6 +7543,16 @@
  		util_est_dequeue(&rq->cfs, p);
  
  	util_est_update(&rq->cfs, p, flags & DEQUEUE_SLEEP);
@@ -690,7 +693,7 @@ diff --git a/kernel/sched/fair.c b/kernel/sched/fair.c
  	if (dequeue_entities(rq, &p->se, flags) < 0)
  		return false;
  
-@@ -9251,5 +9251,10 @@
+@@ -9127,8 +9251,13 @@
  preempt:
  	if (do_preempt_short)
  		cancel_protect_slice(se);
@@ -701,7 +704,10 @@ diff --git a/kernel/sched/fair.c b/kernel/sched/fair.c
 +#endif
 +
  	trace_android_vh_resched_curr_lazy(rq_of(cfs_rq), &ignore);
-@@ -9427,16 +9427,25 @@
+ 
+ 	if (ignore)
+ 		return;
+@@ -9298,16 +9427,25 @@
  	/*
  	 * Are we the only task in the tree?
  	 */
@@ -727,7 +733,7 @@ diff --git a/kernel/sched/fair.c b/kernel/sched/fair.c
  	/*
  	 * Tell update_rq_clock() that we've just updated,
  	 * so we don't do microscopic update in schedule()
-@@ -13749,6 +13749,9 @@
+@@ -13611,6 +13749,9 @@
  	SCHED_WARN_ON(p->se.sched_delayed);
  
  	attach_task_cfs_rq(p);
@@ -737,6 +743,7 @@ diff --git a/kernel/sched/fair.c b/kernel/sched/fair.c
  
  	set_task_max_allowed_capacity(p);
  
+
 diff --git a/kernel/sched/sched.h b/kernel/sched/sched.h
 --- a/kernel/sched/sched.h
 +++ b/kernel/sched/sched.h

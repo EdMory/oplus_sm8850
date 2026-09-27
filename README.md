@@ -22,6 +22,7 @@
 - [x] ReSukiSU/SukiSU Ultra/KernelSU Next/原版KernelSU多版本KSU可选
 - [x] cctv18独家设计的 [ccache-ECS](https://github.com/cctv18/ccache-ECS) 缓存及大量编译流程优化，编译时间可稳定在约6min *(首次编译时会拉取公共预置ccache，从第二次开始没有大量配置改动的情况下，单次编译时间约6min；距离上一次调用两周未调用后缓存会被自动清除，此时编译会自动重建缓存)*
 - [x] 引入O3编译优化，改善内核运行性能
+- [x] 引入optprobe
 - [x] LZ4 1.10.0 & ZSTD 1.5.7 算法更新&优化补丁(来自[@ferstar](https://github.com/ferstar), 移植by [@Xiaomichael](https://github.com/Xiaomichael), 6.12版本补丁重制by [@cctv18](https://github.com/cctv18))
 - [x] 移植LZ4KD支持到6.12内核(可选补丁)
 - [x] 移植LZ4KDR支持到6.12内核(可选补丁)

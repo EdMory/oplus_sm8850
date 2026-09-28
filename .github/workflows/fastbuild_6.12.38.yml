@@ -423,9 +423,9 @@ jobs:
           cd common
           wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/cve-2026-43499-rtmutex-6.12.patch
           patch -p1 -F 3 < cve-2026-43499-rtmutex-6.12.patch
-          # 移植 arm64 OPTPROBE v7（HiSilicon，LKML 2503.3/02174）+ expE: arch_check_optimized_kprobe 指令安全检查(拒绝PC相对/PAC/分支/异常指令优化)
-          wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/optprobe_expE_safe_replay.patch
-          patch -p1 -F 3 < optprobe_expE_safe_replay.patch
+          # 移植 arm64 OPTPROBE v7（HiSilicon，LKML 2503.3/02174）+ 修复版: bti j + 回调op传参(ldr x0,[x0]) + 指令安全检查(拒绝PC相对/PAC/分支/异常指令重放)
+          wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/optprobe_6.12.38.patch
+          patch -p1 -F 3 < optprobe_6.12.38.patch
 
       - name: 集成 SM8750(6.6.100)移植的性能优化补丁集
         if: inputs.perf_patch_enable

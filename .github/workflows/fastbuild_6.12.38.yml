@@ -424,8 +424,8 @@ jobs:
           wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/cve-2026-43499-rtmutex-6.12.patch
           patch -p1 -F 3 < cve-2026-43499-rtmutex-6.12.patch
           # 移植 arm64 OPTPROBE v7（HiSilicon，LKML 2503.3/02174）
-          wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/optprobe_arm64.patch
-          patch -p1 -F 3 < optprobe_arm64.patch
+          wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/optprobe_expA_disable_opt.patch
+          patch -p1 -F 3 < optprobe_expA_disable_opt.patch
 
       - name: 集成 SM8750(6.6.100)移植的性能优化补丁集
         if: inputs.perf_patch_enable

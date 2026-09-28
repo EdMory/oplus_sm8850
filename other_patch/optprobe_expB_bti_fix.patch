@@ -1,0 +1,461 @@
+index 5090569..2b2819c 100644
+--- a/arch/arm64/Kconfig
++++ b/arch/arm64/Kconfig
+@@ -242,6 +242,7 @@ config ARM64
+ 	select HAVE_SYSCALL_TRACEPOINTS
+ 	select HAVE_KPROBES
+ 	select HAVE_KRETPROBES
++	select HAVE_OPTPROBES
+ 	select HAVE_GENERIC_VDSO
+ 	select HOTPLUG_CORE_SYNC_DEAD if HOTPLUG_CPU
+ 	select IRQ_DOMAIN
+index be7a368..bd4973b 100644
+--- a/arch/arm64/include/asm/kprobes.h
++++ b/arch/arm64/include/asm/kprobes.h
+@@ -37,6 +37,28 @@ struct kprobe_ctlblk {
+ 
+ void arch_remove_kprobe(struct kprobe *);
+ int kprobe_fault_handler(struct pt_regs *regs, unsigned int fsr);
++
++struct arch_optimized_insn {
++	kprobe_opcode_t orig_insn[1];
++	kprobe_opcode_t *trampoline;
++};
++
++#define MAX_OPTIMIZED_LENGTH	sizeof(kprobe_opcode_t)
++#define MAX_OPTINSN_SIZE                                                       \
++	((unsigned long)optprobe_template_end - (unsigned long)optprobe_template_entry)
++
++extern __visible kprobe_opcode_t optprobe_template_entry[];
++extern __visible kprobe_opcode_t optprobe_template_val[];
++extern __visible kprobe_opcode_t optprobe_template_orig_addr[];
++extern __visible kprobe_opcode_t optprobe_template_common[];
++extern __visible kprobe_opcode_t optprobe_template_end[];
++extern __visible kprobe_opcode_t optprobe_template_restore_begin[];
++extern __visible kprobe_opcode_t optprobe_template_restore_orig_insn[];
++extern __visible kprobe_opcode_t optprobe_template_restore_end[];
++extern __visible kprobe_opcode_t optinsn_slot[];
++
++void optprobe_common(void);
++
+ void __kretprobe_trampoline(void);
+ void __kprobes *trampoline_probe_handler(struct pt_regs *regs);
+ 
+index 8e4be92..7b2885b 100644
+--- a/arch/arm64/kernel/probes/Makefile
++++ b/arch/arm64/kernel/probes/Makefile
+@@ -4,3 +4,5 @@ obj-$(CONFIG_KPROBES)		+= kprobes.o decode-insn.o	\
+ 				   simulate-insn.o
+ obj-$(CONFIG_UPROBES)		+= uprobes.o decode-insn.o	\
+ 				   simulate-insn.o
++obj-$(CONFIG_OPTPROBES)	+= opt_arm64.o			\
++				   optprobe_trampoline.o
+index 27a24e2..d40976f 100644
+--- a/arch/arm64/kernel/asm-offsets.c
++++ b/arch/arm64/kernel/asm-offsets.c
+@@ -58,20 +58,36 @@ int main(void)
+ #endif
+   BLANK();
+   DEFINE(S_X0,			offsetof(struct pt_regs, regs[0]));
++  DEFINE(S_X1,			offsetof(struct pt_regs, regs[1]));
+   DEFINE(S_X2,			offsetof(struct pt_regs, regs[2]));
++  DEFINE(S_X3,			offsetof(struct pt_regs, regs[3]));
+   DEFINE(S_X4,			offsetof(struct pt_regs, regs[4]));
++  DEFINE(S_X5,			offsetof(struct pt_regs, regs[5]));
+   DEFINE(S_X6,			offsetof(struct pt_regs, regs[6]));
++  DEFINE(S_X7,			offsetof(struct pt_regs, regs[7]));
+   DEFINE(S_X8,			offsetof(struct pt_regs, regs[8]));
++  DEFINE(S_X9,			offsetof(struct pt_regs, regs[9]));
+   DEFINE(S_X10,			offsetof(struct pt_regs, regs[10]));
++  DEFINE(S_X11,			offsetof(struct pt_regs, regs[11]));
+   DEFINE(S_X12,			offsetof(struct pt_regs, regs[12]));
++  DEFINE(S_X13,			offsetof(struct pt_regs, regs[13]));
+   DEFINE(S_X14,			offsetof(struct pt_regs, regs[14]));
++  DEFINE(S_X15,			offsetof(struct pt_regs, regs[15]));
+   DEFINE(S_X16,			offsetof(struct pt_regs, regs[16]));
++  DEFINE(S_X17,			offsetof(struct pt_regs, regs[17]));
+   DEFINE(S_X18,			offsetof(struct pt_regs, regs[18]));
++  DEFINE(S_X19,			offsetof(struct pt_regs, regs[19]));
+   DEFINE(S_X20,			offsetof(struct pt_regs, regs[20]));
++  DEFINE(S_X21,			offsetof(struct pt_regs, regs[21]));
+   DEFINE(S_X22,			offsetof(struct pt_regs, regs[22]));
++  DEFINE(S_X23,			offsetof(struct pt_regs, regs[23]));
+   DEFINE(S_X24,			offsetof(struct pt_regs, regs[24]));
++  DEFINE(S_X25,			offsetof(struct pt_regs, regs[25]));
+   DEFINE(S_X26,			offsetof(struct pt_regs, regs[26]));
++  DEFINE(S_X27,			offsetof(struct pt_regs, regs[27]));
+   DEFINE(S_X28,			offsetof(struct pt_regs, regs[28]));
++  DEFINE(S_X29,			offsetof(struct pt_regs, regs[29]));
++  DEFINE(S_X30,			offsetof(struct pt_regs, regs[30]));
+   DEFINE(S_FP,			offsetof(struct pt_regs, regs[29]));
+   DEFINE(S_LR,			offsetof(struct pt_regs, regs[30]));
+   DEFINE(S_SP,			offsetof(struct pt_regs, sp));
+new file mode 100644
+index 0000000..ed93c08
+--- /dev/null
++++ b/arch/arm64/kernel/probes/opt_arm64.c
+@@ -0,0 +1,245 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Code for Kernel probes Jump optimization.
++ *
++ * Copyright (C) 2025 HiSilicon Limited
++ */
++
++#include <linux/jump_label.h>
++#include <linux/kprobes.h>
++#include <linux/wordpart.h>
++
++#include <asm/cacheflush.h>
++#include <asm/compiler.h>
++#include <asm/debug-monitors.h>
++#include <asm/insn.h>
++#include <asm/kprobes.h>
++#include <asm/patching.h>
++
++#define OPTPROBE_BATCH_SIZE 64
++
++#define TMPL_VAL_IDX \
++	(optprobe_template_val - optprobe_template_entry)
++#define TMPL_ORIGN_ADDR \
++	(optprobe_template_orig_addr - optprobe_template_entry)
++#define TMPL_CALL_COMMON \
++	(optprobe_template_common - optprobe_template_entry)
++#define TMPL_RESTORE_ORIGN_INSN \
++	(optprobe_template_restore_orig_insn - optprobe_template_entry)
++#define TMPL_RESTORE_END \
++	(optprobe_template_restore_end - optprobe_template_entry)
++
++#define OPT_SLOT_SIZE			65536
++#define OPT_INSN_PAGES			(OPT_SLOT_SIZE / PAGE_SIZE)
++
++static bool insn_page_in_use[OPT_INSN_PAGES];
++
++void *alloc_optinsn_page(void)
++{
++	int i;
++
++	for (i = 0; i < OPT_INSN_PAGES; i++) {
++		if (!insn_page_in_use[i]) {
++			insn_page_in_use[i] = true;
++			return (void *)((unsigned long)optinsn_slot + PAGE_SIZE * i);
++		}
++	}
++
++	return NULL;
++}
++
++void free_optinsn_page(void *page)
++{
++	unsigned long idx = (unsigned long)page - (unsigned long)optinsn_slot;
++
++	WARN_ONCE(idx & (PAGE_SIZE - 1), "Invalid idx with wrong align\n");
++	idx >>= PAGE_SHIFT;
++	if (WARN_ONCE(idx >= OPT_INSN_PAGES, "Invalid idx with wrong size\n"))
++		return;
++	insn_page_in_use[idx] = false;
++}
++
++/*
++ * In ARM ISA, kprobe opt always replace one instruction (4 bytes
++ * aligned and 4 bytes long). It is impossible to encounter another
++ * kprobe in the address range. So always return 0.
++ */
++int arch_check_optimized_kprobe(struct optimized_kprobe *op)
++{
++	return 0;
++}
++
++int arch_prepared_optinsn(struct arch_optimized_insn *optinsn)
++{
++	return optinsn->trampoline != NULL;
++}
++
++int arch_within_optimized_kprobe(struct optimized_kprobe *op, kprobe_opcode_t *addr)
++{
++	return op->kp.addr == addr;
++}
++
++static int optprobe_check_branch_limit(unsigned long pc, unsigned long addr)
++{
++	long offset;
++
++	if ((pc & 0x3) || (addr & 0x3))
++		return -ERANGE;
++
++	offset = (long)addr - (long)pc;
++	if (offset < -SZ_128M || offset >= SZ_128M)
++		return -ERANGE;
++
++	return 0;
++}
++
++int arch_prepare_optimized_kprobe(struct optimized_kprobe *op, struct kprobe *orig)
++{
++	kprobe_opcode_t *code, *buf;
++	int ret = -ENOMEM;
++	u32 insn;
++	int i;
++
++	buf = kzalloc(MAX_OPTINSN_SIZE, GFP_KERNEL);
++	if (!buf)
++		return ret;
++
++	code = get_optinsn_slot();
++	if (!code)
++		goto out;
++
++	if (optprobe_check_branch_limit((unsigned long)code, (unsigned long)orig->addr + 8)) {
++		ret = -ERANGE;
++		goto error;
++	}
++
++	memcpy(buf, optprobe_template_entry, MAX_OPTINSN_SIZE);
++
++	insn = aarch64_insn_gen_branch_imm((unsigned long)&code[TMPL_CALL_COMMON],
++					   (unsigned long)&optprobe_common,
++					   AARCH64_INSN_BRANCH_LINK);
++	if (insn == AARCH64_BREAK_FAULT) {
++		ret = -ERANGE;
++		goto error;
++	}
++
++	buf[TMPL_CALL_COMMON] = insn;
++
++	insn = aarch64_insn_gen_branch_imm((unsigned long)&code[TMPL_RESTORE_END],
++					   (unsigned long)(op->kp.addr + 1),
++					   AARCH64_INSN_BRANCH_NOLINK);
++	if (insn == AARCH64_BREAK_FAULT) {
++		ret = -ERANGE;
++		goto error;
++	}
++
++	buf[TMPL_RESTORE_END] = insn;
++
++	buf[TMPL_VAL_IDX] = cpu_to_le32(lower_32_bits((unsigned long)op));
++	buf[TMPL_VAL_IDX + 1] = cpu_to_le32(upper_32_bits((unsigned long)op));
++	buf[TMPL_ORIGN_ADDR] = cpu_to_le32(lower_32_bits((unsigned long)orig->addr));
++	buf[TMPL_ORIGN_ADDR + 1] = cpu_to_le32(upper_32_bits((unsigned long)orig->addr));
++
++	buf[TMPL_RESTORE_ORIGN_INSN] = orig->opcode;
++
++	/* Setup template */
++	for (i = 0; i < MAX_OPTINSN_SIZE / MAX_OPTIMIZED_LENGTH; i++)
++		aarch64_insn_patch_text_nosync(code + i, buf[i]);
++
++	flush_icache_range((unsigned long)code, (unsigned long)(&code[TMPL_VAL_IDX]));
++	/* Set op->optinsn.trampoline means prepared. */
++	op->optinsn.trampoline = code;
++
++	return 0;
++error:
++	free_optinsn_slot(code, 0);
++
++out:
++	kfree(buf);
++	return ret;
++}
++
++void arch_optimize_kprobes(struct list_head *oplist)
++{
++	struct optimized_kprobe *op, *tmp;
++	kprobe_opcode_t insns[OPTPROBE_BATCH_SIZE];
++	void *addrs[OPTPROBE_BATCH_SIZE];
++	int i = 0;
++
++	list_for_each_entry_safe(op, tmp, oplist, list) {
++		WARN_ON(kprobe_disabled(&op->kp));
++
++		/*
++		 * Backup instructions which will be replaced
++		 * by jump address
++		 */
++		memcpy(op->optinsn.orig_insn, op->kp.addr, AARCH64_INSN_SIZE);
++
++		addrs[i] = op->kp.addr;
++		insns[i] = aarch64_insn_gen_branch_imm((unsigned long)op->kp.addr,
++						       (unsigned long)op->optinsn.trampoline,
++						       AARCH64_INSN_BRANCH_NOLINK);
++
++		list_del_init(&op->list);
++		if (++i == OPTPROBE_BATCH_SIZE)
++			break;
++	}
++
++	aarch64_insn_patch_text(addrs, insns, i);
++}
++
++void arch_unoptimize_kprobe(struct optimized_kprobe *op)
++{
++	arch_arm_kprobe(&op->kp);
++}
++
++/*
++ * Recover original instructions and breakpoints from relative jumps.
++ * Caller must call with locking kprobe_mutex.
++ */
++void arch_unoptimize_kprobes(struct list_head *oplist,
++			    struct list_head *done_list)
++{
++	struct optimized_kprobe *op, *tmp;
++	kprobe_opcode_t insns[OPTPROBE_BATCH_SIZE];
++	void *addrs[OPTPROBE_BATCH_SIZE];
++	int i = 0;
++
++	list_for_each_entry_safe(op, tmp, oplist, list) {
++		addrs[i] = op->kp.addr;
++		insns[i] = BRK64_OPCODE_KPROBES;
++		list_move(&op->list, done_list);
++
++		if (++i == OPTPROBE_BATCH_SIZE)
++			break;
++	}
++
++	aarch64_insn_patch_text(addrs, insns, i);
++}
++
++void arch_remove_optimized_kprobe(struct optimized_kprobe *op)
++{
++	if (op->optinsn.trampoline) {
++		free_optinsn_slot(op->optinsn.trampoline, 1);
++		op->optinsn.trampoline = NULL;
++	}
++
++}
++
++void optprobe_optimized_callback(struct optimized_kprobe *op, struct pt_regs *regs)
++{
++	if (kprobe_disabled(&op->kp))
++		return;
++
++	guard(preempt)();
++
++	if (kprobe_running()) {
++		kprobes_inc_nmissed_count(&op->kp);
++	} else {
++		__this_cpu_write(current_kprobe, &op->kp);
++		get_kprobe_ctlblk()->kprobe_status = KPROBE_HIT_ACTIVE;
++		opt_pre_handler(&op->kp, regs);
++		__this_cpu_write(current_kprobe, NULL);
++	}
++}
++NOKPROBE_SYMBOL(optprobe_optimized_callback)
+new file mode 100644
+index 0000000..a870b56
+--- /dev/null
++++ b/arch/arm64/kernel/probes/optprobe_trampoline.S
+@@ -0,0 +1,114 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/*
++ * trampoline entry and return code for optprobes.
++ */
++
++#include <linux/linkage.h>
++#include <asm/asm-offsets.h>
++#include <asm/assembler.h>
++
++#define		OPT_SLOT_SIZE	65536
++
++	.global optinsn_slot
++optinsn_slot:
++	.space  OPT_SLOT_SIZE
++
++SYM_CODE_START(optprobe_common)
++	stp x2, x3, [sp, #S_X2]
++	stp x4, x5, [sp, #S_X4]
++	stp x6, x7, [sp, #S_X6]
++	stp x8, x9, [sp, #S_X8]
++	stp x10, x11, [sp, #S_X10]
++	stp x12, x13, [sp, #S_X12]
++	stp x14, x15, [sp, #S_X14]
++	stp x16, x17, [sp, #S_X16]
++	stp x18, x19, [sp, #S_X18]
++	stp x20, x21, [sp, #S_X20]
++	stp x22, x23, [sp, #S_X22]
++	stp x24, x25, [sp, #S_X24]
++	stp x26, x27, [sp, #S_X26]
++	stp x28, x29, [sp, #S_X28]
++	add x2, sp, #PT_REGS_SIZE
++	str x2, [sp, #S_SP]
++	/* Construct a useful saved PSTATE */
++	mrs x2, nzcv
++	mrs x3, daif
++	orr x2, x2, x3
++	mrs x3, CurrentEL
++	orr x2, x2, x3
++	mrs x3, SPSel
++	orr x2, x2, x3
++	adr x1, 2f
++	stp x1, x2, [sp, #S_PC]
++
++	/* set the pt_regs address to x1 */
++	mov x1, sp
++	/* store lr of optprobe_common temporary */
++	stp x29, x30, [sp, #-16]!
++	mov x29, sp
++
++	bl optprobe_optimized_callback
++
++	ldp x29, x30, [sp], #16
++
++	ldr x0, [sp, #S_PSTATE]
++	and x0, x0, #(PSR_N_BIT | PSR_Z_BIT | PSR_C_BIT | PSR_V_BIT)
++	msr nzcv, x0
++
++	ldp x0, x1, [sp, #S_X0]
++	ldp x2, x3, [sp, #S_X2]
++	ldp x4, x5, [sp, #S_X4]
++	ldp x6, x7, [sp, #S_X6]
++	ldp x8, x9, [sp, #S_X8]
++	ldp x10, x11, [sp, #S_X10]
++	ldp x12, x13, [sp, #S_X12]
++	ldp x14, x15, [sp, #S_X14]
++	ldp x16, x17, [sp, #S_X16]
++	ldp x18, x19, [sp, #S_X18]
++	ldp x20, x21, [sp, #S_X20]
++	ldp x22, x23, [sp, #S_X22]
++	ldp x24, x25, [sp, #S_X24]
++	ldp x26, x27, [sp, #S_X26]
++	ldp x28, x29, [sp, #S_X28]
++	ret
++SYM_CODE_END(optprobe_common)
++
++	.global optprobe_template_entry
++optprobe_template_entry:
++	stp x29, x30, [sp, #-16]!
++	mov x29, sp
++	adr x30, 2f
++	stp x29, x30, [sp, #-16]!
++	mov x29, sp
++	sub sp, sp, #PT_REGS_SIZE
++	str lr, [sp, #S_LR]
++	stp x0, x1, [sp, #S_X0]
++	/* Get parameters to optimized_callback() */
++	adr x0, 1f
++	.global optprobe_template_common
++optprobe_template_common:
++	nop
++	bti j
++	ldr lr, [sp, #S_LR]
++	add sp, sp, #PT_REGS_SIZE
++	ldp x29, x30, [sp], #16
++	ldp x29, x30, [sp], #16
++	.global optprobe_template_restore_orig_insn
++optprobe_template_restore_orig_insn:
++	nop
++	.global optprobe_template_restore_end
++optprobe_template_restore_end:
++	nop
++	.balign 4
++	.global optprobe_template_val
++optprobe_template_val:
++	1:	.long 0
++		.long 0
++	.balign 4
++	.global optprobe_template_orig_addr
++optprobe_template_orig_addr:
++	2:	.long 0
++		.long 0
++	.global optprobe_template_end
++optprobe_template_end:
++	nop

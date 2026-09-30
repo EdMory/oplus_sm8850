@@ -154,13 +154,13 @@ jobs:
           sudo cp -f ./ccache /usr/bin/ccache &&
           sudo chmod +x /usr/bin/ccache &&
           rm -f ./ccache &
-          
-          echo "正在克隆源码仓库..."
-          aria2c -s16 -x16 -k1M https://github.com/cctv18/android_gki_kernel_common/archive/refs/heads/android16-6.12-2026-03.zip -o common.zip && 
+
+          echo "正在克隆源码仓库..." &&
+          aria2c -s16 -x16 -k1M https://github.com/EdMory/android_kernel_common_sm8850/archive/refs/heads/aosp-new/android16-6.12-lts.zip -o common.zip && 
           unzip -q common.zip && 
-          mv "android_gki_kernel_common-android16-6.12-2026-03" common &&
+          mv "android_kernel_common_sm8850-aosp-new-android16-6.12-lts" common &&
           rm -rf common.zip &
-          
+
           echo "正在克隆llvm-clang19工具链..." &&
           mkdir -p clang19 &&
           aria2c -s16 -x16 -k1M https://github.com/cctv18/oneplus_sm8650_toolchain/releases/download/LLVM-Clang19-r536225/clang-r536225.zip -o clang.zip &&

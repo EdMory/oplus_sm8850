@@ -1275,7 +1275,7 @@ jobs:
           KCFLAGS+=" -no-canonical-prefixes"
           KCFLAGS+=" -O2"
           KCFLAGS+=" -pipe"
-          KCFLAGS+=" -Wno-error"
+          KCFLAGS+=" -Wno-error=unused-command-line-argument"
           KCFLAGS+=" -fno-stack-protector"
           KCFLAGS+=" -D__ANDROID_COMMON_KERNEL__"
           export KCFLAGS
@@ -1297,6 +1297,11 @@ jobs:
           sudo rm -rf /opt/ghc &
           sudo rm -rf /opt/hostedtoolcache/CodeQL &
           make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="clang" LD="ld.lld" OBJCOPY="llvm-objcopy" O=out gki_defconfig &&
+          # rust bitcode 编译修复：关闭 clang 对 -fmacro-prefix-map 等 prefix-map 透传参数的 -Werror 硬错
+          # （rust/Makefile:423 在 CONFIG_RUST_INLINE_HELPERS=y 时透传全部 KBUILD_CFLAGS 给 clang 编译 .m.bc，
+          #  scripts/Makefile.clang:37 的 -Werror=unused-command-line-argument 将其升级为硬错导致 rust/kernel.o 失败）
+          sed -i 's/-Wno-override-module -c/-Wno-override-module -Wno-error=unused-command-line-argument -c/' rust/Makefile &&
+          grep -q 'Wno-error=unused-command-line-argument' rust/Makefile && echo "rust/Makefile 修复已应用" || { echo "rust/Makefile 修复失败"; exit 1; }
           export CC="$(pwd)/cc-wrapper" && export LD="$(pwd)/ld-wrapper" &&
           make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="$(pwd)/cc-wrapper" LD="$(pwd)/ld-wrapper" OBJCOPY="llvm-objcopy" O=out Image
           

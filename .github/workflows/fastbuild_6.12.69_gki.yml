@@ -498,10 +498,18 @@ jobs:
           # 添加对 Mountify (backslashxx/mountify) 模块的支持
           echo "CONFIG_TMPFS_XATTR=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_TMPFS_POSIX_ACL=y" >> ./common/arch/arm64/configs/gki_defconfig
-          # 注意: 这里曾强行写入 CONFIG_ZSMALLOC=y 与各 ZRAM_BACKEND_*，导致另编的
-          # zram.ko 与内核不同源（zsmalloc 的 =y/=m 不一致 -> zs_* 等 20 个符号的
-          # modversion CRC 全部对不上，insmod 报 disagrees about version of symbol）。
-          # zram 相关配置已统一移到下方独立的「将 zram 编入内核」步骤，此处不再重复写入。
+          if [[ "${{ github.event.inputs.lz4kd_enable }}" == "true" ]]; then
+            echo "CONFIG_ZSMALLOC=y" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_CRYPTO_LZ4HC=y" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_CRYPTO_LZ4K=y" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_CRYPTO_LZ4KD=y" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_CRYPTO_842=y" >> ./common/arch/arm64/configs/gki_defconfig
+            #以下配置选项用于编译zram模块，开启与否不影响内核编译
+            echo "CONFIG_ZRAM_BACKEND_LZ4HC=y" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_ZRAM_BACKEND_LZ4K=y" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_ZRAM_BACKEND_LZ4KD=y" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_ZRAM_BACKEND_842=y" >> ./common/arch/arm64/configs/gki_defconfig
+          fi
           # 开启O2编译优化配置
           echo "CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE=y" >> ./common/arch/arm64/configs/gki_defconfig
           # 禁用 defconfig 检查
@@ -521,51 +529,6 @@ jobs:
           cd common
           wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/optprobe_6.12.69.patch
           patch -p1 -F 3 < optprobe_6.12.69.patch
-
-      - name: 将 zram 编入内核并默认使用 lz4kdr
-        if: inputs.lz4kdr_enable
-        run: |
-          set -e
-          cd kernel_workspace/common
-          D=arch/arm64/configs/gki_defconfig
-
-          # 统一写入函数: 先删掉同名旧行再追加，避免与 gki_defconfig 既有项冲突
-          add() {
-            local k="${1%%=*}"
-            sed -i "/^${k}=/d;/^# ${k} is not set$/d" "$D"
-            echo "$1" >> "$D"
-          }
-
-          # ---- zram 本体与其分配器编入内核 (不再作为模块) ----
-          # zram=m 会随 CONFIG_ZRAM=m 被写成模块；改成 =y 后 comp_algorithm 开机即存在，
-          # 完全不需要 insmod/rmmod —— 这同时绕开了:
-          #   * inte.ko 的 load_module 哈希白名单校验
-          #   * oplus_bsp_zram_opt 对 zram 模块的引用计数(导致 rmmod 必然失败)
-          #   * 自编 zram.ko 与内核的 vermagic/CRC 同源问题
-          add "CONFIG_ZRAM=y"
-          add "CONFIG_ZSMALLOC=y"
-
-          # ---- lz4kdr 后端与它的编解码实现，全部内建 ----
-          # 注意: CONFIG_LZ4KDR_COMPRESS / _DECOMPRESS 在 lib/Kconfig 里是无 default 的
-          # tristate，仅靠 ZRAM_BACKEND_LZ4KDR 的 select 拉起，必须显式写 =y。
-          add "CONFIG_ZRAM_BACKEND_LZ4KDR=y"
-          add "CONFIG_LZ4KDR_COMPRESS=y"
-          add "CONFIG_LZ4KDR_DECOMPRESS=y"
-
-          # ---- lz4kdr 设为默认压缩算法 ----
-          # ZRAM_DEF_COMP_LZ4KDR 与其它 DEF_COMP 互斥，先清掉既有选择
-          sed -i '/^CONFIG_ZRAM_DEF_COMP_/d' "$D"
-          add "CONFIG_ZRAM_DEF_COMP_LZ4KDR=y"
-          add 'CONFIG_ZRAM_DEF_COMP="lz4kdr"'
-
-          # ---- 顺带保留其余后端，便于运行期切换 ----
-          add "CONFIG_ZRAM_BACKEND_LZ4=y"
-          add "CONFIG_ZRAM_BACKEND_LZ4HC=y"
-          add "CONFIG_ZRAM_BACKEND_LZO=y"
-          add "CONFIG_ZRAM_BACKEND_842=y"
-
-          echo "=== gki_defconfig 中 zram 相关项 ==="
-          grep -E 'ZRAM|ZSMALLOC|LZ4KDR' "$D" || true
 
       - name: 集成 BBR 拥塞控制补丁
         if: inputs.bbr_enable
@@ -1336,8 +1299,6 @@ jobs:
           make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="clang" LD="ld.lld" OBJCOPY="llvm-objcopy" O=out gki_defconfig &&
           export CC="$(pwd)/cc-wrapper" && export LD="$(pwd)/ld-wrapper" &&
           make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="$(pwd)/cc-wrapper" LD="$(pwd)/ld-wrapper" OBJCOPY="llvm-objcopy" O=out Image
-          # 用同一份 out/.config 一并编译模块，保证与 Image 同源（CRC/vermagic 一致）
-          make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="$(pwd)/cc-wrapper" LD="$(pwd)/ld-wrapper" OBJCOPY="llvm-objcopy" O=out modules
           
           # 编译后时间劫持二次校验
           echo "--- 编译后环境时间: $(LD_PRELOAD=$PRELOAD_LIBS date) ---"
@@ -1355,42 +1316,6 @@ jobs:
           ccache -s
           echo "编译后空间:"
           df -h
-
-      - name: 校验 lz4kdr 配置是否真的生效
-        run: |
-          cd kernel_workspace/common
-          echo "=== 核查 out/.config 中的关键配置 ==="
-          fail=0
-          for k in \
-            "CONFIG_ZRAM=y" \
-            "CONFIG_ZSMALLOC=y" \
-            "CONFIG_ZRAM_BACKEND_LZ4KDR=y" \
-            "CONFIG_LZ4KDR_COMPRESS=y" \
-            "CONFIG_LZ4KDR_DECOMPRESS=y" \
-            "CONFIG_ZRAM_DEF_COMP_LZ4KDR=y" \
-            'CONFIG_ZRAM_DEF_COMP="lz4kdr"'
-          do
-            if grep -qxF "$k" out/.config; then
-              echo "  [OK]   $k"
-            else
-              echo "  [FAIL] $k  <== 未生效，构建结果不可用"
-              fail=1
-            fi
-          done
-          echo "--- out/.config 实际值 ---"
-          grep -E '^CONFIG_(ZRAM|ZSMALLOC|LZ4KDR)' out/.config || true
-          echo "--- 产物 ---"
-          if [ -f out/drivers/block/zram/zram.ko ]; then
-            echo "  [注意] 仍生成了 zram.ko，说明 zram 未完全内建"
-            ls -l out/drivers/block/zram/zram.ko
-          else
-            echo "  [OK]   无 zram.ko（zram 已内建，符合预期）"
-          fi
-          if [ "$fail" -ne 0 ]; then
-            echo "致命: lz4kdr 配置未按要求生效，已中止"
-            exit 1
-          fi
-          echo "校验通过: lz4kdr 已内建并设为默认压缩算法"
 
       - name: 保存新的 ccache 缓存
         if: inputs.ccache_update || steps.ccache-restore.outputs.cache-hit != 'true'
@@ -1472,8 +1397,6 @@ jobs:
           echo "LZ4: ${{ github.event.inputs.lz4_enable }}" >> ./ak3.log
           echo "LZ4KD: ${{ github.event.inputs.lz4kd_enable }}" >> ./ak3.log
           echo "LZ4KDR: ${{ github.event.inputs.lz4kdr_enable }}" >> ./ak3.log
-          echo "ZRAM: builtin (CONFIG_ZRAM=y)" >> ./ak3.log
-          echo "ZRAM DEF COMP: lz4kdr" >> ./ak3.log
           echo "Re-Kernel: ${{ github.event.inputs.rekernel_enable }}" >> ./ak3.log
           echo "BBG: ${{ github.event.inputs.baseband_guard }}" >> ./ak3.log
           echo "IPset: ${{ github.event.inputs.better_net }}" >> ./ak3.log

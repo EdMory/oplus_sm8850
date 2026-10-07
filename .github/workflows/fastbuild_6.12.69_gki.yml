@@ -38,7 +38,7 @@ on:
         type: boolean
         default: 'false'
       lz4_enable:
-        description: '是否安装 LZ4 1.10.0 和 ZSTD 1.5.7 补丁'
+        description: '是否安装 LZ4 1.10.0 和 ZSTD 1.5.8 补丁'
         required: true
         type: boolean
         default: 'true'
@@ -341,17 +341,23 @@ jobs:
             patch -p1 -F 3 < 10_enable_susfs_for_ksu.patch || true
           fi
           
-      - name: 应用 LZ4 1.10.0 和 ZSTD 1.5.7补丁
+      - name: 应用 LZ4 1.10.0 和 ZSTD 1.5.8补丁
         if: inputs.lz4_enable
         run: |
-          echo "正在添加lz4 1.10.0 & zstd 1.5.7补丁…"
+          echo "正在添加lz4 1.10.0 & zstd 1.5.8补丁…"
           cd kernel_workspace
           git clone --depth=1 https://github.com/$GITHUB_REPOSITORY.git -b $GITHUB_REF_NAME $GITHUB_ACTOR
           cp ./$GITHUB_ACTOR/zram_patch/001-lz4.patch ./common/
           cp ./$GITHUB_ACTOR/zram_patch/002-zstd.patch ./common/
           cd ./common
-          patch -p1 -F 3 < 001-lz4.patch || true
-          patch -p1 -F 3 < 002-zstd.patch || true
+          # 严格零 fuzz 应用 LZ4 1.10.0 补丁(已适配 GKI 6.12.69, 去除基于其他分支的 f2fs 依赖段)
+          patch -p1 --dry-run -F 0 < 001-lz4.patch > /tmp/lz4_dryrun.log 2>&1
+          cat /tmp/lz4_dryrun.log
+          patch -p1 --no-backup-if-mismatch -F 0 < 001-lz4.patch
+          # 严格零 fuzz 应用 ZSTD 1.5.8 补丁(自 GKI 基线直达 1.5.8, 保留 compression_level 可调)
+          patch -p1 --dry-run -F 0 < 002-zstd.patch > /tmp/zstd_dryrun.log 2>&1
+          cat /tmp/zstd_dryrun.log
+          patch -p1 --no-backup-if-mismatch -F 0 < 002-zstd.patch
 
       - name: 应用 LZ4KD 补丁
         if: inputs.lz4kd_enable

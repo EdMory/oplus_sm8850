@@ -512,10 +512,7 @@ jobs:
           fi
           # 开启O2编译优化配置
           echo "CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE=y" >> ./common/arch/arm64/configs/gki_defconfig
-          # 开启ThinLTO编译优化配置
-          echo "CONFIG_LTO_CLANG=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_LTO_CLANG_THIN=y" >> ./common/arch/arm64/configs/gki_defconfig
-          # 开启唤醒锁编译优化配置
+          # 开启唤醒锁优化配置
           echo "CONFIG_PM_WAKELOCKS_GC=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_PM_WAKELOCKS_LIMIT=10" >> ./common/arch/arm64/configs/gki_defconfig
           # 禁用 defconfig 检查

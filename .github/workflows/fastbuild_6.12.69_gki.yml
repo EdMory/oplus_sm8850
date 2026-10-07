@@ -349,6 +349,7 @@ jobs:
           git clone --depth=1 https://github.com/$GITHUB_REPOSITORY.git -b $GITHUB_REF_NAME $GITHUB_ACTOR
           cp ./$GITHUB_ACTOR/zram_patch/001-lz4.patch ./common/
           cp ./$GITHUB_ACTOR/zram_patch/002-zstd.patch ./common/
+          cp ./$GITHUB_ACTOR/zram_patch/003-zram-default-zstd-16gb.patch ./common/
           cd ./common
           # 严格零 fuzz 应用 LZ4 1.10.0 补丁(已适配 GKI 6.12.69, 去除基于其他分支的 f2fs 依赖段)
           patch -p1 --dry-run -F 0 < 001-lz4.patch > /tmp/lz4_dryrun.log 2>&1
@@ -359,8 +360,6 @@ jobs:
           cat /tmp/zstd_dryrun.log
           patch -p1 --no-backup-if-mismatch -F 0 < 002-zstd.patch
           echo "正在设置zram默认算法为 ZSTD 且默认大小为16GB…"
-          cp ./$GITHUB_ACTOR/zram_patch/003-zram-default-zstd-16gb.patch ./common/
-          cd ./common
           # 严格零 fuzz 应用(参考 epicmann24 commit c00f8958; 已按 GKI 6.12.69 多算法 zram_drv.c 适配:
           # zcomp_create 双参数 + zram_prefetch_cache_init, 与 disksize_store() 初始化序列一致)
           patch -p1 --dry-run -F 0 < 003-zram-default-zstd-16gb.patch > /tmp/zram_def_dryrun.log 2>&1

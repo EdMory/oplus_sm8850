@@ -91,6 +91,11 @@ on:
         required: true
         type: boolean
         default: 'true'
+      intsqrt_enable:
+        description: '是否安装 Oryon 优化 int_sqrt 补丁'
+        required: true
+        type: boolean
+        default: 'true'
       adios_enable:
         description: '是否安装 ADIOS IO 调度器'
         required: true
@@ -961,6 +966,10 @@ jobs:
             || echo "CONFIG_ISQRT=y" >> arch/arm64/configs/gki_defconfig
           echo "提示: 内核代码 include <linux/isqrt.h> 即可按需使用; 启动后可用 dmesg | grep isqrt 查看内置自检结果"
           echo "ISQRT 集成完成"
+
+      - name: 集成 Oryon 优化 int_sqrt
+        if: inputs.intsqrt_enable
+        run: |
           echo "正在集成 Oryon 优化 int_sqrt(epicmann24/android_kernel_common_oneplus_sm8750 提交 ffd624d 移植: CLZ/LUT/Newton-Raphson 混合实现, 替换内核 lib/math/int_sqrt.c 的 shift-and-subtract 算法; 小输入走查表、大输入走 Newton 路径, 利用 Oryon 快速整数除法流水线)…"
           # 任何命令失败时打印出错行号: 避免 set -e 静默退出后失败点无法定位
           trap 'echo "Oryon int_sqrt 集成步骤在脚本第 $LINENO 行失败(退出码 $?)" >&2' ERR

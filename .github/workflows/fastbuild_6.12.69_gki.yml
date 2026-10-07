@@ -961,6 +961,103 @@ jobs:
             || echo "CONFIG_ISQRT=y" >> arch/arm64/configs/gki_defconfig
           echo "提示: 内核代码 include <linux/isqrt.h> 即可按需使用; 启动后可用 dmesg | grep isqrt 查看内置自检结果"
           echo "ISQRT 集成完成"
+          echo "正在集成 Oryon 优化 int_sqrt…"
+          # 任何命令失败时打印出错行号: 避免 set -e 静默退出后失败点无法定位
+          trap 'echo "Oryon int_sqrt 集成步骤在脚本第 $LINENO 行失败(退出码 $?)" >&2' ERR
+          # 本补丁只改写 lib/math/int_sqrt.c 一个文件:
+          #   - 头部注释替换为 Oryon 说明
+          #   - 新增两个 static const 查找表(int_sqrt16_delta_lut / int_sqrt_est_lut)与
+          #     三个 __always_inline helper(int_sqrt_oryon16/32/64), 均不进符号表
+          #   - int_sqrt()/int_sqrt64() 函数体改为按位宽分发到 helper
+          #   函数签名、语义(floor(sqrt))与导出符号均不变, 故不破坏 ABI/KMI。
+
+          # 一、幂等前置检查: 树内若已集成(例如重复运行), 直接跳过
+          if grep -q 'int_sqrt_oryon16' lib/math/int_sqrt.c; then
+            echo "检测到 lib/math/int_sqrt.c 已包含 Oryon 实现, 跳过"
+            exit 0
+          fi
+
+          # 二、补丁下载: 优先 curl; 无 curl 时回退 wget
+          fetch() { # $1=url $2=输出文件 $3=日志文件
+            if command -v curl >/dev/null 2>&1; then
+              curl -fSL --retry 3 --retry-delay 2 --connect-timeout 20 -o "$2" "$1" 2> "$3"
+            else
+              wget -O "$2" --tries=3 --timeout=20 "$1" 2> "$3"
+            fi
+          }
+          PATCH_NAME=intsqrt-oryon-6.12.patch
+          PATCH_DIR=/tmp/intsqrt_patches
+          mkdir -p "$PATCH_DIR"
+          rm -f "$PATCH_DIR/$PATCH_NAME"
+          ok=0
+          for u in \
+            "https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/$PATCH_NAME" \
+            "https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$GITHUB_REF_NAME/other_patch/$PATCH_NAME" \
+            "https://cdn.jsdelivr.net/gh/$GITHUB_REPOSITORY@$GITHUB_REF_NAME/other_patch/$PATCH_NAME"
+          do
+            echo "尝试下载 int_sqrt 补丁: $u"
+            if fetch "$u" "$PATCH_DIR/$PATCH_NAME.tmp" "$PATCH_DIR/$PATCH_NAME.download.log"; then
+              if [ -s "$PATCH_DIR/$PATCH_NAME.tmp" ] && grep -q '^diff --git ' "$PATCH_DIR/$PATCH_NAME.tmp"; then
+                mv "$PATCH_DIR/$PATCH_NAME.tmp" "$PATCH_DIR/$PATCH_NAME"
+                echo "下载成功: $PATCH_NAME ($(wc -c < "$PATCH_DIR/$PATCH_NAME") 字节)"
+                ok=1
+                break
+              fi
+            fi
+          done
+          [ "$ok" = 1 ] || { echo "int_sqrt 补丁下载失败: 仓库 other_patch/$PATCH_NAME 缺失或不可达(见上方诊断)"; exit 1; }
+          ls -l "$PATCH_DIR/$PATCH_NAME"
+
+          # 三、ABI/KMI 面静态审计:
+          #     1) 触碰 ANDROID_KABI / __kabi_reserved 一律中止;
+          #     2) 出现新增 EXPORT_SYMBOL 说明移植越界(只允许改写既有导出函数实现);
+          #     3) 只允许改动 lib/math/int_sqrt.c 一个文件。
+          if grep -nE 'ANDROID_KABI|__kabi_reserved' "$PATCH_DIR/$PATCH_NAME"; then
+            echo "int_sqrt 补丁触碰 KABI 保留区, 已中止"; exit 1
+          fi
+          if grep -nE '^\+.*EXPORT_SYMBOL' "$PATCH_DIR/$PATCH_NAME"; then
+            echo "int_sqrt 补丁新增导出符号, 已中止"; exit 1
+          fi
+          OUT_OF_SCOPE="$(grep -E '^diff --git ' "$PATCH_DIR/$PATCH_NAME" \
+            | grep -vE ' b/lib/math/int_sqrt\.c$' || true)"
+          if [ -n "$OUT_OF_SCOPE" ]; then
+            echo "int_sqrt 补丁改动了白名单以外的文件, 已中止:"; echo "$OUT_OF_SCOPE"; exit 1
+          fi
+          ABI_HASHES="$(md5sum include/linux/sched.h kernel/sched/sched.h | md5sum)"
+
+          # 四、严格零 fuzz 应用: dry-run 探路, 任何 FAILED / fuzz / 重复应用痕迹立即中止
+          LOG=/tmp/intsqrt_dryrun.log
+          if ! patch -p1 --dry-run -F 0 < "$PATCH_DIR/$PATCH_NAME" > "$LOG" 2>&1; then
+            cat "$LOG"
+            echo "int_sqrt 补丁存在无法应用的 hunk, 已中止"; exit 1
+          fi
+          cat "$LOG"
+          if grep -qE 'with fuzz|FAILED|ignored|Reversed|previously applied' "$LOG"; then
+            echo "int_sqrt 补丁与当前内核树不匹配(fuzz / hunk 失败 / 重复应用), 已中止"; exit 1
+          fi
+          if grep -q 'offset' "$LOG"; then
+            echo "提示: 以下 hunk 存在纯行号偏移(上下文精确匹配, 位置正确, 属其他补丁先行改动所致), 继续应用:"
+            grep 'offset' "$LOG"
+          fi
+          patch -p1 -F 0 --no-backup-if-mismatch < "$PATCH_DIR/$PATCH_NAME"
+
+          # 五、ABI 复核: 结构体布局相关文件必须与打补丁前逐字节一致
+          [ "$(md5sum include/linux/sched.h kernel/sched/sched.h | md5sum)" = "$ABI_HASHES" ] \
+            || { echo "int_sqrt ABI 校验失败: 结构体布局相关文件被改动"; exit 1; }
+
+          # 六、集成结果校验: Oryon 标记 / helper / 两张 LUT / 分发逻辑必须齐全
+          check() { grep -qF "$2" "$1" || { echo "int_sqrt 集成校验失败: $1 缺少 '$2'"; exit 1; }; }
+          check lib/math/int_sqrt.c 'Oryon-optimized hybrid integer square root'
+          check lib/math/int_sqrt.c 'int_sqrt_oryon16'
+          check lib/math/int_sqrt.c 'int_sqrt_oryon32'
+          check lib/math/int_sqrt.c 'int_sqrt_oryon64'
+          check lib/math/int_sqrt.c 'int_sqrt16_delta_lut[256]'
+          check lib/math/int_sqrt.c 'int_sqrt_est_lut[128]'
+          check lib/math/int_sqrt.c 'x <= U16_MAX'
+          check lib/math/int_sqrt.c 'EXPORT_SYMBOL(int_sqrt);'
+
+          echo "提示: int_sqrt()/int_sqrt64() 现由 Oryon 优化实现接管, 语义不变(floor(sqrt)), 依赖方无需改动"
+          echo "Oryon int_sqrt 集成完成"
 
       - name: 集成 ADIOS IO 调度器
         if: inputs.adios_enable

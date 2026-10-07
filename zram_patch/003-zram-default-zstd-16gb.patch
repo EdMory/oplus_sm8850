@@ -1,0 +1,95 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Marvis <marvis@local>
+Date: Thu, 08 Oct 2026 02:00:43 +0800
+Subject: [PATCH] zram: Set default compressor to ZSTD and default disksize to 16GB
+
+Port of epicmann24/android_kernel_common_oneplus_sm8750 commit c00f8958
+(zram: Set default compressor to LZ4 and initialize default disksize to
+16GB), adapted for GKI 6.12.69 multi-compressor zram:
+
+- Kconfig: default zram compressor switched from lzo-rle to ZSTD
+  (CONFIG_ZRAM_DEF_COMP_ZSTD, requires ZRAM_BACKEND_ZSTD which is
+  provided by the bundled ZSTD 1.5.8 port).
+- zram_drv.c zram_add(): pre-initialize default disksize to 16GB
+  (17179869184 bytes), allocate zram meta, create all configured
+  compression backends (two-argument zcomp_create used by GKI tree,
+  plus zram_prefetch_cache_init matching disksize_store()) and set
+  capacity before device_add_disk. Log line reports default size.
+
+No KABI symbols touched; only zram driver internals.
+
+Signed-off-by: Marvis <marvis@local>
+---
+--- a/drivers/block/zram/Kconfig
++++ b/drivers/block/zram/Kconfig
+@@ -59,7 +59,7 @@
+ 
+ choice
+ 	prompt "Default zram compressor"
+-	default ZRAM_DEF_COMP_LZORLE
++	default ZRAM_DEF_COMP_ZSTD
+ 	depends on ZRAM
+ 
+ config ZRAM_DEF_COMP_LZORLE
+--- a/drivers/block/zram/zram_drv.c
++++ b/drivers/block/zram/zram_drv.c
+@@ -3458,6 +3458,7 @@
+ 	};
+ 	struct zram *zram;
+ 	int ret, device_id;
++	u64 default_disksize = 17179869184ULL; /* 16GB in bytes */
+ 
+ 	zram = kzalloc(sizeof(struct zram), GFP_KERNEL);
+ 	if (!zram)
+@@ -3496,12 +3497,50 @@
+ 
+ 	/* Actual capacity set using sysfs (/sys/block/zram<id>/disksize */
+ 	set_capacity(zram->disk, 0);
++	/*
++	 * Initialize with a default 16GB disksize so the device is usable
++	 * without userspace explicitly writing /sys/block/zram<id>/disksize.
++	 * Reference: epicmann24 commit c00f8958 (zstd default + 16GB).
++	 */
++	down_write(&zram->init_lock);
++	if (!zram_meta_alloc(zram, default_disksize)) {
++		up_write(&zram->init_lock);
++		ret = -ENOMEM;
++		goto out_cleanup_disk;
++	}
++
++	zram_prefetch_cache_init(zram);
++
++	for (u32 prio = 0; prio < ZRAM_MAX_COMPS; prio++) {
++		if (!zram->comp_algs[prio])
++			continue;
++
++		struct zcomp *comp = zcomp_create(zram->comp_algs[prio],
++						  &zram->params[prio]);
++		if (IS_ERR(comp)) {
++			pr_err("Cannot initialise %s compressing backend\n",
++			       zram->comp_algs[prio]);
++			zram_destroy_comps(zram);
++			zram_meta_free(zram, default_disksize);
++			up_write(&zram->init_lock);
++			ret = PTR_ERR(comp);
++			goto out_cleanup_disk;
++		}
++		zram->comps[prio] = comp;
++		zram->num_active_comps++;
++	}
++
++	zram->disksize = default_disksize;
++	set_capacity_and_notify(zram->disk, zram->disksize >> SECTOR_SHIFT);
++	up_write(&zram->init_lock);
++
+ 	ret = device_add_disk(NULL, zram->disk, zram_disk_groups);
+ 	if (ret)
+ 		goto out_cleanup_disk;
+ 
+ 	zram_debugfs_register(zram);
+-	pr_info("Added device: %s\n", zram->disk->disk_name);
++	pr_info("Added device: %s with default size %llu bytes\n",
++		zram->disk->disk_name, default_disksize);
+ 	return device_id;
+ 
+ out_cleanup_disk:

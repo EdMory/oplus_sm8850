@@ -358,6 +358,17 @@ jobs:
           patch -p1 --dry-run -F 0 < 002-zstd.patch > /tmp/zstd_dryrun.log 2>&1
           cat /tmp/zstd_dryrun.log
           patch -p1 --no-backup-if-mismatch -F 0 < 002-zstd.patch
+          echo "正在设置zram默认算法为 ZSTD 且默认大小为16GB…"
+          cp ./$GITHUB_ACTOR/zram_patch/003-zram-default-zstd-16gb.patch ./common/
+          cd ./common
+          # 严格零 fuzz 应用(参考 epicmann24 commit c00f8958; 已按 GKI 6.12.69 多算法 zram_drv.c 适配:
+          # zcomp_create 双参数 + zram_prefetch_cache_init, 与 disksize_store() 初始化序列一致)
+          patch -p1 --dry-run -F 0 < 003-zram-default-zstd-16gb.patch > /tmp/zram_def_dryrun.log 2>&1
+          cat /tmp/zram_def_dryrun.log
+          patch -p1 --no-backup-if-mismatch -F 0 < 003-zram-default-zstd-16gb.patch
+          # 集成结果校验: Kconfig 默认项与 zram_add 默认 16GB disksize 必须落位
+          grep -q 'default ZRAM_DEF_COMP_ZSTD' drivers/block/zram/Kconfig || { echo "003 集成校验失败: Kconfig 默认压缩算法未切换为 ZSTD"; exit 1; }
+          grep -q '17179869184ULL' drivers/block/zram/zram_drv.c || { echo "003 集成校验失败: zram_drv.c 缺少默认 16GB disksize"; exit 1; }
 
       - name: 应用 LZ4KD 补丁
         if: inputs.lz4kd_enable

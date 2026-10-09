@@ -188,7 +188,7 @@ jobs:
           echo "正在去除 dirty 后缀..."
           for f in common/scripts/setlocalversion; do
             sed -i 's/ -dirty//g' "$f"
-            sed -i '$i res=$(echo "$res" | sed '\\\\''s/-dirty//g'\\\\'')' "$f"
+            sed -i '$i res=$(echo "$res" | sed '\''s/-dirty//g'\'')' "$f"
           done
 
       - name: 配置ccache目录
@@ -301,11 +301,11 @@ jobs:
             curl -LSs "https://raw.githubusercontent.com/pershoot/KernelSU-Next/refs/heads/dev-susfs/kernel/setup.sh" | bash -s dev-susfs
             cd KernelSU-Next
             rm -rf .git
-            KSU_VERSION=$(expr $(curl -sI "https://api.github.com/repos/pershoot/KernelSU-Next/commits?sha=dev&per_page=1" | grep -i "link:" | sed -n 's/.\\page=\\\\([0-9]\\\\\\)>; rel="last".\\\*/\\\\1/p') "+" 30000)
+            KSU_VERSION=$(expr $(curl -sI "https://api.github.com/repos/pershoot/KernelSU-Next/commits?sha=dev&per_page=1" | grep -i "link:" | sed -n 's/.*page=\([0-9]*\)>; rel="last".*/\1/p') "+" 30000)
             echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
             echo "ksuver=$KSU_VERSION" >> $GITHUB_OUTPUT
             sed -i "s/KSU_VERSION_FALLBACK := 1/KSU_VERSION_FALLBACK := $KSU_VERSION/g" kernel/Kbuild
-            KSU_GIT_TAG=$(curl -sL "https://api.github.com/repos/KernelSU-Next/KernelSU-Next/tags" | grep -o '"name": \\"[^"]\\"' | head -n 1 | sed 's/"name": "//;s/"//')
+            KSU_GIT_TAG=$(curl -sL "https://api.github.com/repos/KernelSU-Next/KernelSU-Next/tags" | grep -o '"name": "[^"]"' | head -n 1 | sed 's/"name": "//;s/"//')
             sed -i "s/KSU_VERSION_TAG_FALLBACK := v0.0.1/KSU_VERSION_TAG_FALLBACK := $KSU_GIT_TAG/g" kernel/Kbuild
             #为KernelSU Next添加WildKSU管理器支持
             cd ../common/drivers/kernelsu
@@ -315,7 +315,7 @@ jobs:
             echo "正在配置原版 KernelSU (tiann/KernelSU)..."
             curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/refs/heads/main/kernel/setup.sh" | bash -s main
             cd ./KernelSU
-            KSU_VERSION=$(expr $(curl -sI "https://api.github.com/repos/tiann/KernelSU/commits?sha=main&per_page=1" | grep -i "link:" | sed -n 's/.\\page=\\\\([0-9]\\\\\\)>; rel="last".\\\*/\\\\1/p') "+" 30000)
+            KSU_VERSION=$(expr $(curl -sI "https://api.github.com/repos/tiann/KernelSU/commits?sha=main&per_page=1" | grep -i "link:" | sed -n 's/.*page=\([0-9]*\)>; rel="last".*/\1/p') "+" 30000)
             echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
             echo "ksuver=$KSU_VERSION" >> $GITHUB_OUTPUT
             sed -i "s/DKSU_VERSION=16/DKSU_VERSION=${KSU_VERSION}/" kernel/Kbuild
@@ -331,8 +331,8 @@ jobs:
             echo "正在添加susfs补丁..."
             git clone --depth=1 https://github.com/cctv18/susfs4oki.git susfs4ksu -b oki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}
             cp ./susfs4ksu/kernel_patches/50_add_susfs_in_gki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}.patch ./common/
-            cp ./susfs4ksu/kernel_patches/fs/\\\* ./common/fs/
-            cp ./susfs4ksu/kernel_patches/include/linux/\\\* ./common/include/linux/
+            cp ./susfs4ksu/kernel_patches/fs/* ./common/fs/
+            cp ./susfs4ksu/kernel_patches/include/linux/* ./common/include/linux/
             cd ./common
             patch -p1 -F 3 < 50_add_susfs_in_gki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}.patch || true
             cd ..
@@ -383,7 +383,7 @@ jobs:
           # 上游补丁以 mainline 6.12.74 为基准, 改动 5 个既有文件 + 新增 9 个文件(zram 后端与 lib/lz4kdr/ 独立实现);
           # 本副本已对 6.12.38 vendor 树逐 hunk 对位(适配树内已集成的 lz4kd: 后端选项、默认压缩项、
           # 后端注册表全部改为紧随 LZ4KD 之后插入, 避开已存在同名 LZ4K/LZ4KD 段的覆盖冲突)。
-          # 补丁仅新增 lz4kdr_\\\* 前缀导出符号(不改动任何既有 KABI 面), 可与已集成的 LZ4KD 并存, 故仅从本仓库 other_patch 取用。
+          # 补丁仅新增 lz4kdr_* 前缀导出符号(不改动任何既有 KABI 面), 可与已集成的 LZ4KD 并存, 故仅从本仓库 other_patch 取用。
           PATCH_URLS=(
             "https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/lz4kdr-6.12.74-oplus.patch"
           )
@@ -406,7 +406,7 @@ jobs:
               fi
               echo "该源返回空文件, 尝试下一个源"
             else
-              echo "该源不可用: $(tail -n 2 download_lz4kdr.log | tr '\\\\n' ' ')"
+              echo "该源不可用: $(tail -n 2 download_lz4kdr.log | tr '\n' ' ')"
             fi
           done
           rm -f lz4kdr.patch.tmp download_lz4kdr.log
@@ -419,23 +419,26 @@ jobs:
 
           # 二、ABI 面静态审计:
           #     1) 触碰 KABI 保留区一律中止;
-          #     2) 导出符号仅允许 lz4kdr_\\\* 新符号(带分号结尾的真实导出行, 排除 userspace shim 的 #define);
+          #     2) 导出符号仅允许 lz4kdr_* 新符号(带分号结尾的真实导出行, 排除 userspace shim 的 #define);
           #     3) 白名单外文件一律中止。
           if grep -nE 'ANDROID_KABI|__kabi_reserved' lz4kdr.patch; then
             echo "LZ4KDR 补丁触碰 KABI 保留区, 已中止"; exit 1
           fi
-          BAD_SYMS="$(grep -oE 'EXPORT_SYMBOL(_GPL)?\\\\([A-Za-z_][A-Za-z0-9_]\\\*\\\\);' lz4kdr.patch \
-            | sed -E 's/.\\\\\\(([A-Za-z_][A-Za-z0-9_]\\)\\\\);/\\\\1/' | sort -u | grep -vE '^lz4kdr_' || true)"
+          BAD_SYMS="$(grep -oE 'EXPORT_SYMBOL(_GPL)?\([A-Za-z_][A-Za-z0-9_]*\);' lz4kdr.patch \
+            | sed -E 's/.*\(([A-Za-z_][A-Za-z0-9_]*)\);/\1/' | sort -u | grep -vE '^lz4kdr_' || true)"
           if [ -n "" ]; then
-            echo "LZ4KDR 补丁导出了非 lz4kdr_\\\* 前缀的符号, 已中止:"; echo ""; exit 1
+            echo "LZ4KDR 补丁导出了非 lz4kdr_* 前缀的符号, 已中止:"; echo ""; exit 1
           fi
-          for s in $(grep -oE 'EXPORT_SYMBOL(_GPL)?\\\\(lz4kdr_[A-Za-z0-9_]\\\\\\);' lz4kdr.patch | sed -E 's/.\\\\\\(([A-Za-z0-9_]+)\\\\);/\\\\1/' | sort -u); do
-            if grep -rqE "EXPORT_SYMBOL(_GPL)?\\\\(\\\\s\\$s\\\\s\\\\\\)" --include='\\\*.c' . 2>/dev/null; then
+          for s in $(grep -oE 'EXPORT_SYMBOL(_GPL)?\(lz4kdr_[A-Za-z0-9_]*\);' lz4kdr.patch | sed -E 's/.*\(([A-Za-z0-9_]+)\);/\1/' | sort -u); do
+            if grep -rqE "EXPORT_SYMBOL(_GPL)?\(\s$s\s\)" --include='*.c' . 2>/dev/null; then
               echo "LZ4KDR 符号冲突: $s 在树中已存在同名导出, 已中止"; exit 1
             fi
           done
           # 注意: 白名单全部命中时 grep -vE 无输出返回码为 1, 必须 || true 兜底, 否则 bash -e 下静默退出
-          OUT_OF_SCOPE="$(grep -E '^diff --git ' lz4kdr.patch | grep -vE ' b/(drivers/block/zram/(Kconfig|Makefile|zcomp\\\\.c|backend_lz4kdr\\\\.[ch])|include/linux/lz4kdr\\\\.h|lib/(Kconfig|Makefile)|lib/lz4kdr/[^/]+)$' || true)"
+          OUT_OF_SCOPE="$(grep -E '^diff --git ' lz4kdr.patch | grep -vE ' b/(drivers/block/zram/(Kconfig|Makefile|zcomp\.c|backend_lz4kdr\.[ch])|include/linux/lz4kdr\.h|lib/(Kconfig|Makefile)|lib/lz4kdr/[^/]+)$' || true)"
+          if [ -n "$OUT_OF_SCOPE" ]; then
+            echo "LZ4KDR 补丁改动了白名单以外的文件, 已中止:"; echo "$OUT_OF_SCOPE"; exit 1
+          fi
           ABI_HASHES="$(md5sum include/linux/sched.h kernel/sched/sched.h | md5sum)"
 
           # 三、严格零 fuzz 应用: dry-run 探路, 任何 FAILED / fuzz / 重复应用痕迹立即中止
@@ -462,7 +465,7 @@ jobs:
           checkre() { grep -qE "$2" "$1" || { echo "LZ4KDR 集成校验失败(正则): $1 缺少 '$2'"; exit 1; }; }
           check drivers/block/zram/Kconfig 'config ZRAM_BACKEND_LZ4KDR'
           check drivers/block/zram/Kconfig 'config ZRAM_DEF_COMP_LZ4KDR'
-          checkre drivers/block/zram/Makefile 'zram-\\\\$\\\\(CONFIG_ZRAM_BACKEND_LZ4KDR\\\\)[[:space:]]+\\\\+= backend_lz4kdr\\\\.o'
+          checkre drivers/block/zram/Makefile 'zram-\$(CONFIG_ZRAM_BACKEND_LZ4KDR)[[:space:]]\+= backend_lz4kdr\.o'
           check drivers/block/zram/zcomp.c '#include "backend_lz4kdr.h"'
           check drivers/block/zram/zcomp.c '&backend_lz4kdr,'
           check lib/Kconfig 'config LZ4KDR_COMPRESS'
@@ -700,7 +703,7 @@ jobs:
                 fi
                 echo "该源返回内容异常(空文件或非 unified diff), 尝试下一个源"
               else
-                echo "该源不可用: $(tail -n 2 "$name.download.log" 2>/dev/null | tr '\\\\n' ' ')"
+                echo "该源不可用: $(tail -n 2 "$name.download.log" 2>/dev/null | tr '\n' ' ')"
               fi
             done
             rm -f "$name.tmp" "$name.download.log"
@@ -724,12 +727,12 @@ jobs:
           if grep -nE 'ANDROID_KABI|__kabi_reserved' "$PATCH_DIR/intfp_all.patch"; then
             echo "intfp 补丁触碰 KABI 保留区, 已中止"; exit 1
           fi
-          if grep -nE 'EXPORT_SYMBOL(_GPL)?\\\\(' "$PATCH_DIR/intfp_all.patch"; then
+          if grep -nE 'EXPORT_SYMBOL(_GPL)?\(' "$PATCH_DIR/intfp_all.patch"; then
             echo "intfp 补丁包含导出符号(该库应零导出), 已中止"; exit 1
           fi
           # 注意: 白名单全部命中时 grep -vE 无输出返回码为 1, 必须 || true 兜底, 否则 bash -e 下静默退出
           OUT_OF_SCOPE="$(grep -E '^diff --git ' "$PATCH_DIR/intfp_all.patch" \
-            | grep -vE ' b/(include/linux/intfp\\\\.h|lib/intfp/[^/]+|lib/Kconfig|lib/Makefile)$' || true)"
+            | grep -vE ' b/(include/linux/intfp\.h|lib/intfp/[^/]+|lib/Kconfig|lib/Makefile)$' || true)"
           if [ -n "$OUT_OF_SCOPE" ]; then
             echo "intfp 补丁改动了白名单以外的文件, 已中止:"; echo "$OUT_OF_SCOPE"; exit 1
           fi
@@ -738,7 +741,7 @@ jobs:
           # 四、名称冲突检查(应用前): intfp 的公共类型/宏名不得与本树既有代码重名, 命中即中止,
           #     避免内核编译期出现重复定义; 限定 include/ 与 lib/ 两处, 秒级完成。
           for sym in u32fp_radix u32fp_radix_type U32FP_RADIX_TYPE_COUNT INTFP_DECL_BITS intfp_fls32; do
-            hit="$(grep -rlE --include='\\.h' --include='\\.c' "\\\\b${sym}\\\\b" include lib 2>/dev/null | head -n 3 || true)"
+            hit="$(grep -rlE --include='*.h' --include='*.c' "\\b${sym}\\b" include lib 2>/dev/null | head -n 3 || true)"
             if [ -n "$hit" ]; then
               echo "intfp 名称冲突: ${sym} 已存在于以下文件, 已中止:"; echo "$hit"; exit 1
             fi
@@ -785,7 +788,7 @@ jobs:
           cat > /tmp/intfp_host/linux/types.h <<'EOF_TYPES'
           #ifndef _INTFP_HOST_STUB_TYPES_H
           #define _INTFP_HOST_STUB_TYPES_H
-          /\\ host stand-in for , used only by the intfp offline numeric self test \\/
+          /* host stand-in for , used only by the intfp offline numeric self test */
           #include 
           #include 
           typedef unsigned char u8;
@@ -796,7 +799,7 @@ jobs:
           typedef short s16;
           typedef int s32;
           typedef long long s64;
-          #endif /\\ _INTFP_HOST_STUB_TYPES_H \\/
+          #endif /* _INTFP_HOST_STUB_TYPES_H */
           EOF_TYPES
           gcc -std=gnu11 -O2 -Wall -Wextra -I/tmp/intfp_host -Iinclude \
             -o /tmp/intfp_host/intfp_selftest lib/intfp/intfp_selftest_host.c
@@ -862,7 +865,7 @@ jobs:
                 fi
                 echo "该源返回内容异常(空文件或非 unified diff), 尝试下一个源"
               else
-                echo "该源不可用: $(tail -n 2 "$name.download.log" 2>/dev/null | tr '\\\\n' ' ')"
+                echo "该源不可用: $(tail -n 2 "$name.download.log" 2>/dev/null | tr '\n' ' ')"
               fi
             done
             rm -f "$name.tmp" "$name.download.log"
@@ -886,12 +889,12 @@ jobs:
           if grep -nE 'ANDROID_KABI|__kabi_reserved' "$PATCH_DIR/isqrt_all.patch"; then
             echo "isqrt 补丁触碰 KABI 保留区, 已中止"; exit 1
           fi
-          if grep -nE 'EXPORT_SYMBOL(_GPL)?\\\\(' "$PATCH_DIR/isqrt_all.patch"; then
+          if grep -nE 'EXPORT_SYMBOL(_GPL)?\(' "$PATCH_DIR/isqrt_all.patch"; then
             echo "isqrt 补丁包含导出符号(该库应零导出), 已中止"; exit 1
           fi
           # 注意: 白名单全部命中时 grep -vE 无输出返回码为 1, 必须 || true 兜底, 否则 bash -e 下静默退出
           OUT_OF_SCOPE="$(grep -E '^diff --git ' "$PATCH_DIR/isqrt_all.patch" \
-            | grep -vE ' b/(include/linux/isqrt\\\\.h|lib/isqrt/[^/]+|lib/Kconfig|lib/Makefile)$' || true)"
+            | grep -vE ' b/(include/linux/isqrt\.h|lib/isqrt/[^/]+|lib/Kconfig|lib/Makefile)$' || true)"
           if [ -n "$OUT_OF_SCOPE" ]; then
             echo "isqrt 补丁改动了白名单以外的文件, 已中止:"; echo "$OUT_OF_SCOPE"; exit 1
           fi
@@ -900,7 +903,7 @@ jobs:
           # 四、名称冲突检查(应用前): isqrt 的公共类型/宏名不得与本树既有代码重名, 命中即中止,
           #     避免内核编译期出现重复定义; 限定 include/ 与 lib/ 两处, 秒级完成。
           for sym in isqrt8 isqrt16 isqrt32 isqrt64 _isqrt8_lut _isqrt16_delta_lut _isqrt_est_lut; do
-            hit="$(grep -rlE --include='\\.h' --include='\\.c' "\\\\b${sym}\\\\b" include lib 2>/dev/null | head -n 3 || true)"
+            hit="$(grep -rlE --include='*.h' --include='*.c' "\\b${sym}\\b" include lib 2>/dev/null | head -n 3 || true)"
             if [ -n "$hit" ]; then
               echo "isqrt 名称冲突: ${sym} 已存在于以下文件, 已中止:"; echo "$hit"; exit 1
             fi
@@ -947,7 +950,7 @@ jobs:
           cat > /tmp/isqrt_host/linux/types.h <<'EOF_TYPES'
           #ifndef _ISQRT_HOST_STUB_TYPES_H
           #define _ISQRT_HOST_STUB_TYPES_H
-          /\\ host stand-in for , used only by the isqrt offline numeric self test \\/
+          /* host stand-in for , used only by the isqrt offline numeric self test */
           #include 
           #include 
           typedef unsigned char u8;
@@ -958,7 +961,7 @@ jobs:
           typedef short s16;
           typedef int s32;
           typedef long long s64;
-          #endif /\\ _ISQRT_HOST_STUB_TYPES_H \\/
+          #endif /* _ISQRT_HOST_STUB_TYPES_H */
           EOF_TYPES
           gcc -std=gnu11 -O2 -Wall -Wextra -I/tmp/isqrt_host -Iinclude \
             -o /tmp/isqrt_host/isqrt_selftest lib/isqrt/isqrt_selftest_host.c
@@ -1030,11 +1033,11 @@ jobs:
           if grep -nE 'ANDROID_KABI|__kabi_reserved' "$PATCH_DIR/$PATCH_NAME"; then
             echo "int_sqrt 补丁触碰 KABI 保留区, 已中止"; exit 1
           fi
-          if grep -nE '^\\\\+.\\\*EXPORT_SYMBOL' "$PATCH_DIR/$PATCH_NAME"; then
+          if grep -nE '^\+.*EXPORT_SYMBOL' "$PATCH_DIR/$PATCH_NAME"; then
             echo "int_sqrt 补丁新增导出符号, 已中止"; exit 1
           fi
           OUT_OF_SCOPE="$(grep -E '^diff --git ' "$PATCH_DIR/$PATCH_NAME" \
-            | grep -vE ' b/lib/math/int_sqrt\\\\.c$' || true)"
+            | grep -vE ' b/lib/math/int_sqrt\.c$' || true)"
           if [ -n "$OUT_OF_SCOPE" ]; then
             echo "int_sqrt 补丁改动了白名单以外的文件, 已中止:"; echo "$OUT_OF_SCOPE"; exit 1
           fi
@@ -1115,7 +1118,7 @@ jobs:
               fi
               echo "该源返回空文件, 尝试下一个源"
             else
-              echo "该源不可用: $(tail -n 2 download_adios.log | tr '\\\\n' ' ')"
+              echo "该源不可用: $(tail -n 2 download_adios.log | tr '\n' ' ')"
             fi
           done
           rm -f adios.patch.tmp download_adios.log
@@ -1138,7 +1141,7 @@ jobs:
           if grep -nE 'EXPORT_SYMBOL|ANDROID_KABI|__kabi_reserved' adios.patch; then
             echo "ADIOS 补丁触碰 ABI 面(导出符号或 KABI 保留区), 已中止"; exit 1
           fi
-          OUT_OF_SCOPE="$(grep -E '^diff --git ' adios.patch | grep -vE ' b/block/adios\\\\.c$' || true)"
+          OUT_OF_SCOPE="$(grep -E '^diff --git ' adios.patch | grep -vE ' b/block/adios\.c$' || true)"
           if [ -n "$OUT_OF_SCOPE" ]; then
             echo "ADIOS 补丁改动了 block/adios.c 以外的文件, 已中止:"; echo "$OUT_OF_SCOPE"; exit 1
           fi
@@ -1216,7 +1219,7 @@ jobs:
                 fi
                 echo "该源返回内容异常(空文件或非 unified diff), 尝试下一个源"
               else
-                echo "该源不可用: $(tail -n 2 "$name.download.log" 2>/dev/null | tr '\\\\n' ' ')"
+                echo "该源不可用: $(tail -n 2 "$name.download.log" 2>/dev/null | tr '\n' ' ')"
               fi
             done
             rm -f "$name.tmp" "$name.download.log"
@@ -1250,7 +1253,7 @@ jobs:
           echo "CONFIG_BBG=y" >> ./common/arch/arm64/configs/gki_defconfig
           cd ./common
           curl -sSL https://github.com/cctv18/Baseband-guard/raw/master/setup.sh | bash
-          sed -i '/^config LSM$/,/^help$/{ /^[[:space:]]\\\*default/ { /baseband_guard/! s/selinux/selinux,baseband_guard/ } }' security/Kconfig
+          sed -i '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/selinux/selinux,baseband_guard/ } }' security/Kconfig
 
       - name: 集成 NoMount(按 GKI 方式内置编译)
         if: inputs.nomount_enable
@@ -1279,10 +1282,10 @@ jobs:
           wget -O $PATCH https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/$PATCH \
             || wget -O $PATCH https://github.com/EdMory/oplus_sm8850/raw/refs/heads/main/other_patch/$PATCH
           # KMI 保护审计：本补丁只改函数体，禁止新增导出符号、禁止改动 include/ 下的头文件
-          if grep -qE '^\\+.\*EXPORT_SYMBOL' $PATCH; then
+          if grep -qE '^\+.*EXPORT_SYMBOL' $PATCH; then
             echo "错误：$PATCH 新增了 EXPORT_SYMBOL，可能破坏 KMI，已中止"; exit 1
           fi
-          if grep -qE '^\\+\\+\\+ b/include/' $PATCH; then
+          if grep -qE '^\+\+\+ b/include/' $PATCH; then
             echo "错误：$PATCH 改动了 include/ 头文件，可能破坏 KMI，已中止"; exit 1
           fi
           # 零 fuzz 干跑：任何一个 hunk 无法精确落位就直接失败，避免半成品内核
@@ -1303,13 +1306,13 @@ jobs:
           if [[ -n "${{ github.event.inputs.kernel_suffix }}" ]]; then
             echo "当前内核版本后缀：${{ github.event.inputs.kernel_suffix }}"
             for f in ./common/scripts/setlocalversion; do
-              sed -i "\\\\$s|echo \\\\"\\\\\\\\\\\\$res\\\\"|echo \\\\"-${{ github.event.inputs.kernel_suffix }}\\\\"|" "$f"
+              sed -i "\$s|echo \"\$res\"|echo \"-${{ github.event.inputs.kernel_suffix }}\"|" "$f"
             done
             sudo sed -i 's/-4k/-${{ github.event.inputs.KERNEL_SUFFIX }}/g' ./common/arch/arm64/configs/gki_defconfig
           else
             echo "当前内核版本后缀：${{ env.KERNEL_NAME }}"
             for f in ./common/scripts/setlocalversion; do
-              sed -i "\\\\$s|echo \\\\"\\\\\\\\\\\\$res\\\\"|echo \\\\"-${{ env.KERNEL_NAME }}\\\\"|" "$f"
+              sed -i "\$s|echo \"\$res\"|echo \"-${{ env.KERNEL_NAME }}\"|" "$f"
             done
             sudo sed -i 's/-4k/-${{ env.KERNEL_NAME }}/g' ./common/arch/arm64/configs/gki_defconfig
           fi
@@ -1348,7 +1351,7 @@ jobs:
           cd kernel_workspace/common
           wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/lib/libfakestat.so
           wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/lib/libfaketimeMT.so
-          chmod 777 ./\\\*.so
+          chmod 777 ./*.so
           export FAKESTAT="2025-05-25 12:00:00"
           export FAKETIME="@2025-05-25 13:00:00"
           echo "FAKESTAT=$FAKESTAT" >> $GITHUB_ENV
@@ -1499,7 +1502,7 @@ jobs:
           else
             AK3_NAME=AnyKernel3_${KSU_TYPENAME}_${{ env.KSUVER }}_${{ env.KERNEL_VERSION }}_${{ env.KERNEL_NAME }}.zip
           fi
-          zip -r ../$AK3_NAME ./\\\*
+          zip -r ../$AK3_NAME ./*
           echo "ak3name=$AK3_NAME" >> $GITHUB_OUTPUT
           
           #为AK3添加注释（调试信息）
@@ -1548,7 +1551,7 @@ jobs:
       - name: 上传 ZIP 工件
         uses: actions/upload-artifact@v7
         with:
-          path: ${{ github.workspace }}/kernel_workspace/AnyKernel\\\*.zip
+          path: ${{ github.workspace }}/kernel_workspace/AnyKernel*.zip
           archive: false
 
   release:
@@ -1646,4 +1649,4 @@ jobs:
             --repo "${{ github.repository }}" \
             --title "${{ env.TAG_HEAD }}-${{ env.FULL_VERSION }}" \
             --notes-file release_notes.md \
-            release_zips/AnyKernel3_\\\*.zip
+            release_zips/AnyKernel3_*.zip

@@ -1406,7 +1406,7 @@ jobs:
           export LIBCLANG_PATH="$WORKDIR/kernel_workspace/clang19/lib"
           # 3. 配置KCFLAGS
           KCFLAGS+=" -no-canonical-prefixes"
-          KCFLAGS+=" -O2"
+          KCFLAGS+=" -O3"
           KCFLAGS+=" -pipe"
           KCFLAGS+=" -Wno-error"
           KCFLAGS+=" -fno-stack-protector"

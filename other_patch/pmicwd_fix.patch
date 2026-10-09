@@ -1,0 +1,35 @@
+From: Marvis <marvis@local>
+Subject: [PATCH] timekeeping: drop WARN_ON(timekeeping_suspended) in ktime_get()
+
+PMICWD (vendor PMIC watchdog) may call ktime_get() while timekeeping
+is suspended. The clock is frozen by design in that state, so the
+WARN_ON fires on every call, flooding dmesg (observed 7291 times on
+SM8850 with a self-built 6.12.69 GKI kernel).
+
+This change only removes the warning line inside ktime_get(). It does
+not touch the function signature, the exported symbol, or any KMI
+surface; the returned value (frozen clock) is unchanged.
+
+diff --git a/kernel/time/timekeeping.c b/kernel/time/timekeeping.c
+--- a/kernel/time/timekeeping.c
++++ b/kernel/time/timekeeping.c
+@@ -754,19 +754,18 @@ EXPORT_SYMBOL(ktime_get_real_ts64);
+ ktime_t ktime_get(void)
+ {
+ 	struct timekeeper *tk = &tk_core.timekeeper;
+ 	unsigned int seq;
+ 	ktime_t base;
+ 	u64 nsecs;
+ 
+-	WARN_ON(timekeeping_suspended);
+-
+ 	do {
+ 		seq = read_seqcount_begin(&tk_core.seq);
+ 		base = tk->tkr_mono.base;
+ 		nsecs = timekeeping_get_ns(&tk->tkr_mono);
+ 
+ 	} while (read_seqcount_retry(&tk_core.seq, seq));
+ 
+ 	return ktime_add_ns(base, nsecs);
+ }
+ EXPORT_SYMBOL_GPL(ktime_get);

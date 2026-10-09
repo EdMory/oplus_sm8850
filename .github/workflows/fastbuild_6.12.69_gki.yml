@@ -414,7 +414,7 @@ jobs:
 
           # 一、前置条件: 适配位置建立在树内已有的 LZ4KD 后端选项之后, mainline 树无 ZRAM_BACKEND_LZ4KD,
           #     若该段不存在则说明 lz4kd 未集成, 补丁会落错位置, 故直接中止。
-          grep -q 'config ZRAM_BACKEND_LZ4KD' drivers/block/zram/Kconfig \\\\
+          grep -q 'config ZRAM_BACKEND_LZ4KD' drivers/block/zram/Kconfig \
             || { echo "LZ4KDR 前置检查失败: 当前树未集成 LZ4KD(缺 ZRAM_BACKEND_LZ4KD 段), 补丁锚点不存在; 请同时开启 lz4kd_enable"; exit 1; }
 
           # 二、ABI 面静态审计:
@@ -424,7 +424,7 @@ jobs:
           if grep -nE 'ANDROID_KABI|__kabi_reserved' lz4kdr.patch; then
             echo "LZ4KDR 补丁触碰 KABI 保留区, 已中止"; exit 1
           fi
-          BAD_SYMS="$(grep -oE 'EXPORT_SYMBOL(_GPL)?\\\\([A-Za-z_][A-Za-z0-9_]\\\*\\\\);' lz4kdr.patch \\\\
+          BAD_SYMS="$(grep -oE 'EXPORT_SYMBOL(_GPL)?\\\\([A-Za-z_][A-Za-z0-9_]\\\*\\\\);' lz4kdr.patch \
             | sed -E 's/.\\\\\\(([A-Za-z_][A-Za-z0-9_]\\)\\\\);/\\\\1/' | sort -u | grep -vE '^lz4kdr_' || true)"
           if [ -n "" ]; then
             echo "LZ4KDR 补丁导出了非 lz4kdr_\\\* 前缀的符号, 已中止:"; echo ""; exit 1
@@ -457,7 +457,7 @@ jobs:
           patch -p1 --no-backup-if-mismatch < lz4kdr.patch
 
           # 四、ABI 复核: 结构体布局相关文件必须与打补丁前逐字节一致
-          [ "$(md5sum include/linux/sched.h kernel/sched/sched.h | md5sum)" = "$ABI_HASHES" ] \\\\
+          [ "$(md5sum include/linux/sched.h kernel/sched/sched.h | md5sum)" = "$ABI_HASHES" ] \
             || { echo "LZ4KDR ABI 校验失败: 结构体布局相关文件被改动"; exit 1; }
 
           # 五、集成结果校验: 后端选项/默认压缩项/后端注册表/独立实现目录必须齐全
@@ -474,7 +474,7 @@ jobs:
           check include/linux/lz4kdr.h 'lz4kdr_encode_state_bytes_min'
 
           # 六、显式写入开关: 该后端在 CONFIG_ZRAM_BACKEND_LZ4KDR 下编译生效(与 LZ4KD 后端并存)
-          grep -q '^CONFIG_ZRAM_BACKEND_LZ4KDR=' arch/arm64/configs/gki_defconfig \\\\
+          grep -q '^CONFIG_ZRAM_BACKEND_LZ4KDR=' arch/arm64/configs/gki_defconfig \
             || echo "CONFIG_ZRAM_BACKEND_LZ4KDR=y" >> arch/arm64/configs/gki_defconfig
           echo "提示: LZ4KDR 与 LZ4KD 同为 zram 可选后端, 运行时通过 /sys/block/zram0/compressor 选择具体算法"
           echo "LZ4KDR 集成完成"
@@ -731,7 +731,7 @@ jobs:
             echo "intfp 补丁包含导出符号(该库应零导出), 已中止"; exit 1
           fi
           # 注意: 白名单全部命中时 grep -vE 无输出返回码为 1, 必须 || true 兜底, 否则 bash -e 下静默退出
-          OUT_OF_SCOPE="$(grep -E '^diff --git ' "$PATCH_DIR/intfp_all.patch" \\\\
+          OUT_OF_SCOPE="$(grep -E '^diff --git ' "$PATCH_DIR/intfp_all.patch" \
             | grep -vE ' b/(include/linux/intfp\\\\.h|lib/intfp/[^/]+|lib/Kconfig|lib/Makefile)$' || true)"
           if [ -n "$OUT_OF_SCOPE" ]; then
             echo "intfp 补丁改动了白名单以外的文件, 已中止:"; echo "$OUT_OF_SCOPE"; exit 1
@@ -769,7 +769,7 @@ jobs:
           done
 
           # 六、ABI 复核: 结构体布局相关文件必须与打补丁前逐字节一致
-          [ "$(md5sum include/linux/sched.h kernel/sched/sched.h | md5sum)" = "$ABI_HASHES" ] \\\\
+          [ "$(md5sum include/linux/sched.h kernel/sched/sched.h | md5sum)" = "$ABI_HASHES" ] \
             || { echo "intfp ABI 校验失败: 结构体布局相关文件被改动"; exit 1; }
 
           # 七、集成结果校验: 头文件 / Kconfig 开关 / 构建接入点 / 自检单元必须齐全
@@ -801,13 +801,13 @@ jobs:
           typedef long long s64;
           #endif /\\ _INTFP_HOST_STUB_TYPES_H \\/
           EOF_TYPES
-          gcc -std=gnu11 -O2 -Wall -Wextra -I/tmp/intfp_host -Iinclude \\\\
+          gcc -std=gnu11 -O2 -Wall -Wextra -I/tmp/intfp_host -Iinclude \
             -o /tmp/intfp_host/intfp_selftest lib/intfp/intfp_selftest_host.c
           /tmp/intfp_host/intfp_selftest
 
           # 九、显式写入开关: INTFP=y(库本身零开销: 全部 static inline, 未被使用即被编译器丢弃);
           #     KUnit 用例保持关闭(依赖 CONFIG_KUNIT, 生产内核无必要)
-          grep -q '^CONFIG_INTFP=' arch/arm64/configs/gki_defconfig \\\\
+          grep -q '^CONFIG_INTFP=' arch/arm64/configs/gki_defconfig \
             || echo "CONFIG_INTFP=y" >> arch/arm64/configs/gki_defconfig
           echo "提示: 内核代码 include  即可按需使用; 启动后可用 dmesg | grep intfp 查看内置自检结果"
           echo "intfp 集成完成(零 fuzz 应用 + 零导出符号 + KABI 面未触碰)！"
@@ -893,7 +893,7 @@ jobs:
             echo "isqrt 补丁包含导出符号(该库应零导出), 已中止"; exit 1
           fi
           # 注意: 白名单全部命中时 grep -vE 无输出返回码为 1, 必须 || true 兜底, 否则 bash -e 下静默退出
-          OUT_OF_SCOPE="$(grep -E '^diff --git ' "$PATCH_DIR/isqrt_all.patch" \\\\
+          OUT_OF_SCOPE="$(grep -E '^diff --git ' "$PATCH_DIR/isqrt_all.patch" \
             | grep -vE ' b/(include/linux/isqrt\\\\.h|lib/isqrt/[^/]+|lib/Kconfig|lib/Makefile)$' || true)"
           if [ -n "$OUT_OF_SCOPE" ]; then
             echo "isqrt 补丁改动了白名单以外的文件, 已中止:"; echo "$OUT_OF_SCOPE"; exit 1
@@ -931,7 +931,7 @@ jobs:
           done
 
           # 六、ABI 复核: 结构体布局相关文件必须与打补丁前逐字节一致
-          [ "$(md5sum include/linux/sched.h kernel/sched/sched.h | md5sum)" = "$ABI_HASHES" ] \\\\
+          [ "$(md5sum include/linux/sched.h kernel/sched/sched.h | md5sum)" = "$ABI_HASHES" ] \
             || { echo "isqrt ABI 校验失败: 结构体布局相关文件被改动"; exit 1; }
 
           # 七、集成结果校验: 头文件 / Kconfig 开关 / 构建接入点 / 自检单元必须齐全
@@ -963,13 +963,13 @@ jobs:
           typedef long long s64;
           #endif /\\ _ISQRT_HOST_STUB_TYPES_H \\/
           EOF_TYPES
-          gcc -std=gnu11 -O2 -Wall -Wextra -I/tmp/isqrt_host -Iinclude \\\\
+          gcc -std=gnu11 -O2 -Wall -Wextra -I/tmp/isqrt_host -Iinclude \
             -o /tmp/isqrt_host/isqrt_selftest lib/isqrt/isqrt_selftest_host.c
           /tmp/isqrt_host/isqrt_selftest
 
           # 九、显式写入开关: ISQRT=y(库本身零开销: 全部 static inline, 未被使用即被编译器丢弃);
           #     KUnit 用例保持关闭(依赖 CONFIG_KUNIT, 生产内核无必要)
-          grep -q '^CONFIG_ISQRT=' arch/arm64/configs/gki_defconfig \\\\
+          grep -q '^CONFIG_ISQRT=' arch/arm64/configs/gki_defconfig \
             || echo "CONFIG_ISQRT=y" >> arch/arm64/configs/gki_defconfig
           echo "提示: 内核代码 include  即可按需使用; 启动后可用 dmesg | grep isqrt 查看内置自检结果"
           echo "ISQRT 集成完成"
@@ -1008,9 +1008,9 @@ jobs:
           mkdir -p "$PATCH_DIR"
           rm -f "$PATCH_DIR/$PATCH_NAME"
           ok=0
-          for u in \\\\
-            "https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/$PATCH_NAME" \\\\
-            "https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$GITHUB_REF_NAME/other_patch/$PATCH_NAME" \\\\
+          for u in \
+            "https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/$PATCH_NAME" \
+            "https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$GITHUB_REF_NAME/other_patch/$PATCH_NAME" \
             "https://cdn.jsdelivr.net/gh/$GITHUB_REPOSITORY@$GITHUB_REF_NAME/other_patch/$PATCH_NAME"
           do
             echo "尝试下载 int_sqrt 补丁: $u"
@@ -1036,7 +1036,7 @@ jobs:
           if grep -nE '^\\\\+.\\\*EXPORT_SYMBOL' "$PATCH_DIR/$PATCH_NAME"; then
             echo "int_sqrt 补丁新增导出符号, 已中止"; exit 1
           fi
-          OUT_OF_SCOPE="$(grep -E '^diff --git ' "$PATCH_DIR/$PATCH_NAME" \\\\
+          OUT_OF_SCOPE="$(grep -E '^diff --git ' "$PATCH_DIR/$PATCH_NAME" \
             | grep -vE ' b/lib/math/int_sqrt\\\\.c$' || true)"
           if [ -n "$OUT_OF_SCOPE" ]; then
             echo "int_sqrt 补丁改动了白名单以外的文件, 已中止:"; echo "$OUT_OF_SCOPE"; exit 1
@@ -1060,7 +1060,7 @@ jobs:
           patch -p1 -F 0 --no-backup-if-mismatch < "$PATCH_DIR/$PATCH_NAME"
 
           # 五、ABI 复核: 结构体布局相关文件必须与打补丁前逐字节一致
-          [ "$(md5sum include/linux/sched.h kernel/sched/sched.h | md5sum)" = "$ABI_HASHES" ] \\\\
+          [ "$(md5sum include/linux/sched.h kernel/sched/sched.h | md5sum)" = "$ABI_HASHES" ] \
             || { echo "int_sqrt ABI 校验失败: 结构体布局相关文件被改动"; exit 1; }
 
           # 六、集成结果校验: Oryon 标记 / helper / 两张 LUT / 分发逻辑必须齐全
@@ -1126,13 +1126,13 @@ jobs:
 
           # 一、前置条件: 新版实现必须挂在既有接入点上, 缺任意一处都会"补丁应用成功但调度器不可选/不生效",
           #     故直接中止, 宁可失败也不假成功。
-          grep -q 'config MQ_IOSCHED_ADIOS' block/Kconfig.iosched \\\\
+          grep -q 'config MQ_IOSCHED_ADIOS' block/Kconfig.iosched \
             || { echo "ADIOS 前置检查失败: block/Kconfig.iosched 缺少 config MQ_IOSCHED_ADIOS"; exit 1; }
-          grep -q 'config MQ_IOSCHED_DEFAULT_ADIOS' block/Kconfig.iosched \\\\
+          grep -q 'config MQ_IOSCHED_DEFAULT_ADIOS' block/Kconfig.iosched \
             || { echo "ADIOS 前置检查失败: block/Kconfig.iosched 缺少 config MQ_IOSCHED_DEFAULT_ADIOS"; exit 1; }
-          grep -q 'obj-$(CONFIG_MQ_IOSCHED_ADIOS)' block/Makefile \\\\
+          grep -q 'obj-$(CONFIG_MQ_IOSCHED_ADIOS)' block/Makefile \
             || { echo "ADIOS 前置检查失败: block/Makefile 缺少 adios.o 编译规则"; exit 1; }
-          grep -q 'CONFIG_MQ_IOSCHED_DEFAULT_ADIOS' block/elevator.c \\\\
+          grep -q 'CONFIG_MQ_IOSCHED_DEFAULT_ADIOS' block/elevator.c \
             || { echo "ADIOS 前置检查失败: block/elevator.c 缺少默认调度器钩子"; exit 1; }
           OLD_VER="$(grep -oE '#define ADIOS_VERSION "[0-9.]+"' block/adios.c | head -n1 || true)"
           echo "旧版实现: ${OLD_VER:-未检出} -> 目标: ADIOS 3.3.0"
@@ -1177,9 +1177,9 @@ jobs:
           fi
 
           # 五、显式写入开关: 调度器内置编译(=y)并设为 blk-mq 默认调度器
-          grep -q '^CONFIG_MQ_IOSCHED_ADIOS=' arch/arm64/configs/gki_defconfig \\\\
+          grep -q '^CONFIG_MQ_IOSCHED_ADIOS=' arch/arm64/configs/gki_defconfig \
             || echo "CONFIG_MQ_IOSCHED_ADIOS=y" >> arch/arm64/configs/gki_defconfig
-          grep -q '^CONFIG_MQ_IOSCHED_DEFAULT_ADIOS=' arch/arm64/configs/gki_defconfig \\\\
+          grep -q '^CONFIG_MQ_IOSCHED_DEFAULT_ADIOS=' arch/arm64/configs/gki_defconfig \
             || echo "CONFIG_MQ_IOSCHED_DEFAULT_ADIOS=y" >> arch/arm64/configs/gki_defconfig
           echo "提示: 运行时可用 /sys/block//queue/scheduler 查看/切换 adios, 并按需调节 ADIOS 的 sysfs 参数"
           echo "ADIOS 3.3.0 集成完成(零 fuzz 应用 + ABI 面未触碰)！"
@@ -1230,9 +1230,9 @@ jobs:
           patch -p1 -F 0 --no-backup-if-mismatch < "$BORE_PATCH"
           
           # 七、显式写入开关: SCHED_BORE 默认 y(Kconfig), MIN_BASE_SLICE_NS 默认 2000000, 显式写入保证 defconfig 幂等
-          grep -q '^CONFIG_SCHED_BORE=' arch/arm64/configs/gki_defconfig \\\\
+          grep -q '^CONFIG_SCHED_BORE=' arch/arm64/configs/gki_defconfig \
             || echo "CONFIG_SCHED_BORE=y" >> arch/arm64/configs/gki_defconfig
-          grep -q '^CONFIG_MIN_BASE_SLICE_NS=' arch/arm64/configs/gki_defconfig \\\\
+          grep -q '^CONFIG_MIN_BASE_SLICE_NS=' arch/arm64/configs/gki_defconfig \
             || echo "CONFIG_MIN_BASE_SLICE_NS=2000000" >> arch/arm64/configs/gki_defconfig
           echo "提示: BORE 默认 base_slice 由 HZ 与 MIN_BASE_SLICE_NS 自动计算; 运行时可用 /proc/sys/kernel/sched_base_slice 查看, dmesg 可查 BORE 自检"
           echo "BORE 集成完成"
@@ -1279,7 +1279,7 @@ jobs:
           echo "正在安装性能优化补丁集…"
           cd kernel_workspace/common
           PATCH=sm8750-perf-core-6.12.patch
-          wget -O $PATCH https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/$PATCH \\
+          wget -O $PATCH https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/$PATCH \
             || wget -O $PATCH https://github.com/EdMory/oplus_sm8850/raw/refs/heads/main/other_patch/$PATCH
           # KMI 保护审计：本补丁只改函数体，禁止新增导出符号、禁止改动 include/ 下的头文件
           if grep -qE '^\\+.\*EXPORT_SYMBOL' $PATCH; then
@@ -1645,8 +1645,8 @@ jobs:
           #### ※※※刷写内核有风险，为防止出现意外导致手机变砖，在刷入内核前请务必用KernelFlasher等软件备份boot等关键启动分区!※※※
           EOF
 
-          gh release create "${{ env.TAG_HEAD }}-${{ env.TIME }}" \\\\
-            --repo "${{ github.repository }}" \\\\
-            --title "${{ env.TAG_HEAD }}-${{ env.FULL_VERSION }}" \\\\
-            --notes-file release_notes.md \\\\
+          gh release create "${{ env.TAG_HEAD }}-${{ env.TIME }}" \
+            --repo "${{ github.repository }}" \
+            --title "${{ env.TAG_HEAD }}-${{ env.FULL_VERSION }}" \
+            --notes-file release_notes.md \
             release_zips/AnyKernel3_\\\*.zip

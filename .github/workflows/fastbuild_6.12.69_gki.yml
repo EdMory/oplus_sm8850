@@ -106,7 +106,7 @@ on:
         required: true
         type: boolean
         default: 'true'
-      perf_enable:
+      perf_patch_enable:
         description: '是否安装性能优化补丁集'
         required: true
         type: boolean
@@ -1274,7 +1274,7 @@ jobs:
           echo "NoMount 集成完成！"
 
       - name: 应用性能优化补丁集
-        if: inputs.perf_enable
+        if: inputs.perf_patch_enable
         run: |
           echo "正在安装性能优化补丁集…"
           cd kernel_workspace/common
@@ -1538,7 +1538,7 @@ jobs:
           echo "ISQRT: ${{ github.event.inputs.isqrt_enable }}" >> ./ak3.log
           echo "ADIOS: ${{ github.event.inputs.adios_enable }}" >> ./ak3.log
           echo "BORE: ${{ github.event.inputs.bore_enable }}" >> ./ak3.log
-          echo "性能优化补丁: ${{ github.event.inputs.perf_enable }}" >> ./ak3.log
+          echo "性能优化补丁: ${{ github.event.inputs.perf_patch_enable }}" >> ./ak3.log
           zip -z ../$AK3_NAME < ./ak3.log
 
       - name: 上传 Ccache 调试日志
@@ -1628,7 +1628,7 @@ jobs:
           - ISQRT支持：${{ github.event.inputs.isqrt_enable }}
           - ADIOS IO调度器支持：${{ github.event.inputs.adios_enable }}
           - BORE 调度器支持：${{ github.event.inputs.bore_enable }}
-          - 性能优化补丁：${{ github.event.inputs.perf_enable }}
+          - 性能优化补丁：${{ github.event.inputs.perf_patch_enable }}
           - BakaSU管理器下载：BakaSU_CI
           
           ### ⏫️ 更新内容：

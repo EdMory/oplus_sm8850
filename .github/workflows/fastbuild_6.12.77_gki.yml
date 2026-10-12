@@ -96,11 +96,6 @@ on:
         required: true
         type: boolean
         default: 'true'
-      bore_enable:
-        description: '是否安装 BORE 调度器'
-        required: true
-        type: boolean
-        default: 'true'
       perf_patch_enable:
         description: '是否安装性能优化补丁集'
         required: true
@@ -1072,59 +1067,6 @@ jobs:
 
           echo "提示: int_sqrt()/int_sqrt64() 现由 Oryon 优化实现接管, 语义不变(floor(sqrt)), 依赖方无需改动"
           echo "Oryon int_sqrt 集成完成"
-
-      - name: 集成 BORE 调度器
-        if: inputs.bore_enable
-        run: |
-          echo "正在集成 BORE(Burst-Oriented Response Enhancer; 基于 firelzrd/bore-scheduler 6.12.37 原版补丁, 针对本 6.12.69 oplus 树逐 hunk 重建: bore_ctx 成员追加到 task_struct 末尾, 不挪动任何既有成员、不触碰 ANDROID_KABI_RESERVE, KABI 面安全)…"
-          # 任何命令失败时打印出错行号: 避免 set -e 静默退出后失败点无法定位
-          trap 'echo "BORE 集成步骤在脚本第 $LINENO 行失败(退出码 $?)" >&2' ERR
-          cd kernel_workspace/common
-
-          # 下载补丁(仓库 other_patch 三源回退)
-          fetch() { # $1=url $2=输出文件 $3=日志文件
-            if command -v curl >/dev/null 2>&1; then
-              curl -fSL --retry 3 --retry-delay 2 --connect-timeout 20 -o "$2" "$1" 2> "$3"
-            else
-              wget -O "$2" --tries=3 --timeout=20 "$1" 2> "$3"
-            fi
-          }
-          get_patch() { # $1=补丁文件名(位于仓库 other_patch/ 目录)
-            local name="$1" u
-            local urls=(
-              "https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/$name"
-              "https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$GITHUB_REF_NAME/other_patch/$name"
-              "https://cdn.jsdelivr.net/gh/$GITHUB_REPOSITORY@$GITHUB_REF_NAME/other_patch/$name"
-            )
-            rm -f "$name"
-            for u in "${urls[@]}"; do
-              echo "尝试下载 BORE 补丁 $name: $u"
-              if fetch "$u" "$name.tmp" "$name.download.log"; then
-                if [ -s "$name.tmp" ] && grep -q '^diff --git ' "$name.tmp"; then
-                  mv "$name.tmp" "$name"
-                  echo "下载成功: $name ($(wc -c < "$name") 字节)"
-                  rm -f "$name.download.log"
-                  return 0
-                fi
-                echo "该源返回内容异常(空文件或非 unified diff), 尝试下一个源"
-              else
-                echo "该源不可用: $(tail -n 2 "$name.download.log" 2>/dev/null | tr '\n' ' ')"
-              fi
-            done
-            rm -f "$name.tmp" "$name.download.log"
-            return 1
-          }
-          BORE_PATCH=bore-6.12.69-kabi-safe.patch
-          get_patch "$BORE_PATCH" || { echo "BORE 补丁下载失败: 仓库 other_patch/$BORE_PATCH 缺失或不可达(见上方诊断)"; exit 1; }
-          patch -p1 -F 0 --no-backup-if-mismatch < "$BORE_PATCH"
-          
-          # 七、显式写入开关: SCHED_BORE 默认 y(Kconfig), MIN_BASE_SLICE_NS 默认 2000000, 显式写入保证 defconfig 幂等
-          grep -q '^CONFIG_SCHED_BORE=' arch/arm64/configs/gki_defconfig \
-            || echo "CONFIG_SCHED_BORE=y" >> arch/arm64/configs/gki_defconfig
-          grep -q '^CONFIG_MIN_BASE_SLICE_NS=' arch/arm64/configs/gki_defconfig \
-            || echo "CONFIG_MIN_BASE_SLICE_NS=2000000" >> arch/arm64/configs/gki_defconfig
-          echo "提示: BORE 默认 base_slice 由 HZ 与 MIN_BASE_SLICE_NS 自动计算; 运行时可用 /proc/sys/kernel/sched_base_slice 查看, dmesg 可查 BORE 自检"
-          echo "BORE 集成完成"
 
       - name: 启用Re-Kernel支持
         if: inputs.rekernel_enable

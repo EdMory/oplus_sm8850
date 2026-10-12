@@ -1229,6 +1229,7 @@ jobs:
           KCFLAGS+=" -fdebug-prefix-map=$ROOT_REAL_PATH=."
           KCFLAGS+=" -fmacro-prefix-map=$ROOT_REAL_PATH=."
           KCFLAGS+=" -ffile-prefix-map=$ROOT_REAL_PATH=."
+          KCFLAGS+=" -Wno-unused-command-line-argument"
           # 2. 声明Rust等工具（此处若不进行声明，内核编译前的Rust环境预检测脚本scripts/rust_is_available.sh会检测失败，导致内核无法正常开启Rust代码编译）
           export RUSTC="rustc"
           export BINDGEN="bindgen"

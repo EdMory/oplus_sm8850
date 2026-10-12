@@ -61,11 +61,6 @@ on:
           - 'false'
           - 'standard'
           - 'extend'
-      rekernel_enable:
-        description: '是否开启 Re-Kernel 支持(与Freezer/NoActive等LSP模块配合, 提升应用冻结能力)'
-        required: true
-        type: boolean
-        default: 'true'
       baseband_guard:
         description: '是否开启 BBG (内核级分区保护，有效防止格机)'
         required: true
@@ -555,7 +550,6 @@ jobs:
           echo "CONFIG_TCP_CONG_NV=y" >> arch/arm64/configs/gki_defconfig
           echo "CONFIG_TCP_CONG_WESTWOOD=y" >> arch/arm64/configs/gki_defconfig
           echo "CONFIG_TCP_CONG_HTCP=y" >> arch/arm64/configs/gki_defconfig
-          echo "CONFIG_TCP_CONG_BRUTAL=y" >> arch/arm64/configs/gki_defconfig
       
       - name: 启用网络功能增强优化配置
         if: inputs.better_net
@@ -1067,15 +1061,7 @@ jobs:
 
           echo "提示: int_sqrt()/int_sqrt64() 现由 Oryon 优化实现接管, 语义不变(floor(sqrt)), 依赖方无需改动"
           echo "Oryon int_sqrt 集成完成"
-
-      - name: 启用Re-Kernel支持
-        if: inputs.rekernel_enable
-        run: |
-          echo "正在启用Re-Kernel支持(用于与Freezer,NoActive等软件配合使用,提升冻结后台能力)…"
-          cd kernel_workspace
-          echo "CONFIG_REKERNEL=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_REKERNEL_NETWORK=y" >> ./common/arch/arm64/configs/gki_defconfig
-
+          
       - name: 启用内核级基带保护
         if: inputs.baseband_guard
         run: |

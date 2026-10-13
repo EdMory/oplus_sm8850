@@ -1,0 +1,2180 @@
+﻿From: OnePlus SM8850 GKI 6.12.69 backport batch
+Subject: [PATCH 0/25] Backport of 25 apply-conflict candidates to 6.12.69
+
+本文件包含 6.12.69->6.12.92 cherry-pick 候选清单中 25 条 apply 冲突提交的
+backport 结果：
+
+  - 21 条已逐条手工 backport 到 6.12.69 基线并通过 git 提交（见下）
+  - 4 条判定不可移植，已排除并说明原因（见文件末尾 NOT-BACKPORTED 段）
+
+适用基线: cctv18/android_gki_kernel_common android16-6.12-2026-03
+          (SUBLEVEL=69, commit 58ee6774)
+参考源:   EdMory/android_kernel_common_sm8850 main (6.12.92 线)
+
+From be295dd8074977eeb59ac35568cdbe893f278e18 Mon Sep 17 00:00:00 2001
+From: Zhan Xusheng <zhanxusheng@xiaomi.com>
+Date: Fri, 1 May 2026 12:40:06 +0200
+Subject: [PATCH 01/21] UPSTREAM: sched/fair: Fix overflow in
+ vruntime_eligible()
+
+Zhan Xusheng reported running into sporadic a s64 mult overflow in
+vruntime_eligible().
+
+When constructing a worst case scenario with cgroups, an entity of
+weight 2 (per calc_group_shares()) with vlag bounded by
+(slice+TICK_NSEC)*NICE_0_LOAD (~44 bits) multiplied by load
+(100*NICE_0_LOAD) overflows s64.
+
+Use __int128 multiplication on 64-bit architectures (arm64's smulh
+instruction) and __builtin_mul_overflow() as fallback for archs
+without __int128 support.
+
+[peterz: Changelog and __int128 bits]
+Fixes: 556146ce5e94 ("sched/fair: Avoid overflow in enqueue_entity()")
+Reported-by: Zhan Xusheng <zhanxusheng@xiaomi.com>
+Closes: https://patch.msgid.link/20260415145742.10359-1-zhanxusheng@xiaomi.com
+Signed-off-by: Zhan Xusheng <zhanxusheng@xiaomi.com>
+Signed-off-by: Peter Zijlstra (Intel) <peterz@infradead.org>
+Link: https://patch.msgid.link/20260505103155.GN3102924@noisy.programming.kicks-ass.net
+(cherry picked from commit b6eee96843e8d088200f01b035da98e72067c5fe)
+Bug: 516928558
+Bug: 534626370
+Change-Id: I85252f3d39fff38b74b12cea7834e324f1cf244d
+Signed-off-by: jingyiming <jingyiming@xiaomi.corp-partner.google.com>
+(cherry picked from commit 6599be6df4d0ded3711d82c44dac49aacf90d40d)
+---
+ kernel/sched/fair.c | 39 ++++++++++++++++++++++++++++++++++-----
+ 1 file changed, 34 insertions(+), 5 deletions(-)
+
+diff --git a/kernel/sched/fair.c b/kernel/sched/fair.c
+index 36677c19c594..a9e4ce2ed07c 100644
+--- a/kernel/sched/fair.c
++++ b/kernel/sched/fair.c
+@@ -744,11 +744,11 @@ static void update_entity_lag(struct cfs_rq *cfs_rq, struct sched_entity *se)
+  *
+  * lag_i >= 0 -> V >= v_i
+  *
+- *     \Sum (v_i - v)*w_i
+- * V = ------------------ + v
++ *     \Sum (v_i - v0)*w_i
++ * V = ------------------- + v0
+  *          \Sum w_i
+  *
+- * lag_i >= 0 -> \Sum (v_i - v)*w_i >= (v_i - v)*(\Sum w_i)
++ * lag_i >= 0 -> \Sum (v_i - v0)*w_i >= (v_i - v0)*(\Sum w_i)
+  *
+  * Note: using 'avg_vruntime() > se->vruntime' is inaccurate due
+  *       to the loss in precision caused by the division.
+@@ -756,7 +756,7 @@ static void update_entity_lag(struct cfs_rq *cfs_rq, struct sched_entity *se)
+ static int vruntime_eligible(struct cfs_rq *cfs_rq, u64 vruntime)
+ {
+ 	struct sched_entity *curr = cfs_rq->curr;
+-	s64 avg = cfs_rq->avg_vruntime;
++	s64 key, avg = cfs_rq->avg_vruntime;
+ 	long load = cfs_rq->avg_load;
+ 
+ 	if (curr && curr->on_rq) {
+@@ -766,7 +766,36 @@ static int vruntime_eligible(struct cfs_rq *cfs_rq, u64 vruntime)
+ 		load += weight;
+ 	}
+ 
+-	return avg >= (s64)(vruntime - cfs_rq->min_vruntime) * load;
++	key = (s64)(vruntime - cfs_rq->min_vruntime);
++
++	/*
++	 * The worst case term for @key includes 'NSEC_TICK * NICE_0_LOAD'
++	 * and @load obviously includes NICE_0_LOAD. NSEC_TICK is around 24
++	 * bits, while NICE_0_LOAD is 20 on 64bit and 10 otherwise.
++	 *
++	 * This gives that on 64bit the product will be at least 64bit which
++	 * overflows s64, while on 32bit it will only be 44bits and should fit
++	 * comfortably.
++	 */
++#ifdef CONFIG_64BIT
++#ifdef CONFIG_ARCH_SUPPORTS_INT128
++	/* This often results in simpler code than __builtin_mul_overflow(). */
++	return avg >= (__int128)key * load;
++#else
++	s64 rhs;
++	/*
++	 * On overflow, the sign of key tells us the correct answer: a large
++	 * positive key means vruntime >> V, so not eligible; a large negative
++	 * key means vruntime << V, so eligible.
++	 */
++	if (check_mul_overflow(key, load, &rhs))
++		return key <= 0;
++
++	return avg >= rhs;
++#endif
++#else /* 32bit */
++	return avg >= key * load;
++#endif
+ }
+ 
+ int entity_eligible(struct cfs_rq *cfs_rq, struct sched_entity *se)
+-- 
+2.55.0.windows.3
+
+
+
+
+From c6f7e754b088f297dafc7d8eb3df4d209aa84c6c Mon Sep 17 00:00:00 2001
+From: Peter Zijlstra <peterz@infradead.org>
+Date: Mon, 29 Dec 2025 15:23:50 -0500
+Subject: [PATCH 02/21] BACKPORT: sched/eevdf: Fix min_vruntime vs avg_vruntime
+
+[ Upstream commit 79f3f9bedd149ea438aaeb0fb6a083637affe205 ]
+
+Basically, from the constraint that the sum of lag is zero, you can
+infer that the 0-lag point is the weighted average of the individual
+vruntime, which is what we're trying to compute:
+
+        \Sum w_i * v_i
+  avg = --------------
+           \Sum w_i
+
+Now, since vruntime takes the whole u64 (worse, it wraps), this
+multiplication term in the numerator is not something we can compute;
+instead we do the min_vruntime (v0 henceforth) thing like:
+
+  v_i = (v_i - v0) + v0
+
+This does two things:
+ - it keeps the key: (v_i - v0) 'small';
+ - it creates a relative 0-point in the modular space.
+
+If you do that subtitution and work it all out, you end up with:
+
+        \Sum w_i * (v_i - v0)
+  avg = --------------------- + v0
+              \Sum w_i
+
+Since you cannot very well track a ratio like that (and not suffer
+terrible numerical problems) we simpy track the numerator and
+denominator individually and only perform the division when strictly
+needed.
+
+Notably, the numerator lives in cfs_rq->avg_vruntime and the denominator
+lives in cfs_rq->avg_load.
+
+The one extra 'funny' is that these numbers track the entities in the
+tree, and current is typically outside of the tree, so avg_vruntime()
+adds current when needed before doing the division.
+
+(vruntime_eligible() elides the division by cross-wise multiplication)
+
+Anyway, as mentioned above, we currently use the CFS era min_vruntime
+for this purpose. However, this thing can only move forward, while the
+above avg can in fact move backward (when a non-eligible task leaves,
+the average becomes smaller), this can cause trouble when through
+happenstance (or construction) these values drift far enough apart to
+wreck the game.
+
+Replace cfs_rq::min_vruntime with cfs_rq::zero_vruntime which is kept
+near/at avg_vruntime, following its motion.
+
+The down-side is that this requires computing the avg more often.
+
+Fixes: 147f3efaa241 ("sched/fair: Implement an EEVDF-like scheduling policy")
+Reported-by: Zicheng Qu <quzicheng@huawei.com>
+Signed-off-by: Peter Zijlstra (Intel) <peterz@infradead.org>
+Link: https://patch.msgid.link/20251106111741.GC4068168@noisy.programming.kicks-ass.net
+Cc: stable@vger.kernel.org
+[ Adjust context in comments + init_cfs_rq ]
+Signed-off-by: Sasha Levin <sashal@kernel.org>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+(cherry picked from commit bddd95054e33c23caf28789d18244339470a6876)
+[jstultz: Reapplied as change was reverted in commit 084bdae43fab as
+ it had KABI impact. Only modified to preserve the old structure element
+ name via a union.]
+Signed-off-by: John Stultz <jstultz@google.com>
+Bug: 525699809
+Change-Id: I926f9d7acd47e8b98ccc5307414c9f8df30a83a7
+(cherry picked from commit 1bdb85e550ff3afbb5c6a957865102bc88594c68)
+---
+ kernel/sched/debug.c |  8 ++++----
+ kernel/sched/sched.h | 12 ++++++++++--
+ 2 files changed, 14 insertions(+), 6 deletions(-)
+
+diff --git a/kernel/sched/debug.c b/kernel/sched/debug.c
+index 9995b3c3dd14..5f5cbea54909 100644
+--- a/kernel/sched/debug.c
++++ b/kernel/sched/debug.c
+@@ -804,7 +804,7 @@ static void print_rq(struct seq_file *m, struct rq *rq, int rq_cpu)
+ 
+ void print_cfs_rq(struct seq_file *m, int cpu, struct cfs_rq *cfs_rq)
+ {
+-	s64 left_vruntime = -1, min_vruntime, right_vruntime = -1, left_deadline = -1, spread;
++	s64 left_vruntime = -1, zero_vruntime, right_vruntime = -1, left_deadline = -1, spread;
+ 	struct sched_entity *last, *first, *root;
+ 	struct rq *rq = cpu_rq(cpu);
+ 	unsigned long flags;
+@@ -827,15 +827,15 @@ void print_cfs_rq(struct seq_file *m, int cpu, struct cfs_rq *cfs_rq)
+ 	last = __pick_last_entity(cfs_rq);
+ 	if (last)
+ 		right_vruntime = last->vruntime;
+-	min_vruntime = cfs_rq->min_vruntime;
++	zero_vruntime = cfs_rq->zero_vruntime;
+ 	raw_spin_rq_unlock_irqrestore(rq, flags);
+ 
+ 	SEQ_printf(m, "  .%-30s: %Ld.%06ld\n", "left_deadline",
+ 			SPLIT_NS(left_deadline));
+ 	SEQ_printf(m, "  .%-30s: %Ld.%06ld\n", "left_vruntime",
+ 			SPLIT_NS(left_vruntime));
+-	SEQ_printf(m, "  .%-30s: %Ld.%06ld\n", "min_vruntime",
+-			SPLIT_NS(min_vruntime));
++	SEQ_printf(m, "  .%-30s: %Ld.%06ld\n", "zero_vruntime",
++			SPLIT_NS(zero_vruntime));
+ 	SEQ_printf(m, "  .%-30s: %Ld.%06ld\n", "avg_vruntime",
+ 			SPLIT_NS(avg_vruntime(cfs_rq)));
+ 	SEQ_printf(m, "  .%-30s: %Ld.%06ld\n", "right_vruntime",
+diff --git a/kernel/sched/sched.h b/kernel/sched/sched.h
+index 03fd6c93c485..69dc7727ef9a 100644
+--- a/kernel/sched/sched.h
++++ b/kernel/sched/sched.h
+@@ -724,10 +724,18 @@ struct cfs_rq {
+ 	s64			avg_vruntime;
+ 	u64			avg_load;
+ 
+-	u64			min_vruntime;
++	ANDROID_KABI_REPLACE(u64, min_vruntime,
++		union {
++			u64                     min_vruntime;
++			u64			zero_vruntime;
++		});
+ #ifdef CONFIG_SCHED_CORE
+ 	unsigned int		forceidle_seq;
+-	u64			min_vruntime_fi;
++	ANDROID_KABI_REPLACE(u64, min_vruntime_fi,
++		union {
++		u64                     min_vruntime_fi;
++		u64			zero_vruntime_fi;
++		});
+ #endif
+ 
+ 	struct rb_root_cached	tasks_timeline;
+-- 
+2.55.0.windows.3
+
+
+
+
+From 25ceb6eca05a2c50eca004599e52305bd16c173a Mon Sep 17 00:00:00 2001
+From: "Guanyou.Chen" <chenguanyou9338@gmail.com>
+Date: Fri, 22 May 2026 21:09:59 +0800
+Subject: [PATCH 03/21] UPSTREAM: sched: restore timer_slack_ns when resetting
+ RT policy on fork
+
+Commit ed4fb6d7ef68 ("hrtimer: Use and report correct timerslack values
+for realtime tasks") sets timer_slack_ns to 0 for RT tasks in
+__setscheduler_params(). However, when an RT task with SCHED_RESET_ON_FORK
+creates child threads, the children inherit timer_slack_ns=0 from the
+parent. sched_fork() resets the child's policy to SCHED_NORMAL but does
+not restore timer_slack_ns, leaving the child permanently running with
+zero slack.
+
+Fix this by restoring timer_slack_ns from default_timer_slack_ns in
+sched_fork() when resetting from RT/DL to NORMAL policy, matching the
+existing behavior in __setscheduler_params().
+
+Note: this fix alone requires a correct default_timer_slack_ns to be
+effective. See the following patch for that fix.
+
+Fixes: ed4fb6d7ef68 ("hrtimer: Use and report correct timerslack values for realtime tasks")
+Reported-by: Qiaoting.Lin <linqiaoting@xiaomi.com>
+Signed-off-by: Guanyou.Chen <chenguanyou@xiaomi.com>
+Signed-off-by: Chunhui.Li <chunhui.li@mediatek.com>
+Signed-off-by: Peter Zijlstra (Intel) <peterz@infradead.org>
+Link: https://patch.msgid.link/20260522131000.1664983-2-chenguanyou@xiaomi.com
+(cherry picked from commit 63c1a12bc0e09af7dee919c4fb4a300a719d5125)
+bug: 531898182
+Change-Id: Ia6a4808e58feeb5733789cb0c764c47e62c5031e
+Signed-off-by: Yiming Jing <jingyiming@xiaomi.corp-partner.google.com>
+(cherry picked from commit 0026e4ecedf04706daa23af4ba4b973ff966a55e)
+---
+ kernel/sched/core.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/kernel/sched/core.c b/kernel/sched/core.c
+index 301d1b764095..c89ed79363b9 100644
+--- a/kernel/sched/core.c
++++ b/kernel/sched/core.c
+@@ -5332,6 +5332,7 @@ int sched_fork(unsigned long clone_flags, struct task_struct *p)
+ 			p->policy = SCHED_NORMAL;
+ 			p->static_prio = NICE_TO_PRIO(0);
+ 			p->rt_priority = 0;
++			p->timer_slack_ns = p->default_timer_slack_ns;
+ 		} else if (PRIO_TO_NICE(p->static_prio) < 0)
+ 			p->static_prio = NICE_TO_PRIO(0);
+ 
+-- 
+2.55.0.windows.3
+
+
+
+
+From b11e91a386c94dfc92efcdd5689f889c0dd7e5dc Mon Sep 17 00:00:00 2001
+From: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
+Date: Tue, 28 Apr 2026 12:34:25 +0200
+Subject: [PATCH 04/21] futex: Prevent lockup in requeue-PI during signal/
+ timeout wakeup
+
+[ Upstream commit bc7304f3ae20972d11db6e0b1b541c63feda5f05 ]
+
+During wait-requeue-pi (task A) and requeue-PI (task B) the following
+race can happen:
+
+     Task A                             Task B
+  futex_wait_requeue_pi()
+    futex_setup_timer()
+    futex_do_wait()
+                                   futex_requeue()
+                                        CLASS(hb, hb1)(&key1);
+                                        CLASS(hb, hb2)(&key2);
+        *timeout*
+    futex_requeue_pi_wakeup_sync()
+        requeue_state = Q_REQUEUE_PI_IGNORE
+
+    *blocks on hb->lock*
+
+                                        futex_proxy_trylock_atomic()
+                                          futex_requeue_pi_prepare()
+                                            Q_REQUEUE_PI_IGNORE => -EAGAIN
+                                        double_unlock_hb(hb1, hb2)
+                                         *retry*
+
+Task B acquires both hb locks and attempts to acquire the PI-lock of the
+top most waiter (task B). Task A is leaving early due to a signal/
+timeout and started removing itself from the queue. It updates its
+requeue_state but can not remove it from the list because this requires
+the hb lock which is owned by task B.
+
+Usually task A is able to swoop the lock after task B unlocked it.
+However if task B is of higher priority then task A may not be able to
+wake up in time and acquire the lock before task B gets it again.
+Especially on a UP system where A is never scheduled.
+
+As a result task A blocks on the lock and task B busy loops, trying to
+make progress but live locks the system instead. Tragic.
+
+This can be fixed by removing the top most waiter from the list in this
+case. This allows task B to grab the next top waiter (if any) in the
+next iteration and make progress.
+
+Remove the top most waiter if futex_requeue_pi_prepare() fails.
+Let the waiter conditionally remove itself from the list in
+handle_early_requeue_pi_wakeup().
+
+Fixes: 07d91ef510fb1 ("futex: Prevent requeue_pi() lock nesting issue on RT")
+Reported-by: Moritz Klammler <Moritz.Klammler@ferchau.com>
+Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
+Signed-off-by: Thomas Gleixner <tglx@kernel.org>
+Link: https://patch.msgid.link/20260428103425.dywXyPd3@linutronix.de
+Closes: https://lore.kernel.org/all/VE1PR06MB6894BE61C173D802365BE19DFF4CA@VE1PR06MB6894.eurprd06.prod.outlook.com
+Signed-off-by: Sasha Levin <sashal@kernel.org>
+(cherry picked from commit 0aacb6d18f76552e3e0ee25d9f40d21b3486f4cf)
+---
+ kernel/futex/requeue.c | 13 +++++++++----
+ 1 file changed, 9 insertions(+), 4 deletions(-)
+
+diff --git a/kernel/futex/requeue.c b/kernel/futex/requeue.c
+index 559aae55792c..f4a69942780f 100644
+--- a/kernel/futex/requeue.c
++++ b/kernel/futex/requeue.c
+@@ -309,8 +309,11 @@ futex_proxy_trylock_atomic(u32 __user *pifutex, struct futex_hash_bucket *hb1,
+ 		return -EINVAL;
+ 
+ 	/* Ensure that this does not race against an early wakeup */
+-	if (!futex_requeue_pi_prepare(top_waiter, NULL))
++	if (!futex_requeue_pi_prepare(top_waiter, NULL)) {
++		plist_del(&top_waiter->list, &hb1->chain);
++		futex_hb_waiters_dec(hb1);
+ 		return -EAGAIN;
++	}
+ 
+ 	/*
+ 	 * Try to take the lock for top_waiter and set the FUTEX_WAITERS bit
+@@ -711,10 +714,12 @@ int handle_early_requeue_pi_wakeup(struct futex_hash_bucket *hb,
+ 
+ 	/*
+ 	 * We were woken prior to requeue by a timeout or a signal.
+-	 * Unqueue the futex_q and determine which it was.
++	 * Conditionally unqueue the futex_q and determine which it was.
+ 	 */
+-	plist_del(&q->list, &hb->chain);
+-	futex_hb_waiters_dec(hb);
++	if (!plist_node_empty(&q->list)) {
++		plist_del(&q->list, &hb->chain);
++		futex_hb_waiters_dec(hb);
++	}
+ 
+ 	/* Handle spurious wakeups gracefully */
+ 	ret = -EWOULDBLOCK;
+-- 
+2.55.0.windows.3
+
+
+
+
+From 5dead95a29e1eeef5ca43b4037ee67d41a74efb6 Mon Sep 17 00:00:00 2001
+From: Keenan Dong <keenanat2000@gmail.com>
+Date: Wed, 8 Apr 2026 16:46:00 +0800
+Subject: [PATCH 05/21] UPSTREAM: rtmutex: Use waiter::task instead of current
+ in remove_waiter()
+
+commit 3bfdc63936dd4773109b7b8c280c0f3b5ae7d349 upstream.
+
+remove_waiter() is used by the slowlock paths, but it is also used for
+proxy-lock rollback in rt_mutex_start_proxy_lock() when invoked from
+futex_requeue().
+
+In the latter case waiter::task is not current, but remove_waiter()
+operates on current for the dequeue operation. That results in several
+problems:
+
+  1) the rbtree dequeue happens without waiter::task::pi_lock being held
+
+  2) the waiter task's pi_blocked_on state is not cleared, which leaves a
+     dangling pointer primed for UAF around.
+
+  3) rt_mutex_adjust_prio_chain() operates on the wrong top priority waiter
+     task
+
+Use waiter::task instead of current in all related operations in
+remove_waiter() to cure those problems.
+
+[ tglx: Fixup rt_mutex_adjust_prio_chain(), add a comment and amend the
+  	changelog ]
+
+Bug: 496407345
+Fixes: 8161239a8bcc ("rtmutex: Simplify PI algorithm and make highest prio task get lock")
+Reported-by: Yuan Tan <yuantan098@gmail.com>
+Reported-by: Yifan Wu <yifanwucs@gmail.com>
+Reported-by: Juefei Pu <tomapufckgml@gmail.com>
+Reported-by: Xin Liu <bird@lzu.edu.cn>
+Signed-off-by: Keenan Dong <keenanat2000@gmail.com>
+Signed-off-by: Thomas Gleixner <tglx@kernel.org>
+Cc: stable@vger.kernel.org
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+(cherry picked from commit 3fb7394a837740770f0d6b4b30567e60786a63f2)
+Signed-off-by: Lee Jones <joneslee@google.com>
+Change-Id: I073cd6503e56838f62c29df91ccbe10a1bd92394
+(cherry picked from commit e7d9bd94fbdbf9842ea6f1b6d5af45758e87e3d6)
+---
+ kernel/locking/rtmutex.c | 13 ++++++++-----
+ 1 file changed, 8 insertions(+), 5 deletions(-)
+
+diff --git a/kernel/locking/rtmutex.c b/kernel/locking/rtmutex.c
+index 53069b1b4762..a7225920a508 100644
+--- a/kernel/locking/rtmutex.c
++++ b/kernel/locking/rtmutex.c
+@@ -1536,20 +1536,23 @@ static bool rtmutex_spin_on_owner(struct rt_mutex_base *lock,
+  *
+  * Must be called with lock->wait_lock held and interrupts disabled. It must
+  * have just failed to try_to_take_rt_mutex().
++ *
++ * When invoked from rt_mutex_start_proxy_lock() waiter::task != current !
+  */
+ static void __sched remove_waiter(struct rt_mutex_base *lock,
+ 				  struct rt_mutex_waiter *waiter)
+ {
+ 	bool is_top_waiter = (waiter == rt_mutex_top_waiter(lock));
+ 	struct task_struct *owner = rt_mutex_owner(lock);
++	struct task_struct *waiter_task = waiter->task;
+ 	struct rt_mutex_base *next_lock;
+ 
+ 	lockdep_assert_held(&lock->wait_lock);
+ 
+-	raw_spin_lock(&current->pi_lock);
+-	rt_mutex_dequeue(lock, waiter);
+-	current->pi_blocked_on = NULL;
+-	raw_spin_unlock(&current->pi_lock);
++	scoped_guard(raw_spinlock, &waiter_task->pi_lock) {
++		rt_mutex_dequeue(lock, waiter);
++		waiter_task->pi_blocked_on = NULL;
++	}
+ 
+ 	/*
+ 	 * Only update priority if the waiter was the highest priority
+@@ -1585,7 +1588,7 @@ static void __sched remove_waiter(struct rt_mutex_base *lock,
+ 	raw_spin_unlock_irq(&lock->wait_lock);
+ 
+ 	rt_mutex_adjust_prio_chain(owner, RT_MUTEX_MIN_CHAINWALK, lock,
+-				   next_lock, NULL, current);
++				   next_lock, NULL, waiter_task);
+ 
+ 	raw_spin_lock_irq(&lock->wait_lock);
+ }
+-- 
+2.55.0.windows.3
+
+
+
+
+From 53b4b4c64bb05fa5e46e338cafb64f83a80b1f8b Mon Sep 17 00:00:00 2001
+From: Davidlohr Bueso <dave@stgolabs.net>
+Date: Thu, 7 May 2026 04:29:13 -0700
+Subject: [PATCH 06/21] UPSTREAM: locking/rtmutex: Skip remove_waiter() when
+ waiter is not enqueued
+
+commit 40a25d59e85b3c8709ac2424d44f65610467871e upstream.
+
+syzbot triggered the following splat in remove_waiter() via
+FUTEX_CMP_REQUEUE_PI:
+
+  KASAN: null-ptr-deref in range [0x0000000000000a88-0x0000000000000a8f]
+   class_raw_spinlock_constructor
+   remove_waiter+0x159/0x1200 kernel/locking/rtmutex.c:1561
+   rt_mutex_start_proxy_lock+0x103/0x120
+   futex_requeue+0x10e4/0x20d0
+   __x64_sys_futex+0x34f/0x4d0
+
+task_blocks_on_rt_mutex() does not arm the waiter upon deadlock detection,
+leaving waiter->task nil, where 3bfdc63936dd ("rtmutex: Use waiter::task instead
+of current in remove_waiter()") made this fatal.
+
+Furthermore, rt_mutex_start_proxy_lock() should not be calling into remove_waiter()
+upon a successfully grabbing the rtmutex. 1a1fb985f2e2 ("futex: Handle early deadlock
+return correctly"), moved the remove_waiter() out of __rt_mutex_start_proxy_lock()
+(where 'ret' was only ever 0 or < 0) into the wrapper. Tighten this check to
+account for try_to_take_rt_mutex().
+
+Bug: 496407345
+Fixes: 3bfdc63936dd ("rtmutex: Use waiter::task instead of current in remove_waiter()")
+Reported-by: syzbot+78147abe6c524f183ee9@syzkaller.appspotmail.com
+Signed-off-by: Davidlohr Bueso <dave@stgolabs.net>
+Signed-off-by: Thomas Gleixner <tglx@kernel.org>
+Cc: stable@vger.kernel.org
+Closes: https://lore.kernel.org/all/69f114ac.050a0220.ac8b.0003.GAE@google.com/
+Link: https://patch.msgid.link/20260507112913.1019537-1-dave@stgolabs.net
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+(cherry picked from commit a388e3dfaf9538a680de5ed43a8ebb5dd45b6e53)
+Signed-off-by: Lee Jones <joneslee@google.com>
+Change-Id: I1b3b0317abcc037c46e06a78f3c302d50bd3fc72
+(cherry picked from commit 5339d13d8b945cd5841d0e70728ee67474ea74f7)
+---
+ kernel/locking/rtmutex.c     | 3 +++
+ kernel/locking/rtmutex_api.c | 2 +-
+ 2 files changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/kernel/locking/rtmutex.c b/kernel/locking/rtmutex.c
+index a7225920a508..07c2fb91721a 100644
+--- a/kernel/locking/rtmutex.c
++++ b/kernel/locking/rtmutex.c
+@@ -1549,6 +1549,9 @@ static void __sched remove_waiter(struct rt_mutex_base *lock,
+ 
+ 	lockdep_assert_held(&lock->wait_lock);
+ 
++	if (!waiter_task) /* never enqueued */
++		return;
++
+ 	scoped_guard(raw_spinlock, &waiter_task->pi_lock) {
+ 		rt_mutex_dequeue(lock, waiter);
+ 		waiter_task->pi_blocked_on = NULL;
+diff --git a/kernel/locking/rtmutex_api.c b/kernel/locking/rtmutex_api.c
+index 9696571241af..261cde085a69 100644
+--- a/kernel/locking/rtmutex_api.c
++++ b/kernel/locking/rtmutex_api.c
+@@ -352,7 +352,7 @@ int __sched rt_mutex_start_proxy_lock(struct rt_mutex_base *lock,
+ 
+ 	raw_spin_lock_irq(&lock->wait_lock);
+ 	ret = __rt_mutex_start_proxy_lock(lock, waiter, task, &wake_q);
+-	if (unlikely(ret))
++	if (unlikely(ret < 0))
+ 		remove_waiter(lock, waiter);
+ 	preempt_disable();
+ 	raw_spin_unlock_irq(&lock->wait_lock);
+-- 
+2.55.0.windows.3
+
+
+
+
+From b584aba0e3314057d60f44df111fe2730f2b1ebe Mon Sep 17 00:00:00 2001
+From: Yao Kai <yaokai34@huawei.com>
+Date: Thu, 1 Jan 2026 11:34:10 -0500
+Subject: [PATCH 07/21] rcu: Fix rcu_read_unlock() deadloop due to softirq
+
+[ Upstream commit d41e37f26b3157b3f1d10223863519a943aa239b ]
+
+Commit 5f5fa7ea89dc ("rcu: Don't use negative nesting depth in
+__rcu_read_unlock()") removes the recursion-protection code from
+__rcu_read_unlock(). Therefore, we could invoke the deadloop in
+raise_softirq_irqoff() with ftrace enabled as follows:
+
+WARNING: CPU: 0 PID: 0 at kernel/trace/trace.c:3021 __ftrace_trace_stack.constprop.0+0x172/0x180
+Modules linked in: my_irq_work(O)
+CPU: 0 UID: 0 PID: 0 Comm: swapper/0 Tainted: G O 6.18.0-rc7-dirty #23 PREEMPT(full)
+Tainted: [O]=OOT_MODULE
+Hardware name: QEMU Standard PC (i440FX + PIIX, 1996), BIOS 1.15.0-1 04/01/2014
+RIP: 0010:__ftrace_trace_stack.constprop.0+0x172/0x180
+RSP: 0018:ffffc900000034a8 EFLAGS: 00010002
+RAX: 0000000000000000 RBX: 0000000000000004 RCX: 0000000000000000
+RDX: 0000000000000003 RSI: ffffffff826d7b87 RDI: ffffffff826e9329
+RBP: 0000000000090009 R08: 0000000000000005 R09: ffffffff82afbc4c
+R10: 0000000000000008 R11: 0000000000011d7a R12: 0000000000000000
+R13: ffff888003874100 R14: 0000000000000003 R15: ffff8880038c1054
+FS:  0000000000000000(0000) GS:ffff8880fa8ea000(0000) knlGS:0000000000000000
+CS:  0010 DS: 0000 ES: 0000 CR0: 0000000080050033
+CR2: 000055b31fa7f540 CR3: 00000000078f4005 CR4: 0000000000770ef0
+PKRU: 55555554
+Call Trace:
+ <IRQ>
+ trace_buffer_unlock_commit_regs+0x6d/0x220
+ trace_event_buffer_commit+0x5c/0x260
+ trace_event_raw_event_softirq+0x47/0x80
+ raise_softirq_irqoff+0x6e/0xa0
+ rcu_read_unlock_special+0xb1/0x160
+ unwind_next_frame+0x203/0x9b0
+ __unwind_start+0x15d/0x1c0
+ arch_stack_walk+0x62/0xf0
+ stack_trace_save+0x48/0x70
+ __ftrace_trace_stack.constprop.0+0x144/0x180
+ trace_buffer_unlock_commit_regs+0x6d/0x220
+ trace_event_buffer_commit+0x5c/0x260
+ trace_event_raw_event_softirq+0x47/0x80
+ raise_softirq_irqoff+0x6e/0xa0
+ rcu_read_unlock_special+0xb1/0x160
+ unwind_next_frame+0x203/0x9b0
+ __unwind_start+0x15d/0x1c0
+ arch_stack_walk+0x62/0xf0
+ stack_trace_save+0x48/0x70
+ __ftrace_trace_stack.constprop.0+0x144/0x180
+ trace_buffer_unlock_commit_regs+0x6d/0x220
+ trace_event_buffer_commit+0x5c/0x260
+ trace_event_raw_event_softirq+0x47/0x80
+ raise_softirq_irqoff+0x6e/0xa0
+ rcu_read_unlock_special+0xb1/0x160
+ unwind_next_frame+0x203/0x9b0
+ __unwind_start+0x15d/0x1c0
+ arch_stack_walk+0x62/0xf0
+ stack_trace_save+0x48/0x70
+ __ftrace_trace_stack.constprop.0+0x144/0x180
+ trace_buffer_unlock_commit_regs+0x6d/0x220
+ trace_event_buffer_commit+0x5c/0x260
+ trace_event_raw_event_softirq+0x47/0x80
+ raise_softirq_irqoff+0x6e/0xa0
+ rcu_read_unlock_special+0xb1/0x160
+ __is_insn_slot_addr+0x54/0x70
+ kernel_text_address+0x48/0xc0
+ __kernel_text_address+0xd/0x40
+ unwind_get_return_address+0x1e/0x40
+ arch_stack_walk+0x9c/0xf0
+ stack_trace_save+0x48/0x70
+ __ftrace_trace_stack.constprop.0+0x144/0x180
+ trace_buffer_unlock_commit_regs+0x6d/0x220
+ trace_event_buffer_commit+0x5c/0x260
+ trace_event_raw_event_softirq+0x47/0x80
+ __raise_softirq_irqoff+0x61/0x80
+ __flush_smp_call_function_queue+0x115/0x420
+ __sysvec_call_function_single+0x17/0xb0
+ sysvec_call_function_single+0x8c/0xc0
+ </IRQ>
+
+Commit b41642c87716 ("rcu: Fix rcu_read_unlock() deadloop due to IRQ work")
+fixed the infinite loop in rcu_read_unlock_special() for IRQ work by
+setting a flag before calling irq_work_queue_on(). We fix this issue by
+setting the same flag before calling raise_softirq_irqoff() and rename the
+flag to defer_qs_pending for more common.
+
+Fixes: 5f5fa7ea89dc ("rcu: Don't use negative nesting depth in __rcu_read_unlock()")
+Reported-by: Tengda Wu <wutengda2@huawei.com>
+Signed-off-by: Yao Kai <yaokai34@huawei.com>
+Reviewed-by: Joel Fernandes <joelagnelf@nvidia.com>
+Tested-by: Paul E. McKenney <paulmck@kernel.org>
+Signed-off-by: Joel Fernandes <joelagnelf@nvidia.com>
+Signed-off-by: Boqun Feng <boqun.feng@gmail.com>
+Signed-off-by: Sasha Levin <sashal@kernel.org>
+(cherry picked from commit 1f16679a5aa60238466ce339c35f5e82ece60337)
+---
+ kernel/rcu/tree_plugin.h | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/kernel/rcu/tree_plugin.h b/kernel/rcu/tree_plugin.h
+index b08522e706de..545c84f09fb4 100644
+--- a/kernel/rcu/tree_plugin.h
++++ b/kernel/rcu/tree_plugin.h
+@@ -686,7 +686,10 @@ static void rcu_read_unlock_special(struct task_struct *t)
+ 			// Using softirq, safe to awaken, and either the
+ 			// wakeup is free or there is either an expedited
+ 			// GP in flight or a potential need to deboost.
+-			raise_softirq_irqoff(RCU_SOFTIRQ);
++			if (rdp->defer_qs_iw_pending != DEFER_QS_PENDING) {
++				rdp->defer_qs_iw_pending = DEFER_QS_PENDING;
++				raise_softirq_irqoff(RCU_SOFTIRQ);
++			}
+ 		} else {
+ 			// Enabling BH or preempt does reschedule, so...
+ 			// Also if no expediting and no possible deboosting,
+-- 
+2.55.0.windows.3
+
+
+
+
+From afba1b5e29630d5f82126b7214dfce63a592be95 Mon Sep 17 00:00:00 2001
+From: Breno Leitao <leitao@debian.org>
+Date: Fri, 8 May 2026 09:22:03 -0700
+Subject: [PATCH 08/21] workqueue: Fix wq->cpu_pwq leak in
+ alloc_and_link_pwqs() WQ_UNBOUND path
+
+commit 0143033dc22cdff912cfc13419f5db92fea3b4cb upstream.
+
+For WQ_UNBOUND workqueues, alloc_and_link_pwqs() allocates wq->cpu_pwq
+via alloc_percpu() and then calls apply_workqueue_attrs_locked(). On
+failure it returns the error directly, bypassing the enomem: label
+which holds the only free_percpu(wq->cpu_pwq) in this function.
+
+The caller's error path kfree()s wq without touching wq->cpu_pwq,
+leaking one percpu pointer table (nr_cpu_ids * sizeof(void *) bytes) per
+failed call.
+
+If kmemleak is enabled, we can see:
+
+  unreferenced object (percpu) 0xc0fffa5b121048 (size 8):
+    comm "insmod", pid 776, jiffies 4294682844
+    backtrace (crc 0):
+      pcpu_alloc_noprof+0x665/0xac0
+      __alloc_workqueue+0x33f/0xa20
+      alloc_workqueue_noprof+0x60/0x100
+
+Route the error through the existing enomem: cleanup and any error
+before this one.
+
+Cc: stable@kernel.org
+Fixes: 636b927eba5b ("workqueue: Make unbound workqueues to use per-cpu pool_workqueues")
+Signed-off-by: Breno Leitao <leitao@debian.org>
+Signed-off-by: Tejun Heo <tj@kernel.org>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+(cherry picked from commit 2d8a50d28639791e7ecd5ab04b8e91be7b787fd9)
+---
+ kernel/workqueue.c | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/kernel/workqueue.c b/kernel/workqueue.c
+index d2622689c07d..f620f8e9d976 100644
+--- a/kernel/workqueue.c
++++ b/kernel/workqueue.c
+@@ -5521,7 +5521,9 @@ static int alloc_and_link_pwqs(struct workqueue_struct *wq)
+ 	}
+ 
+ oem_skip:
+-	return ret;
++	if (ret)
++		goto enomem;
++	return 0;
+ 
+ enomem:
+ 	if (wq->cpu_pwq) {
+-- 
+2.55.0.windows.3
+
+
+
+
+From 0629642b8bdf3daaeab11583e358edd92e0e1d48 Mon Sep 17 00:00:00 2001
+From: Kairui Song <kasong@tencent.com>
+Date: Mon, 23 Mar 2026 02:43:31 -0700
+Subject: [PATCH 09/21] mm/shmem, swap: avoid redundant Xarray lookup during
+ swapin
+
+commit 0cfc0e7e3d062b93e9eec6828de000981cdfb152 upstream.
+
+Currently shmem calls xa_get_order to get the swap radix entry order,
+requiring a full tree walk.  This can be easily combined with the swap
+entry value checking (shmem_confirm_swap) to avoid the duplicated lookup
+and abort early if the entry is gone already.  Which should improve the
+performance.
+
+Link: https://lkml.kernel.org/r/20250728075306.12704-1-ryncsn@gmail.com
+Link: https://lkml.kernel.org/r/20250728075306.12704-3-ryncsn@gmail.com
+Signed-off-by: Kairui Song <kasong@tencent.com>
+Reviewed-by: Kemeng Shi <shikemeng@huaweicloud.com>
+Reviewed-by: Dev Jain <dev.jain@arm.com>
+Reviewed-by: Baolin Wang <baolin.wang@linux.alibaba.com>
+Cc: Baoquan He <bhe@redhat.com>
+Cc: Barry Song <baohua@kernel.org>
+Cc: Chris Li <chrisl@kernel.org>
+Cc: Hugh Dickins <hughd@google.com>
+Cc: Matthew Wilcox (Oracle) <willy@infradead.org>
+Cc: Nhat Pham <nphamcs@gmail.com>
+Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+
+Stable-dep-of: 8a1968bd997f ("mm/shmem, swap: fix race of truncate and swap entry split")
+[ hughd: removed series cover letter and skip_swapcache dependencies ]
+Signed-off-by: Hugh Dickins <hughd@google.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+(cherry picked from commit 1bfd188284065aa305fa4c683ac5a40a332b5f6b)
+---
+ mm/shmem.c | 35 ++++++++++++++++++++++++++---------
+ 1 file changed, 26 insertions(+), 9 deletions(-)
+
+diff --git a/mm/shmem.c b/mm/shmem.c
+index 92a111ecb9d4..bd1cf57556bc 100644
+--- a/mm/shmem.c
++++ b/mm/shmem.c
+@@ -504,15 +504,27 @@ static int shmem_replace_entry(struct address_space *mapping,
+ 
+ /*
+  * Sometimes, before we decide whether to proceed or to fail, we must check
+- * that an entry was not already brought back from swap by a racing thread.
++ * that an entry was not already brought back or split by a racing thread.
+  *
+  * Checking folio is not enough: by the time a swapcache folio is locked, it
+  * might be reused, and again be swapcache, using the same swap as before.
++ * Returns the swap entry's order if it still presents, else returns -1.
+  */
+-static bool shmem_confirm_swap(struct address_space *mapping,
+-			       pgoff_t index, swp_entry_t swap)
++static int shmem_confirm_swap(struct address_space *mapping, pgoff_t index,
++			      swp_entry_t swap)
+ {
+-	return xa_load(&mapping->i_pages, index) == swp_to_radix_entry(swap);
++	XA_STATE(xas, &mapping->i_pages, index);
++	int ret = -1;
++	void *entry;
++
++	rcu_read_lock();
++	do {
++		entry = xas_load(&xas);
++		if (entry == swp_to_radix_entry(swap))
++			ret = xas_get_order(&xas);
++	} while (xas_retry(&xas, entry));
++	rcu_read_unlock();
++	return ret;
+ }
+ 
+ /*
+@@ -2152,12 +2164,17 @@ static int shmem_swapin_folio(struct inode *inode, pgoff_t index,
+ 		return -EIO;
+ 
+ 	si = get_swap_device(swap);
+-	if (!si) {
+-		if (!shmem_confirm_swap(mapping, index, swap))
++	order = shmem_confirm_swap(mapping, index, swap);
++	if (unlikely(!si)) {
++		if (order < 0)
+ 			return -EEXIST;
+ 		else
+ 			return -EINVAL;
+ 	}
++	if (unlikely(order < 0)) {
++		put_swap_device(si);
++		return -EEXIST;
++	}
+ 
+ 	/* Look it up and read it in.. */
+ 	folio = swap_cache_get_folio(swap, NULL, 0);
+@@ -2205,8 +2222,8 @@ static int shmem_swapin_folio(struct inode *inode, pgoff_t index,
+ 	folio_lock(folio);
+ 	trace_android_vh_shmem_swapin_folio(folio);
+ 	if (!folio_test_swapcache(folio) ||
+-	    folio->swap.val != swap.val ||
+-	    !shmem_confirm_swap(mapping, index, swap)) {
++	    shmem_confirm_swap(mapping, index, swap) < 0 ||
++	    folio->swap.val != swap.val) {
+ 		error = -EEXIST;
+ 		goto unlock;
+ 	}
+@@ -2249,7 +2266,7 @@ static int shmem_swapin_folio(struct inode *inode, pgoff_t index,
+ 	*foliop = folio;
+ 	return 0;
+ failed:
+-	if (!shmem_confirm_swap(mapping, index, swap))
++	if (shmem_confirm_swap(mapping, index, swap) < 0)
+ 		error = -EEXIST;
+ 	if (error == -EIO)
+ 		shmem_set_folio_swapin_error(inode, index, folio, swap);
+-- 
+2.55.0.windows.3
+
+
+
+
+From b0867bf2f3fe5f06de364d51fd2021d8271318ab Mon Sep 17 00:00:00 2001
+From: Qi Zheng <zhengqi.arch@bytedance.com>
+Date: Wed, 4 Dec 2024 19:09:49 +0800
+Subject: [PATCH 10/21] BACKPORT: mm: pgtable: reclaim empty PTE page in
+ madvise(MADV_DONTNEED)
+
+Now in order to pursue high performance, applications mostly use some
+high-performance user-mode memory allocators, such as jemalloc or
+tcmalloc.  These memory allocators use madvise(MADV_DONTNEED or MADV_FREE)
+to release physical memory, but neither MADV_DONTNEED nor MADV_FREE will
+release page table memory, which may cause huge page table memory usage.
+
+The following are a memory usage snapshot of one process which actually
+happened on our server:
+
+        VIRT:  55t
+        RES:   590g
+        VmPTE: 110g
+
+In this case, most of the page table entries are empty.  For such a PTE
+page where all entries are empty, we can actually free it back to the
+system for others to use.
+
+As a first step, this commit aims to synchronously free the empty PTE
+pages in madvise(MADV_DONTNEED) case.  We will detect and free empty PTE
+pages in zap_pte_range(), and will add zap_details.reclaim_pt to exclude
+cases other than madvise(MADV_DONTNEED).
+
+Once an empty PTE is detected, we first try to hold the pmd lock within
+the pte lock.  If successful, we clear the pmd entry directly (fast path).
+Otherwise, we wait until the pte lock is released, then re-hold the pmd
+and pte locks and loop PTRS_PER_PTE times to check pte_none() to re-detect
+whether the PTE page is empty and free it (slow path).
+
+For other cases such as madvise(MADV_FREE), consider scanning and freeing
+empty PTE pages asynchronously in the future.
+
+The following code snippet can show the effect of optimization:
+
+        mmap 50G
+        while (1) {
+                for (; i < 1024 * 25; i++) {
+                        touch 2M memory
+                        madvise MADV_DONTNEED 2M
+                }
+        }
+
+As we can see, the memory usage of VmPTE is reduced:
+
+                        before                          after
+VIRT                   50.0 GB                        50.0 GB
+RES                     3.1 MB                         3.1 MB
+VmPTE                102640 KB                         240 KB
+
+[zhengqi.arch@bytedance.com: fix uninitialized symbol 'ptl']
+  Link: https://lkml.kernel.org/r/20241206112348.51570-1-zhengqi.arch@bytedance.com
+  Link: https://lore.kernel.org/linux-mm/224e6a4e-43b5-4080-bdd8-b0a6fb2f0853@stanley.mountain/
+Link: https://lkml.kernel.org/r/92aba2b319a734913f18ba41e7d86a265f0b84e2.1733305182.git.zhengqi.arch@bytedance.com
+Signed-off-by: Qi Zheng <zhengqi.arch@bytedance.com>
+Cc: Andy Lutomirski <luto@kernel.org>
+Cc: Catalin Marinas <catalin.marinas@arm.com>
+Cc: Dave Hansen <dave.hansen@linux.intel.com>
+Cc: David Hildenbrand <david@redhat.com>
+Cc: David Rientjes <rientjes@google.com>
+Cc: Hugh Dickins <hughd@google.com>
+Cc: Jann Horn <jannh@google.com>
+Cc: Lorenzo Stoakes <lorenzo.stoakes@oracle.com>
+Cc: Matthew Wilcox <willy@infradead.org>
+Cc: Mel Gorman <mgorman@suse.de>
+Cc: Muchun Song <muchun.song@linux.dev>
+Cc: Peter Xu <peterx@redhat.com>
+Cc: Peter Zijlstra <peterz@infradead.org>
+Cc: Will Deacon <will@kernel.org>
+Cc: Zach O'Keefe <zokeefe@google.com>
+Cc: Dan Carpenter <dan.carpenter@linaro.org>
+
+Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+Bug: 487357389
+Conflict resolution:
+- mm/Kconfig: Resolved conflicts by adding PT_RECLAIM definitions and skipping unrelated context lines (Shadow Stack). Fixed indentation of the Note line.
+- mm/madvise.c: Resolved conflicts by keeping the Android-specific madvise_vma_pad_pages() call and using the new zap_details with reclaim_pt = true.
+(cherry picked from commit 6375e95f381e3dc85065b6f74263a61522736203)
+Change-Id: I942e7418c13e654eb1d2fd525a98d10f810c3ff0
+Signed-off-by: Jordan Chang <jordanchang@google.com>
+(cherry picked from commit e713d5b1586d8210c03d5e3b7d58784e6242b739)
+---
+ include/linux/mm.h |  1 +
+ mm/Kconfig         | 13 +++++++++
+ mm/Makefile        |  1 +
+ mm/internal.h      | 19 +++++++++++++
+ mm/madvise.c       |  7 ++++-
+ mm/memory.c        | 21 ++++++++++++--
+ mm/pt_reclaim.c    | 71 ++++++++++++++++++++++++++++++++++++++++++++++
+ 7 files changed, 130 insertions(+), 3 deletions(-)
+ create mode 100644 mm/pt_reclaim.c
+
+diff --git a/include/linux/mm.h b/include/linux/mm.h
+index c05b36206b56..c8ad09023d11 100644
+--- a/include/linux/mm.h
++++ b/include/linux/mm.h
+@@ -2484,6 +2484,7 @@ extern void pagefault_out_of_memory(void);
+ struct zap_details {
+ 	struct folio *single_folio;	/* Locked folio to be unmapped */
+ 	bool even_cows;			/* Zap COWed private pages too? */
++	bool reclaim_pt;		/* Need reclaim page tables? */
+ 	zap_flags_t zap_flags;		/* Extra flags for zapping */
+ };
+ 
+diff --git a/mm/Kconfig b/mm/Kconfig
+index 88d7abaa2c8f..90620a68c2a7 100644
+--- a/mm/Kconfig
++++ b/mm/Kconfig
+@@ -1376,6 +1376,19 @@ config NUMA_EMU
+ 	  into virtual nodes when booted with "numa=fake=N", where N is the
+ 	  number of nodes. This is only useful for debugging.
+ 
++config ARCH_SUPPORTS_PT_RECLAIM
++	def_bool n
++
++config PT_RECLAIM
++	bool "reclaim empty user page table pages"
++	default y
++	depends on ARCH_SUPPORTS_PT_RECLAIM && MMU && SMP
++	select MMU_GATHER_RCU_TABLE_FREE
++	help
++	  Try to reclaim empty user page table pages in paths other than munmap
++	  and exit_mmap path.
++
++	  Note: now only empty user PTE page table pages will be reclaimed.
+ source "mm/damon/Kconfig"
+ 
+ endmenu
+diff --git a/mm/Makefile b/mm/Makefile
+index 5629f1cf39d3..b876e1970eb9 100644
+--- a/mm/Makefile
++++ b/mm/Makefile
+@@ -150,3 +150,4 @@ obj-$(CONFIG_GENERIC_IOREMAP) += ioremap.o
+ obj-$(CONFIG_SHRINKER_DEBUG) += shrinker_debug.o
+ obj-$(CONFIG_EXECMEM) += execmem.o
+ obj-$(CONFIG_TMPFS_QUOTA) += shmem_quota.o
++obj-$(CONFIG_PT_RECLAIM) += pt_reclaim.o
+diff --git a/mm/internal.h b/mm/internal.h
+index edbcd44edb6c..bf5f7ee396cd 100644
+--- a/mm/internal.h
++++ b/mm/internal.h
+@@ -1497,4 +1497,23 @@ int walk_page_range_mm(struct mm_struct *mm, unsigned long start,
+ 		unsigned long end, const struct mm_walk_ops *ops,
+ 		void *private);
+ 
++/* pt_reclaim.c */
++bool try_get_and_clear_pmd(struct mm_struct *mm, pmd_t *pmd, pmd_t *pmdval);
++void free_pte(struct mm_struct *mm, unsigned long addr, struct mmu_gather *tlb,
++	      pmd_t pmdval);
++void try_to_free_pte(struct mm_struct *mm, pmd_t *pmd, unsigned long addr,
++		     struct mmu_gather *tlb);
++
++#ifdef CONFIG_PT_RECLAIM
++bool reclaim_pt_is_enabled(unsigned long start, unsigned long end,
++			   struct zap_details *details);
++#else
++static inline bool reclaim_pt_is_enabled(unsigned long start, unsigned long end,
++					 struct zap_details *details)
++{
++	return false;
++}
++#endif /* CONFIG_PT_RECLAIM */
++
++
+ #endif	/* __MM_INTERNAL_H */
+diff --git a/mm/madvise.c b/mm/madvise.c
+index eadf0d0a4d8f..069de54a7473 100644
+--- a/mm/madvise.c
++++ b/mm/madvise.c
+@@ -882,9 +882,14 @@ static int madvise_free_single_vma(struct vm_area_struct *vma,
+ static long madvise_dontneed_single_vma(struct vm_area_struct *vma,
+ 					unsigned long start, unsigned long end)
+ {
++	struct zap_details details = {
++		.reclaim_pt = true,
++		.even_cows = true,
++	};
++
+ 	madvise_vma_pad_pages(vma, start, end);
+ 
+-	zap_page_range_single(vma, start, end - start, NULL);
++	zap_page_range_single(vma, start, end - start, &details);
+ 	return 0;
+ }
+ 
+diff --git a/mm/memory.c b/mm/memory.c
+index b8dad89fee3f..0b6f10e6b3bf 100644
+--- a/mm/memory.c
++++ b/mm/memory.c
+@@ -1442,7 +1442,7 @@ copy_page_range(struct vm_area_struct *dst_vma, struct vm_area_struct *src_vma)
+ static inline bool should_zap_cows(struct zap_details *details)
+ {
+ 	/* By default, zap all pages */
+-	if (!details)
++	if (!details || details->reclaim_pt)
+ 		return true;
+ 
+ 	/* Or, we zap COWed pages only if the caller wants to */
+@@ -1605,6 +1605,10 @@ static unsigned long zap_pte_range(struct mmu_gather *tlb,
+ 	pte_t *start_pte;
+ 	pte_t *pte;
+ 	swp_entry_t entry;
++	pmd_t pmdval;
++	unsigned long start = addr;
++	bool can_reclaim_pt = reclaim_pt_is_enabled(start, end, details);
++	bool direct_reclaim = false;
+ 	int nr;
+ 	bool bypass = false;
+ 
+@@ -1626,8 +1630,10 @@ static unsigned long zap_pte_range(struct mmu_gather *tlb,
+ 		if (pte_none(ptent))
+ 			continue;
+ 
+-		if (need_resched())
++		if (need_resched()) {
++			direct_reclaim = false;
+ 			break;
++		}
+ 
+ 		if (pte_present(ptent)) {
+ 			max_nr = (end - addr) / PAGE_SIZE;
+@@ -1636,6 +1642,7 @@ static unsigned long zap_pte_range(struct mmu_gather *tlb,
+ 					      &force_break);
+ 			if (unlikely(force_break)) {
+ 				addr += nr * PAGE_SIZE;
++				direct_reclaim = false;
+ 				break;
+ 			}
+ 			continue;
+@@ -1705,6 +1712,9 @@ static unsigned long zap_pte_range(struct mmu_gather *tlb,
+ 		zap_install_uffd_wp_if_needed(vma, addr, pte, nr, details, ptent);
+ 	} while (pte += nr, addr += PAGE_SIZE * nr, addr != end);
+ 
++	if (can_reclaim_pt && addr == end)
++		direct_reclaim = try_get_and_clear_pmd(mm, pmd, &pmdval);
++
+ 	add_mm_rss_vec(mm, rss);
+ 	arch_leave_lazy_mmu_mode();
+ 
+@@ -1724,6 +1734,13 @@ static unsigned long zap_pte_range(struct mmu_gather *tlb,
+ 	if (force_flush)
+ 		tlb_flush_mmu(tlb);
+ 
++	if (can_reclaim_pt && addr == end) {
++		if (direct_reclaim)
++			free_pte(mm, start, tlb, pmdval);
++		else
++			try_to_free_pte(mm, pmd, start, tlb);
++	}
++
+ 	return addr;
+ }
+ 
+diff --git a/mm/pt_reclaim.c b/mm/pt_reclaim.c
+new file mode 100644
+index 000000000000..7e9455a18aae
+--- /dev/null
++++ b/mm/pt_reclaim.c
+@@ -0,0 +1,71 @@
++// SPDX-License-Identifier: GPL-2.0
++#include <linux/hugetlb.h>
++#include <asm-generic/tlb.h>
++#include <asm/pgalloc.h>
++
++#include "internal.h"
++
++bool reclaim_pt_is_enabled(unsigned long start, unsigned long end,
++			   struct zap_details *details)
++{
++	return details && details->reclaim_pt && (end - start >= PMD_SIZE);
++}
++
++bool try_get_and_clear_pmd(struct mm_struct *mm, pmd_t *pmd, pmd_t *pmdval)
++{
++	spinlock_t *pml = pmd_lockptr(mm, pmd);
++
++	if (!spin_trylock(pml))
++		return false;
++
++	*pmdval = pmdp_get_lockless(pmd);
++	pmd_clear(pmd);
++	spin_unlock(pml);
++
++	return true;
++}
++
++void free_pte(struct mm_struct *mm, unsigned long addr, struct mmu_gather *tlb,
++	      pmd_t pmdval)
++{
++	pte_free_tlb(tlb, pmd_pgtable(pmdval), addr);
++	mm_dec_nr_ptes(mm);
++}
++
++void try_to_free_pte(struct mm_struct *mm, pmd_t *pmd, unsigned long addr,
++		     struct mmu_gather *tlb)
++{
++	pmd_t pmdval;
++	spinlock_t *pml, *ptl = NULL;
++	pte_t *start_pte, *pte;
++	int i;
++
++	pml = pmd_lock(mm, pmd);
++	start_pte = pte_offset_map_rw_nolock(mm, pmd, addr, &pmdval, &ptl);
++	if (!start_pte)
++		goto out_ptl;
++	if (ptl != pml)
++		spin_lock_nested(ptl, SINGLE_DEPTH_NESTING);
++
++	/* Check if it is empty PTE page */
++	for (i = 0, pte = start_pte; i < PTRS_PER_PTE; i++, pte++) {
++		if (!pte_none(ptep_get(pte)))
++			goto out_ptl;
++	}
++	pte_unmap(start_pte);
++
++	pmd_clear(pmd);
++
++	if (ptl != pml)
++		spin_unlock(ptl);
++	spin_unlock(pml);
++
++	free_pte(mm, addr, tlb, pmdval);
++
++	return;
++out_ptl:
++	if (start_pte)
++		pte_unmap_unlock(start_pte, ptl);
++	if (ptl != pml)
++		spin_unlock(pml);
++}
+-- 
+2.55.0.windows.3
+
+
+
+
+From b98453de899e89df5ad6ba221bf54b1ff3a701c4 Mon Sep 17 00:00:00 2001
+From: Qi Zheng <zhengqi.arch@bytedance.com>
+Date: Tue, 11 Feb 2025 15:26:25 +0800
+Subject: [PATCH 11/21] UPSTREAM: mm: pgtable: fix incorrect reclaim of
+ non-empty PTE pages
+
+In zap_pte_range(), if the pte lock was released midway, the pte entries
+may be refilled with physical pages by another thread, which may cause a
+non-empty PTE page to be reclaimed and eventually cause the system to
+crash.
+
+To fix it, fall back to the slow path in this case to recheck if all pte
+entries are still none.
+
+Link: https://lkml.kernel.org/r/20250211072625.89188-1-zhengqi.arch@bytedance.com
+Fixes: 6375e95f381e ("mm: pgtable: reclaim empty PTE page in madvise(MADV_DONTNEED)")
+Signed-off-by: Qi Zheng <zhengqi.arch@bytedance.com>
+Reported-by: Christian Brauner <brauner@kernel.org>
+Closes: https://lore.kernel.org/all/20250207-anbot-bankfilialen-acce9d79a2c7@brauner/
+Reported-by: Qu Wenruo <quwenruo.btrfs@gmx.com>
+Closes: https://lore.kernel.org/all/152296f3-5c81-4a94-97f3-004108fba7be@gmx.com/
+Tested-by: Zi Yan <ziy@nvidia.com>
+Cc: <stable@vger.kernel.org>
+Cc: "Darrick J. Wong" <djwong@kernel.org>
+Cc: Dave Chinner <david@fromorbit.com>
+Cc: David Hildenbrand <david@redhat.com>
+Cc: Jann Horn <jannh@google.com>
+Cc: Matthew Wilcox <willy@infradead.org>
+Cc: Muchun Song <muchun.song@linux.dev>
+Cc: Zi Yan <ziy@nvidia.com>
+
+Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+Bug: 487357389
+(cherry picked from commit f39edcf6349abb2ca2df96acc8645f4d2631d0a7)
+Change-Id: I47988211d19710fa37a1c8a6a5729e5134995598
+Signed-off-by: Jordan Chang <jordanchang@google.com>
+---
+ mm/memory.c | 12 ++++++++++--
+ 1 file changed, 10 insertions(+), 2 deletions(-)
+
+diff --git a/mm/memory.c b/mm/memory.c
+index 0b6f10e6b3bf..d8af21085bd9 100644
+--- a/mm/memory.c
++++ b/mm/memory.c
+@@ -1608,7 +1608,7 @@ static unsigned long zap_pte_range(struct mmu_gather *tlb,
+ 	pmd_t pmdval;
+ 	unsigned long start = addr;
+ 	bool can_reclaim_pt = reclaim_pt_is_enabled(start, end, details);
+-	bool direct_reclaim = false;
++	bool direct_reclaim = true;
+ 	int nr;
+ 	bool bypass = false;
+ 
+@@ -1712,7 +1712,15 @@ static unsigned long zap_pte_range(struct mmu_gather *tlb,
+ 		zap_install_uffd_wp_if_needed(vma, addr, pte, nr, details, ptent);
+ 	} while (pte += nr, addr += PAGE_SIZE * nr, addr != end);
+ 
+-	if (can_reclaim_pt && addr == end)
++	/*
++	 * Fast path: try to hold the pmd lock and unmap the PTE page.
++	 *
++	 * If the pte lock was released midway (retry case), or if the attempt
++	 * to hold the pmd lock failed, then we need to recheck all pte entries
++	 * to ensure they are still none, thereby preventing the pte entries
++	 * from being repopulated by another thread.
++	 */
++	if (can_reclaim_pt && direct_reclaim && addr == end)
+ 		direct_reclaim = try_get_and_clear_pmd(mm, pmd, &pmdval);
+ 
+ 	add_mm_rss_vec(mm, rss);
+-- 
+2.55.0.windows.3
+
+
+
+
+From 984f3563c8d143ca6dd0ce40972fd02795693793 Mon Sep 17 00:00:00 2001
+From: Vova Sharaienko <sharaienko@google.com>
+Date: Mon, 29 Jun 2026 23:11:57 +0000
+Subject: [PATCH 12/21] ANDROID: dm-bow: Fix Use-After-free in dm_bow_dtr()
+
+Reorder resource teardown so that kobject cleanup completes
+before destroy_workqueue and dm_bufio_client_destroy. This
+ensures all concurrent sysfs accesses (via state_store) complete
+safely before underlying context resources are freed.
+
+Bug: 499160651
+
+Signed-off-by: Vova Sharaienko <sharaienko@google.com>
+Cherrypick-From: https://android-review.googlesource.com/q/commit:902088f65dbd8f3daeddd90f249acd0215289f9c
+Merged-In: I45d01a0691b5cbd0f3dacd77a286c12a260d9568
+Change-Id: I45d01a0691b5cbd0f3dacd77a286c12a260d9568
+---
+ drivers/md/dm-bow.c | 10 +++++-----
+ 1 file changed, 5 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/md/dm-bow.c b/drivers/md/dm-bow.c
+index 6ce39fac0471..a387d47c4185 100644
+--- a/drivers/md/dm-bow.c
++++ b/drivers/md/dm-bow.c
+@@ -610,17 +610,17 @@ static void dm_bow_dtr(struct dm_target *ti)
+ 	struct bow_context *bc = (struct bow_context *) ti->private;
+ 	struct kobject *kobj;
+ 
+-	if (bc->workqueue)
+-		destroy_workqueue(bc->workqueue);
+-	if (bc->bufio)
+-		dm_bufio_client_destroy(bc->bufio);
+-
+ 	kobj = &bc->kobj_holder.kobj;
+ 	if (kobj->state_initialized) {
+ 		kobject_put(kobj);
+ 		wait_for_completion(dm_get_completion_from_kobject(kobj));
+ 	}
+ 
++	if (bc->workqueue)
++		destroy_workqueue(bc->workqueue);
++	if (bc->bufio)
++		dm_bufio_client_destroy(bc->bufio);
++
+ 	mutex_lock(&bc->ranges_lock);
+ 	while (rb_first(&bc->ranges)) {
+ 		struct bow_range *br = container_of(rb_first(&bc->ranges),
+-- 
+2.55.0.windows.3
+
+
+
+
+From 9da55ec9ae580a67618b96c99320f70b64d25a07 Mon Sep 17 00:00:00 2001
+From: Mikhail Gavrilov <mikhail.v.gavrilov@gmail.com>
+Date: Fri, 29 May 2026 13:02:30 +0800
+Subject: [PATCH 13/21] mm/page_alloc: clear page->private in
+ free_pages_prepare()
+
+[ Upstream commit ac1ea219590c09572ed5992dc233bbf7bb70fef9 ]
+
+Several subsystems (slub, shmem, ttm, etc.) use page->private but don't
+clear it before freeing pages.  When these pages are later allocated as
+high-order pages and split via split_page(), tail pages retain stale
+page->private values.
+
+This causes a use-after-free in the swap subsystem.  The swap code uses
+page->private to track swap count continuations, assuming freshly
+allocated pages have page->private == 0.  When stale values are present,
+swap_count_continued() incorrectly assumes the continuation list is valid
+and iterates over uninitialized page->lru containing LIST_POISON values,
+causing a crash:
+
+  KASAN: maybe wild-memory-access in range [0xdead000000000100-0xdead000000000107]
+  RIP: 0010:__do_sys_swapoff+0x1151/0x1860
+
+Fix this by clearing page->private in free_pages_prepare(), ensuring all
+freed pages have clean state regardless of previous use.
+
+Link: https://lkml.kernel.org/r/20260207173615.146159-1-mikhail.v.gavrilov@gmail.com
+Fixes: 3b8000ae185c ("mm/vmalloc: huge vmalloc backing pages should be split rather than compound")
+Signed-off-by: Mikhail Gavrilov <mikhail.v.gavrilov@gmail.com>
+Suggested-by: Zi Yan <ziy@nvidia.com>
+Acked-by: Zi Yan <ziy@nvidia.com>
+Acked-by: David Hildenbrand (Arm) <david@kernel.org>
+Reviewed-by: Vlastimil Babka <vbabka@suse.cz>
+Cc: Brendan Jackman <jackmanb@google.com>
+Cc: Chris Li <chrisl@kernel.org>
+Cc: Hugh Dickins <hughd@google.com>
+Cc: Johannes Weiner <hannes@cmpxchg.org>
+Cc: Kairui Song <ryncsn@gmail.com>
+Cc: Matthew Wilcox (Oracle) <willy@infradead.org>
+Cc: Michal Hocko <mhocko@suse.com>
+Cc: Nicholas Piggin <npiggin@gmail.com>
+Cc: Suren Baghdasaryan <surenb@google.com>
+Cc: <stable@vger.kernel.org>
+Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+[backport: context only]
+Signed-off-by: Li Wang <li.wang@windriver.com>
+Signed-off-by: Sasha Levin <sashal@kernel.org>
+---
+ mm/page_alloc.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/mm/page_alloc.c b/mm/page_alloc.c
+index 691898e785be..2866d0df7ec9 100644
+--- a/mm/page_alloc.c
++++ b/mm/page_alloc.c
+@@ -1386,6 +1386,7 @@ __always_inline bool free_pages_prepare(struct page *page,
+ 
+ 	page_cpupid_reset_last(page);
+ 	page->flags &= ~PAGE_FLAGS_CHECK_AT_PREP;
++	page->private = 0;
+ 	trace_android_vh_mm_free_page(page);
+ 	reset_page_owner(page, order);
+ 	free_page_pinner(page, order);
+-- 
+2.55.0.windows.3
+
+
+
+
+From 2e6924f574d7da6c5357ee5a4146dd66b968e51b Mon Sep 17 00:00:00 2001
+From: Nicholas Carlini <nicholas@carlini.com>
+Date: Tue, 31 Mar 2026 15:25:32 +0200
+Subject: [PATCH 14/21] UPSTREAM: eventpoll: defer struct eventpoll free to RCU
+ grace period
+
+[ Upstream commit 07712db80857d5d09ae08f3df85a708ecfc3b61f ]
+
+In certain situations, ep_free() in eventpoll.c will kfree the epi->ep
+eventpoll struct while it still being used by another concurrent thread.
+Defer the kfree() to an RCU callback to prevent UAF.
+
+Bug: 496716086
+Fixes: f2e467a48287 ("eventpoll: Fix semi-unbounded recursion")
+Signed-off-by: Nicholas Carlini <nicholas@carlini.com>
+Signed-off-by: Christian Brauner <brauner@kernel.org>
+Signed-off-by: Sasha Levin <sashal@kernel.org>
+(cherry picked from commit 7e8083f5eeedab0f460063b9c2c14c9a4e71a427)
+Signed-off-by: Lee Jones <joneslee@google.com>
+Change-Id: I7cb1ad9edf2cae7fb7c2eb050043d5a694ec9fd7
+---
+ fs/eventpoll.c | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/fs/eventpoll.c b/fs/eventpoll.c
+index 00feb3308b4d..a605368d71c3 100644
+--- a/fs/eventpoll.c
++++ b/fs/eventpoll.c
+@@ -228,6 +228,9 @@ struct eventpoll {
+ 	 */
+ 	refcount_t refcount;
+ 
++	/* used to defer freeing past ep_get_upwards_depth_proc() RCU walk */
++	struct rcu_head rcu;
++
+ #ifdef CONFIG_NET_RX_BUSY_POLL
+ 	/* used to track busy poll napi_id */
+ 	unsigned int napi_id;
+@@ -792,7 +795,8 @@ static void ep_free(struct eventpoll *ep)
+ 	mutex_destroy(&ep->mtx);
+ 	free_uid(ep->user);
+ 	wakeup_source_unregister(ep->ws);
+-	kfree(ep);
++	/* ep_get_upwards_depth_proc() may still hold epi->ep under RCU */
++	kfree_rcu(ep, rcu);
+ }
+ 
+ /*
+-- 
+2.55.0.windows.3
+
+
+
+
+From 29873c8fce7ebcaf72c36e94925439675aeccf82 Mon Sep 17 00:00:00 2001
+From: Baolin Wang <baolin.wang@linux.alibaba.com>
+Date: Tue, 17 Mar 2026 17:29:55 +0800
+Subject: [PATCH 15/21] mm: filemap: fix nr_pages calculation overflow in
+ filemap_map_pages()
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+commit f58df566524ebcdfa394329c64f47e3c9257516e upstream.
+
+When running stress-ng on my Arm64 machine with v7.0-rc3 kernel, I
+encountered some very strange crash issues showing up as "Bad page state":
+
+"
+[  734.496287] BUG: Bad page state in process stress-ng-env  pfn:415735fb
+[  734.496427] page: refcount:0 mapcount:1 mapping:0000000000000000 index:0x4cf316 pfn:0x415735fb
+[  734.496434] flags: 0x57fffe000000800(owner_2|node=1|zone=2|lastcpupid=0x3ffff)
+[  734.496439] raw: 057fffe000000800 0000000000000000 dead000000000122 0000000000000000
+[  734.496440] raw: 00000000004cf316 0000000000000000 0000000000000000 0000000000000000
+[  734.496442] page dumped because: nonzero mapcount
+"
+
+After analyzing this page鈥檚 state, it is hard to understand why the
+mapcount is not 0 while the refcount is 0, since this page is not where
+the issue first occurred.  By enabling the CONFIG_DEBUG_VM config, I can
+reproduce the crash as well and captured the first warning where the issue
+appears:
+
+"
+[  734.469226] page: refcount:33 mapcount:0 mapping:00000000bef2d187 index:0x81a0 pfn:0x415735c0
+[  734.469304] head: order:5 mapcount:0 entire_mapcount:0 nr_pages_mapped:0 pincount:0
+[  734.469315] memcg:ffff000807a8ec00
+[  734.469320] aops:ext4_da_aops ino:100b6f dentry name(?):"stress-ng-mmaptorture-9397-0-2736200540"
+[  734.469335] flags: 0x57fffe400000069(locked|uptodate|lru|head|node=1|zone=2|lastcpupid=0x3ffff)
+......
+[  734.469364] page dumped because: VM_WARN_ON_FOLIO((_Generic((page + nr_pages - 1),
+const struct page *: (const struct folio *)_compound_head(page + nr_pages - 1), struct page *:
+(struct folio *)_compound_head(page + nr_pages - 1))) != folio)
+[  734.469390] ------------[ cut here ]------------
+[  734.469393] WARNING: ./include/linux/rmap.h:351 at folio_add_file_rmap_ptes+0x3b8/0x468,
+CPU#90: stress-ng-mlock/9430
+[  734.469551]  folio_add_file_rmap_ptes+0x3b8/0x468 (P)
+[  734.469555]  set_pte_range+0xd8/0x2f8
+[  734.469566]  filemap_map_folio_range+0x190/0x400
+[  734.469579]  filemap_map_pages+0x348/0x638
+[  734.469583]  do_fault_around+0x140/0x198
+......
+[  734.469640]  el0t_64_sync+0x184/0x188
+"
+
+The code that triggers the warning is: "VM_WARN_ON_FOLIO(page_folio(page +
+nr_pages - 1) != folio, folio)", which indicates that set_pte_range()
+tried to map beyond the large folio鈥檚 size.
+
+By adding more debug information, I found that 'nr_pages' had overflowed
+in filemap_map_pages(), causing set_pte_range() to establish mappings for
+a range exceeding the folio size, potentially corrupting fields of pages
+that do not belong to this folio (e.g., page->_mapcount).
+
+After above analysis, I think the possible race is as follows:
+
+CPU 0                                                  CPU 1
+filemap_map_pages()                                   ext4_setattr()
+   //get and lock folio with old inode->i_size
+   next_uptodate_folio()
+
+                                                          .......
+                                                          //shrink the inode->i_size
+                                                          i_size_write(inode, attr->ia_size);
+
+   //calculate the end_pgoff with the new inode->i_size
+   file_end = DIV_ROUND_UP(i_size_read(mapping->host), PAGE_SIZE) - 1;
+   end_pgoff = min(end_pgoff, file_end);
+
+   ......
+   //nr_pages can be overflowed, cause xas.xa_index > end_pgoff
+   end = folio_next_index(folio) - 1;
+   nr_pages = min(end, end_pgoff) - xas.xa_index + 1;
+
+   ......
+   //map large folio
+   filemap_map_folio_range()
+                                                          ......
+                                                          //truncate folios
+                                                          truncate_pagecache(inode, inode->i_size);
+
+To fix this issue, move the 'end_pgoff' calculation before
+next_uptodate_folio(), so the retrieved folio stays consistent with the
+file end to avoid 'nr_pages' calculation overflow.  After this patch, the
+crash issue is gone.
+
+Link: https://lkml.kernel.org/r/1cf1ac59018fc647a87b0dad605d4056a71c14e4.1773739704.git.baolin.wang@linux.alibaba.com
+Fixes: 743a2753a02e ("filemap: cap PTE range to be created to allowed zero fill in folio_map_range()")
+Signed-off-by: Baolin Wang <baolin.wang@linux.alibaba.com>
+Reported-by: Yuanhe Shu <xiangzao@linux.alibaba.com>
+Tested-by: Yuanhe Shu <xiangzao@linux.alibaba.com>
+Acked-by: Kiryl Shutsemau (Meta) <kas@kernel.org>
+Acked-by: David Hildenbrand (Arm) <david@kernel.org>
+Cc: Christian Brauner <brauner@kernel.org>
+Cc: Daniel Gomez <da.gomez@samsung.com>
+Cc: "Darrick J. Wong" <djwong@kernel.org>
+Cc: Dave Chinner <dchinner@redhat.com>
+Cc: David Howells <dhowells@redhat.com>
+Cc: Hannes Reinecke <hare@suse.de>
+Cc: Lorenzo Stoakes (Oracle) <ljs@kernel.org>
+Cc: Luis Chamberalin <mcgrof@kernel.org>
+Cc: Matthew Wilcox (Oracle) <willy@infradead.org>
+Cc: Pankaj Raghav <p.raghav@samsung.com>
+Cc: <stable@vger.kernel.org>
+Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ mm/filemap.c | 11 ++++++++---
+ 1 file changed, 8 insertions(+), 3 deletions(-)
+
+diff --git a/mm/filemap.c b/mm/filemap.c
+index 26e7d5794d6a..e4404ff7c0db 100644
+--- a/mm/filemap.c
++++ b/mm/filemap.c
+@@ -3861,6 +3861,14 @@ vm_fault_t filemap_map_pages(struct vm_fault *vmf,
+ 	pgoff_t orig_start_pgoff = start_pgoff;
+ 	bool can_map_large;
+ 
++	/*
++	 * Recalculate end_pgoff based on file_end before calling
++	 * next_uptodate_folio() to avoid races with concurrent
++	 * truncation.
++	 */
++	file_end = DIV_ROUND_UP(i_size_read(mapping->host), PAGE_SIZE) - 1;
++	end_pgoff = min(end_pgoff, file_end);
++
+ 	rcu_read_lock();
+ 	folio = next_uptodate_folio(&xas, mapping, end_pgoff);
+ 	if (!folio)
+@@ -3868,9 +3876,6 @@ vm_fault_t filemap_map_pages(struct vm_fault *vmf,
+ 	first_pgoff = xas.xa_index;
+ 	orig_start_pgoff = xas.xa_index;
+ 
+-	file_end = DIV_ROUND_UP(i_size_read(mapping->host), PAGE_SIZE) - 1;
+-	end_pgoff = min(end_pgoff, file_end);
+-
+ 	/*
+ 	 * Do not allow to map with PTEs beyond i_size and with PMD
+ 	 * across i_size to preserve SIGBUS semantics.
+-- 
+2.55.0.windows.3
+
+
+
+
+From 11b6de66a297fd07c6bf5904b1a891e5f1941cd8 Mon Sep 17 00:00:00 2001
+From: Yongpeng Yang <yangyongpeng@xiaomi.com>
+Date: Mon, 27 Apr 2026 21:10:51 +0800
+Subject: [PATCH 16/21] UPSTREAM: f2fs: fix incorrect FI_NO_EXTENT handling in
+ __destroy_extent_node()
+
+When __destroy_extent_node() sets the inode flag FI_NO_EXTENT, it does
+not reset the length of the largest extent to 0 and update the inode
+folio. Since modifications to the extent tree are disallowed afterward,
+the cached largest extent may become stale. This can trigger the
+following error in xfstests generic/388:
+
+F2FS-fs (dm-0): sanity_check_extent_cache: inode (ino=1761) extent info [220057, 57, 6] is incorrect, run fsck to fix
+
+In the f2fs_drop_inode path, __destroy_extent_node() does not need to
+guarantee that et->node_cnt is 0, because concurrency with writeback
+is expected in this path, and writeback may update the extent cache.
+
+This patch reverts commit ed78aeebef05 ("f2fs: fix node_cnt race between
+extent node destroy and writeback"), and remove the unnecessary zero
+check of et->node_cnt.
+
+Bug: 544365111
+Fixes: ed78aeebef05 ("f2fs: fix node_cnt race between extent node destroy and writeback")
+Cc: stable@vger.kernel.org
+Reported-by: Chao Yu <chao@kernel.org>
+Suggested-by: Chao Yu <chao@kernel.org>
+Change-Id: Ibca768bcc6a46018e5e2d9f2cf4c16cd69f3fff4
+Signed-off-by: Yongpeng Yang <yangyongpeng@xiaomi.com>
+Reviewed-by: Chao Yu <chao@kernel.org>
+Signed-off-by: Jaegeuk Kim <jaegeuk@kernel.org>
+(cherry picked from commit 1f70ddb28a3c71df124da5fa4040c808116d6bb9)
+Signed-off-by: Chao Yu <chaseyu@google.com>
+---
+ fs/f2fs/extent_cache.c | 2 --
+ 1 file changed, 2 deletions(-)
+
+diff --git a/fs/f2fs/extent_cache.c b/fs/f2fs/extent_cache.c
+index 33c09da4f8fc..cd06e1bf553a 100644
+--- a/fs/f2fs/extent_cache.c
++++ b/fs/f2fs/extent_cache.c
+@@ -648,8 +648,6 @@ static unsigned int __destroy_extent_node(struct inode *inode,
+ 		write_unlock(&et->lock);
+ 	}
+ 
+-	f2fs_bug_on(sbi, atomic_read(&et->node_cnt));
+-
+ 	return node_cnt;
+ }
+ 
+-- 
+2.55.0.windows.3
+
+
+
+
+From 4ad959ce50119d7283fe50432c0aa05c9b90bbfe Mon Sep 17 00:00:00 2001
+From: Usama Arif <usama.arif@linux.dev>
+Date: Tue, 28 Apr 2026 11:24:12 -0400
+Subject: [PATCH 17/21] mm: migrate: requeue destination folio on deferred
+ split queue
+
+[ Upstream commit a2e0c0668a3486f96b86c50e02872c8e94fd4f9c ]
+
+During folio migration, __folio_migrate_mapping() removes the source folio
+from the deferred split queue, but the destination folio is never
+re-queued.  This causes underutilized THPs to escape the shrinker after
+NUMA migration, since they silently drop off the deferred split list.
+
+Fix this by recording whether the source folio was on the deferred split
+queue and its partially mapped state before move_to_new_folio() unqueues
+it, and re-queuing the destination folio after a successful migration if
+it was.
+
+By the time migrate_folio_move() runs, partially mapped folios without a
+pin have already been split by migrate_pages_batch().  So only two cases
+remain on the deferred list at this point:
+  1. Partially mapped folios with a pin (split failed).
+  2. Fully mapped but potentially underused folios.  The recorded
+     partially_mapped state is forwarded to deferred_split_folio() so that
+     the destination folio is correctly re-queued in both cases.
+
+Because THPs are removed from the deferred_list, THP shinker cannot
+split the underutilized THPs in time.  As a result, users will show
+less free memory than before.
+
+Link: https://lkml.kernel.org/r/20260312104723.1351321-1-usama.arif@linux.dev
+Fixes: dafff3f4c850 ("mm: split underused THPs")
+Signed-off-by: Usama Arif <usama.arif@linux.dev>
+Reported-by: Johannes Weiner <hannes@cmpxchg.org>
+Acked-by: Johannes Weiner <hannes@cmpxchg.org>
+Acked-by: Zi Yan <ziy@nvidia.com>
+Acked-by: David Hildenbrand (Arm) <david@kernel.org>
+Acked-by: SeongJae Park <sj@kernel.org>
+Reviewed-by: Wei Yang <richard.weiyang@gmail.com>
+Cc: Alistair Popple <apopple@nvidia.com>
+Cc: Byungchul Park <byungchul@sk.com>
+Cc: Gregory Price <gourry@gourry.net>
+Cc: "Huang, Ying" <ying.huang@linux.alibaba.com>
+Cc: Joshua Hahn <joshua.hahnjy@gmail.com>
+Cc: Matthew Brost <matthew.brost@intel.com>
+Cc: Matthew Wilcox (Oracle) <willy@infradead.org>
+Cc: Nico Pache <npache@redhat.com>
+Cc: Rakie Kim <rakie.kim@sk.com>
+Cc: Ying Huang <ying.huang@linux.alibaba.com>
+Cc: <stable@vger.kernel.org>
+Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+Signed-off-by: Sasha Levin <sashal@kernel.org>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ mm/migrate.c | 17 +++++++++++++++++
+ 1 file changed, 17 insertions(+)
+
+diff --git a/mm/migrate.c b/mm/migrate.c
+index 38e3e6d4f075..899bbe5efbf2 100644
+--- a/mm/migrate.c
++++ b/mm/migrate.c
+@@ -1360,12 +1360,20 @@ static int migrate_folio_move(free_folio_t put_new_folio, unsigned long private,
+ 	int old_page_state = 0;
+ 	struct anon_vma *anon_vma = NULL;
+ 	bool is_lru = !__folio_test_movable(src);
++	bool src_deferred_split = false;
++	bool src_partially_mapped = false;
+ 	struct list_head *prev;
+ 
+ 	__migrate_folio_extract(dst, &old_page_state, &anon_vma);
+ 	prev = dst->lru.prev;
+ 	list_del(&dst->lru);
+ 
++	if (folio_order(src) > 1 &&
++	    !data_race(list_empty(&src->_deferred_list))) {
++		src_deferred_split = true;
++		src_partially_mapped = folio_test_partially_mapped(src);
++	}
++
+ 	rc = move_to_new_folio(dst, src, mode);
+ 	if (rc)
+ 		goto out;
+@@ -1389,6 +1397,15 @@ static int migrate_folio_move(free_folio_t put_new_folio, unsigned long private,
+ 	if (old_page_state & PAGE_WAS_MAPPED)
+ 		remove_migration_ptes(src, dst, 0);
+ 
++	/*
++	 * Requeue the destination folio on the deferred split queue if
++	 * the source was on the queue.  The source is unqueued in
++	 * __folio_migrate_mapping(), so we recorded the state from
++	 * before move_to_new_folio().
++	 */
++	if (src_deferred_split)
++		deferred_split_folio(dst, src_partially_mapped);
++
+ out_unlock_both:
+ 	folio_unlock(dst);
+ 	set_page_owner_migrate_reason(&dst->page, reason);
+-- 
+2.55.0.windows.3
+
+
+
+
+From 06ac15c8281be2fbb75ad8430e3ceee677a4d00e Mon Sep 17 00:00:00 2001
+From: Stephen Hemminger <stephen@networkplumber.org>
+Date: Fri, 17 Apr 2026 20:19:44 -0700
+Subject: [PATCH 18/21] net/sched: netem: check for negative latency and jitter
+
+[ Upstream commit 90be9fedb218ee95a1cf59050d1306fbfb0e8b87 ]
+
+Reject requests with negative latency or jitter.
+A negative value added to current timestamp (u64) wraps
+to an enormous time_to_send, disabling dequeue.
+The original UAPI used u32 for these values; the conversion to 64-bit
+time values via TCA_NETEM_LATENCY64 and TCA_NETEM_JITTER64
+allowed signed values to reach the kernel without validation.
+
+Jitter is already silently clamped by an abs() in netem_change();
+that abs() can be removed in a follow-up once this rejection is in
+place.
+
+Fixes: 99803171ef04 ("netem: add uapi to express delay and jitter in nanoseconds")
+Signed-off-by: Stephen Hemminger <stephen@networkplumber.org>
+Reviewed-by: Simon Horman <horms@kernel.org>
+Link: https://patch.msgid.link/20260418032027.900913-7-stephen@networkplumber.org
+Signed-off-by: Jakub Kicinski <kuba@kernel.org>
+Signed-off-by: Sasha Levin <sashal@kernel.org>
+---
+ net/sched/sch_netem.c | 22 ++++++++++++++++++++++
+ 1 file changed, 22 insertions(+)
+
+diff --git a/net/sched/sch_netem.c b/net/sched/sch_netem.c
+index 2270547b51df..c3f24a66e8ad 100644
+--- a/net/sched/sch_netem.c
++++ b/net/sched/sch_netem.c
+@@ -824,6 +824,16 @@ static int get_dist_table(struct disttable **tbl, const struct nlattr *attr)
+ 	return 0;
+ }
+ 
++static int validate_time(const struct nlattr *attr, const char *name,
++			 struct netlink_ext_ack *extack)
++{
++	if (nla_get_s64(attr) < 0) {
++		NL_SET_ERR_MSG_ATTR_FMT(extack, attr, "negative %s", name);
++		return -EINVAL;
++	}
++	return 0;
++}
++
+ static void get_slot(struct netem_sched_data *q, const struct nlattr *attr)
+ {
+ 	const struct tc_netem_slot *c = nla_data(attr);
+@@ -1037,6 +1047,18 @@ static int netem_change(struct Qdisc *sch, struct nlattr *opt,
+ 			goto table_free;
+ 	}
+ 
++	if (tb[TCA_NETEM_LATENCY64]) {
++		ret = validate_time(tb[TCA_NETEM_LATENCY64], "latency", extack);
++		if (ret)
++			goto table_free;
++	}
++
++	if (tb[TCA_NETEM_JITTER64]) {
++		ret = validate_time(tb[TCA_NETEM_JITTER64], "jitter", extack);
++		if (ret)
++			goto table_free;
++	}
++
+ 	sch_tree_lock(sch);
+ 	/* backup q->clg and q->loss_model */
+ 	old_clg = q->clg;
+-- 
+2.55.0.windows.3
+
+
+
+
+From 6d3171dc3458e4bc13063677a47c254d2328a79d Mon Sep 17 00:00:00 2001
+From: Usama Arif <usama.arif@linux.dev>
+Date: Thu, 21 May 2026 03:29:26 -0700
+Subject: [PATCH 19/21] xfrm: move policy_bydst RCU sync from per-netns .exit
+ to .pre_exit
+
+[ Upstream commit 3e52417318473782012b236d0325bf7d2266a597 ]
+
+The struct pernet_operations docstring in include/net/net_namespace.h
+explicitly warns against blocking RCU primitives in .exit handlers:
+
+    Exit methods using blocking RCU primitives, such as
+    synchronize_rcu(), should be implemented via exit_batch.
+    [...]
+    Please, avoid synchronize_rcu() at all, where it's possible.
+
+    Note that a combination of pre_exit() and exit() can
+    be used, since a synchronize_rcu() is guaranteed between
+    the calls.
+
+xfrm_policy_fini() violates this: it calls synchronize_rcu() before
+freeing the policy_bydst hash tables (so no RCU reader is mid-
+traversal at free time), but runs from xfrm_net_ops.exit -- once per
+namespace -- so a cleanup_net() of N namespaces pays N full RCU
+grace periods serially.
+
+Use the documented pre_exit/exit split. Move the policy flush (and
+the workqueue drains it depends on) into a new .pre_exit handler;
+xfrm_policy_fini() then runs in .exit and frees the hash tables
+after the synchronize_rcu_expedited() that cleanup_net() guarantees
+between the two phases. Providing O(1) RCU grace periods per batch
+instead of O(N).
+
+Observed on Linux 6.18 with a workload doing unshare(CLONE_NEWNET)
+at ~13/sec sustained: cleanup_net() and the netns_wq rescuer kthread
+both stuck in xfrm_policy_fini()'s synchronize_rcu(), >300k struct
+net accumulated in the cleanup queue, Percpu in /proc/meminfo climbed
+to 130+ GB on 256-CPU hosts, and memcg OOMs followed. setup_net and
+__put_net counts were balanced, ruling out a refcount leak.
+
+Fixes: 069daad4f2ae ("xfrm: Wait for RCU readers during policy netns exit")
+Signed-off-by: Usama Arif <usama.arif@linux.dev>
+Signed-off-by: Steffen Klassert <steffen.klassert@secunet.com>
+Signed-off-by: Sasha Levin <sashal@kernel.org>
+---
+ net/xfrm/xfrm_policy.c | 15 ++++++++++-----
+ 1 file changed, 10 insertions(+), 5 deletions(-)
+
+diff --git a/net/xfrm/xfrm_policy.c b/net/xfrm/xfrm_policy.c
+index 8e358fa812d6..821b2e0f72ce 100644
+--- a/net/xfrm/xfrm_policy.c
++++ b/net/xfrm/xfrm_policy.c
+@@ -4257,17 +4257,21 @@ static int __net_init xfrm_policy_init(struct net *net)
+ 	return -ENOMEM;
+ }
+ 
+-static void xfrm_policy_fini(struct net *net)
++static void __net_exit xfrm_net_pre_exit(struct net *net)
+ {
+-	struct xfrm_pol_inexact_bin *b, *t;
+-	unsigned int sz;
+-	int dir;
+-
++	disable_work_sync(&net->xfrm.policy_hthresh.work);
+ 	flush_work(&net->xfrm.policy_hash_work);
+ #ifdef CONFIG_XFRM_SUB_POLICY
+ 	xfrm_policy_flush(net, XFRM_POLICY_TYPE_SUB, false);
+ #endif
+ 	xfrm_policy_flush(net, XFRM_POLICY_TYPE_MAIN, false);
++}
++
++static void xfrm_policy_fini(struct net *net)
++{
++	struct xfrm_pol_inexact_bin *b, *t;
++	unsigned int sz;
++	int dir;
+ 
+ 	WARN_ON(!list_empty(&net->xfrm.policy_all));
+ 
+@@ -4345,6 +4349,7 @@ static void __net_exit xfrm_net_exit(struct net *net)
+ 
+ static struct pernet_operations __net_initdata xfrm_net_ops = {
+ 	.init = xfrm_net_init,
++	.pre_exit = xfrm_net_pre_exit,
+ 	.exit = xfrm_net_exit,
+ };
+ 
+-- 
+2.55.0.windows.3
+
+
+
+
+From 47817332f045f20358e18485501bc31940603c48 Mon Sep 17 00:00:00 2001
+From: Carlos Llamas <cmllamas@google.com>
+Date: Fri, 19 Jun 2026 18:52:30 +0000
+Subject: [PATCH 20/21] UPSTREAM: binder: fix UAF in binder_thread_release()
+
+commit 114a116aaa5f0295376cdf12da743c5bce3b20ce upstream.
+
+When a thread exits, binder_thread_release() walks its transaction stack
+to clear the t->from and t->to_proc that correspond with the exiting
+thread. However, a process dying in parallel might attempt to kfree some
+of these transactions. And if one of them has no associated t->to_proc,
+the t->to_proc->inner_lock will not be acquired.
+
+This means that transaction accesses in binder_thread_release() after
+t->to_proc has been cleared might race with binder_free_transaction()
+and cause a use-after-free error as reported by KASAN:
+
+  ==================================================================
+  BUG: KASAN: slab-use-after-free in binder_thread_release+0x5d0/0x798
+  Write of size 8 at addr ffff000016627500 by task X/715
+
+  CPU: 17 UID: 0 PID: 715 Comm: X Not tainted 7.1.0-rc5-00149-g8fde5d1d47f6 #30 PREEMPT
+  Hardware name: linux,dummy-virt (DT)
+  Call trace:
+   binder_thread_release+0x5d0/0x798
+   binder_ioctl+0x12c0/0x299c
+   [...]
+
+  Allocated by task 717 on cpu 18 at 67.267803s:
+   __kasan_kmalloc+0xa0/0xbc
+   __kmalloc_cache_noprof+0x174/0x444
+   binder_transaction+0x554/0x8150
+   binder_thread_write+0xa30/0x4354
+   binder_ioctl+0x20f0/0x299c
+   [...]
+
+  Freed by task 202 on cpu 18 at 90.416221s:
+   __kasan_slab_free+0x58/0x80
+   kfree+0x1a0/0x4a4
+   binder_free_transaction+0x150/0x294
+   binder_send_failed_reply+0x398/0x6d8
+   binder_release_work+0x3e4/0x4ec
+   binder_deferred_func+0xbd8/0x104c
+   [...]
+  ==================================================================
+
+In order to avoid this, make sure that binder_free_transaction() reads
+the t->to_proc under the transaction lock. This will serialize the
+transaction release with the accesses in binder_thread_release(). Plus,
+it matches the documented locking rules for @to_proc.
+
+Cc: stable <stable@kernel.org>
+Fixes: 7a4408c6bd3e ("binder: make sure accesses to proc/thread are safe")
+Reviewed-by: Alice Ryhl <aliceryhl@google.com>
+Signed-off-by: Carlos Llamas <cmllamas@google.com>
+Link: https://patch.msgid.link/20260619185233.2194678-1-cmllamas@google.com
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+
+Bug: 498315353
+(cherry picked from commit e63032dc715026a96bcaa13d375a8e15c91caa84)
+Change-Id: I34d087a438027eae8600355e2a8c8c98eb12de76
+Signed-off-by: Carlos Llamas <cmllamas@google.com>
+---
+ drivers/android/binder.c | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/android/binder.c b/drivers/android/binder.c
+index 47b3bfeb6f8c..b38b6101e7a6 100644
+--- a/drivers/android/binder.c
++++ b/drivers/android/binder.c
+@@ -1837,7 +1837,11 @@ static void binder_txn_latency_free(struct binder_transaction *t)
+ 
+ static void binder_free_transaction(struct binder_transaction *t)
+ {
+-	struct binder_proc *target_proc = t->to_proc;
++	struct binder_proc *target_proc;
++
++	spin_lock(&t->lock);
++	target_proc = t->to_proc;
++	spin_unlock(&t->lock);
+ 
+ 	trace_android_vh_free_oem_binder_struct(t);
+ 	if (target_proc) {
+-- 
+2.55.0.windows.3
+
+
+
+
+From 89effac63c0fd6cb701e25894bdbf634a964069a Mon Sep 17 00:00:00 2001
+From: Carlos Llamas <cmllamas@google.com>
+Date: Fri, 19 Jun 2026 18:52:31 +0000
+Subject: [PATCH 21/21] UPSTREAM: binder: fix UAF in binder_free_transaction()
+
+commit f223d27a546c1e1f48d38fd67760e78f068fe8c4 upstream.
+
+In binder_free_transaction(), the t->to_proc is read under the t->lock.
+However, once the t->lock is dropped, the to_proc can die in parallel.
+This leads to a use-after-free error when we attempt to acquire its
+inner lock right afterwards:
+
+  ==================================================================
+  BUG: KASAN: slab-use-after-free in _raw_spin_lock+0xe4/0x1a0
+  Write of size 4 at addr ffff00001125da70 by task B/672
+
+  CPU: 20 UID: 0 PID: 672 Comm: B Not tainted 7.1.0-rc6-00284-g8e65320d91cd #4 PREEMPT
+  Hardware name: linux,dummy-virt (DT)
+  Call trace:
+   _raw_spin_lock+0xe4/0x1a0
+   binder_free_transaction+0x8c/0x320
+   binder_send_failed_reply+0x21c/0x2f8
+   binder_thread_release+0x488/0x7e0
+   binder_ioctl+0x12c0/0x29a0
+  [...]
+
+  Allocated by task 675:
+   __kmalloc_cache_noprof+0x174/0x444
+   binder_open+0x118/0xb70
+   do_dentry_open+0x374/0x1040
+   vfs_open+0x58/0x3bc
+  [...]
+
+  Freed by task 212:
+   __kasan_slab_free+0x58/0x80
+   kfree+0x1a0/0x4a4
+   binder_proc_dec_tmpref+0x32c/0x5e0
+   binder_deferred_func+0xc48/0x104c
+   process_one_work+0x53c/0xbc0
+  [...]
+  ==================================================================
+
+To prevent this, pin the target thread (t->to_thread) to guarantee the
+target process remains alive. Undelivered transactions without a target
+thread are already safe, as the target process can only be the current
+context in those paths.
+
+Cc: stable <stable@kernel.org>
+Reported-by: Alice Ryhl <aliceryhl@google.com>
+Closes: https://lore.kernel.org/all/aikJKVuny_eOivwN@google.com/
+Fixes: a370003cc301 ("binder: fix possible UAF when freeing buffer")
+Signed-off-by: Carlos Llamas <cmllamas@google.com>
+Reviewed-by: Alice Ryhl <aliceryhl@google.com>
+Link: https://patch.msgid.link/20260619185233.2194678-2-cmllamas@google.com
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+
+Bug: 498315353
+(cherry picked from commit d45ef513eed1abebfec90c3cfb6ae50c2a4182db)
+Change-Id: I96d33c0b31591d5bcc626ce4a2f0c0648cf924e8
+Signed-off-by: Carlos Llamas <cmllamas@google.com>
+---
+ drivers/android/binder.c | 13 +++++++++++++
+ 1 file changed, 13 insertions(+)
+
+diff --git a/drivers/android/binder.c b/drivers/android/binder.c
+index b38b6101e7a6..ee17787fe6b4 100644
+--- a/drivers/android/binder.c
++++ b/drivers/android/binder.c
+@@ -1837,10 +1837,19 @@ static void binder_txn_latency_free(struct binder_transaction *t)
+ 
+ static void binder_free_transaction(struct binder_transaction *t)
+ {
++	struct binder_thread *target_thread;
+ 	struct binder_proc *target_proc;
+ 
+ 	spin_lock(&t->lock);
+ 	target_proc = t->to_proc;
++	target_thread = t->to_thread;
++	/*
++	 * Pin target_thread to keep target_proc alive. Undelivered
++	 * transactions with !target_thread are safe, as target_proc
++	 * can only be the current context there.
++	 */
++	if (target_thread)
++		atomic_inc(&target_thread->tmp_ref);
+ 	spin_unlock(&t->lock);
+ 
+ 	trace_android_vh_free_oem_binder_struct(t);
+@@ -1856,6 +1865,10 @@ static void binder_free_transaction(struct binder_transaction *t)
+ 			t->buffer->transaction = NULL;
+ 		binder_inner_proc_unlock(target_proc);
+ 	}
++
++	if (target_thread)
++		binder_thread_dec_tmpref(target_thread);
++
+ 	if (trace_binder_txn_latency_free_enabled())
+ 		binder_txn_latency_free(t);
+ 	/*
+-- 
+2.55.0.windows.3
+
+
+
+
+
+---
+
+NOT-BACKPORTED (4条不可移植，未包含在本patch文件中):
+
+1. 1eb5dc8d1c44  UPSTREAM: sched/fair: Fix zero_vruntime tracking
+   - 依赖 zero_vruntime 机制，6.12.69 基线 fair.c 仍为 min_vruntime，
+     上游 main 中该机制出现 0 次引用，无法移植
+
+2. ec23c8282943  UPSTREAM: sched/fair: Fix zero_vruntime tracking fix
+   - 同上，是 1eb5dc8d1c44 的后续修复，依赖缺失
+
+3. 4275cfb662e4  sched/deadline: Fix dl_server_stopped()
+   - 依赖被 KMI 排除的 d290b02d7ccc（dl_server_stopped 引入者），
+     基线无 dl_server_stopped 符号，强行移植需处理结构体兼容
+
+4. d7fd56ed5e07  sched/deadline: Stop dl_server before CPU goes offline
+   - core.c (sched_cpu_dying 加 update_rq_clock + dl_server_stop) 与
+     deadline.c (dl_server_start 加 cpu_online 检查) 的改动在 6.12.69
+     基线中均已存在，无需移植
+

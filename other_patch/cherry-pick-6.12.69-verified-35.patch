@@ -1,0 +1,2618 @@
+﻿From c71bf35caba12bfd9bc23e32b0bcd9e02d1cf1ac Mon Sep 17 00:00:00 2001
+From: Zicheng Qu <quzicheng@huawei.com>
+Date: Fri, 24 Apr 2026 07:11:13 +0000
+Subject: [PATCH] sched/fair: Clear rel_deadline when initializing forked
+ entities
+
+[ Upstream commit 3da56dc063cd77b9c0b40add930767fab4e389f3 ]
+
+A yield-triggered crash can happen when a newly forked sched_entity
+enters the fair class with se->rel_deadline unexpectedly set.
+
+The failing sequence is:
+
+  1. A task is forked while se->rel_deadline is still set.
+  2. __sched_fork() initializes vruntime, vlag and other sched_entity
+     state, but does not clear rel_deadline.
+  3. On the first enqueue, enqueue_entity() calls place_entity().
+  4. Because se->rel_deadline is set, place_entity() treats se->deadline
+     as a relative deadline and converts it to an absolute deadline by
+     adding the current vruntime.
+  5. However, the forked entity's deadline is not a valid inherited
+     relative deadline for this new scheduling instance, so the conversion
+     produces an abnormally large deadline.
+  6. If the task later calls sched_yield(), yield_task_fair() advances
+     se->vruntime to se->deadline.
+  7. The inflated vruntime is then used by the following enqueue path,
+     where the vruntime-derived key can overflow when multiplied by the
+     entity weight.
+  8. This corrupts cfs_rq->sum_w_vruntime, breaks EEVDF eligibility
+     calculation, and can eventually make all entities appear ineligible.
+     pick_next_entity() may then return NULL unexpectedly, leading to a
+     later NULL dereference.
+
+A captured trace shows the effect clearly. Before yield, the entity's
+vruntime was around:
+
+  9834017729983308
+
+After yield_task_fair() executed:
+
+  se->vruntime = se->deadline
+
+the vruntime jumped to:
+
+  19668035460670230
+
+and the deadline was later advanced further to:
+
+  19668035463470230
+
+This shows that the deadline had already become abnormally large before
+yield_task_fair() copied it into vruntime.
+
+rel_deadline is only meaningful when se->deadline really carries a
+relative deadline that still needs to be placed against vruntime. A
+freshly forked sched_entity should not inherit or retain this state.
+Clear se->rel_deadline in __sched_fork(), together with the other
+sched_entity runtime state, so that the first enqueue does not interpret
+the new entity's deadline as a stale relative deadline.
+
+Fixes: 82e9d0456e06 ("sched/fair: Avoid re-setting virtual deadline on 'migrations'")
+Analyzed-by: Hui Tang <tanghui20@huawei.com>
+Analyzed-by: Zhang Qiao <zhangqiao22@huawei.com>
+Signed-off-by: Zicheng Qu <quzicheng@huawei.com>
+Signed-off-by: Peter Zijlstra (Intel) <peterz@infradead.org>
+Link: https://patch.msgid.link/20260424071113.1199600-1-quzicheng@huawei.com
+Signed-off-by: Sasha Levin <sashal@kernel.org>
+---
+ kernel/sched/core.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/kernel/sched/core.c b/kernel/sched/core.c
+index df76b32a013fb..9b238c9c71c67 100644
+--- a/kernel/sched/core.c
++++ b/kernel/sched/core.c
+@@ -4453,6 +4453,7 @@ static void __sched_fork(unsigned long clone_flags, struct task_struct *p)
+ 	p->se.nr_migrations		= 0;
+ 	p->se.vruntime			= 0;
+ 	p->se.vlag			= 0;
++	p->se.rel_deadline		= 0;
+ 	INIT_LIST_HEAD(&p->se.group_node);
+ 
+ 	/* A delayed task cannot be in clone(). */
+
+
+
+From d66792919d4f7bd326dfd8c21d019f7c5d4ef05c Mon Sep 17 00:00:00 2001
+From: Peter Zijlstra <peterz@infradead.org>
+Date: Sat, 4 Apr 2026 12:22:44 +0200
+Subject: [PATCH] sched/deadline: Use revised wakeup rule for dl_server
+
+[ Upstream commit 14a857056466be9d3d907a94e92a704ac1be149b ]
+
+John noted that commit 115135422562 ("sched/deadline: Fix 'stuck' dl_server")
+unfixed the issue from commit a3a70caf7906 ("sched/deadline: Fix dl_server
+behaviour").
+
+The issue in commit 115135422562 was for wakeups of the server after the
+deadline; in which case you *have* to start a new period. The case for
+a3a70caf7906 is wakeups before the deadline.
+
+Now, because the server is effectively running a least-laxity policy, it means
+that any wakeup during the runnable phase means dl_entity_overflow() will be
+true. This means we need to adjust the runtime to allow it to still run until
+the existing deadline expires.
+
+Use the revised wakeup rule for dl_defer entities.
+
+Fixes: 115135422562 ("sched/deadline: Fix 'stuck' dl_server")
+Reported-by: John Stultz <jstultz@google.com>
+Signed-off-by: Peter Zijlstra (Intel) <peterz@infradead.org>
+Acked-by: Juri Lelli <juri.lelli@redhat.com>
+Tested-by: John Stultz <jstultz@google.com>
+Link: https://patch.msgid.link/20260404102244.GB22575@noisy.programming.kicks-ass.net
+Signed-off-by: Sasha Levin <sashal@kernel.org>
+---
+ kernel/sched/deadline.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/kernel/sched/deadline.c b/kernel/sched/deadline.c
+index 8acdd97538546..1ef891f8e3f2f 100644
+--- a/kernel/sched/deadline.c
++++ b/kernel/sched/deadline.c
+@@ -1079,7 +1079,7 @@ static void update_dl_entity(struct sched_dl_entity *dl_se)
+ 	if (dl_time_before(dl_se->deadline, rq_clock(rq)) ||
+ 	    dl_entity_overflow(dl_se, rq_clock(rq))) {
+ 
+-		if (unlikely(!dl_is_implicit(dl_se) &&
++		if (unlikely((!dl_is_implicit(dl_se) || dl_se->dl_defer) &&
+ 			     !dl_time_before(dl_se->deadline, rq_clock(rq)) &&
+ 			     !is_dl_boosted(dl_se))) {
+ 			update_dl_revised_wakeup(dl_se, rq);
+
+
+
+From 684a78183c54c23e70d1cba320f7fc184604210b Mon Sep 17 00:00:00 2001
+From: Jiayuan Chen <jiayuan.chen@linux.dev>
+Date: Mon, 30 Mar 2026 15:32:29 +0800
+Subject: [PATCH] irq_work: Fix use-after-free in irq_work_single() on
+ PREEMPT_RT
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+[ Upstream commit 91840be8f710370607f949a627e070896faeddb8 ]
+
+On PREEMPT_RT, non-HARD irq_work runs in per-CPU kthreads via
+run_irq_workd(), so irq_work_sync() uses rcuwait() to wait for BUSY==0.
+
+After irq_work_single() clears BUSY via atomic_cmpxchg(), it still
+dereferences @work for irq_work_is_hard() and rcuwait_wake_up().
+
+An irq_work_sync() caller on another CPU that enters after BUSY is cleared
+can observe BUSY==0 immediately, return, and free the work before those
+accesses complete 鈥?causing a use-after-free.
+
+Fix this by wrapping run_irq_workd() in guard(rcu)() so that the entire
+irq_work_single() execution is within an RCU read-side critical
+section. Then add synchronize_rcu() in irq_work_sync() after
+rcuwait_wait_event() to ensure the caller waits for the RCU grace period
+before returning, preventing premature frees.
+
+Fixes: 810979682ccc ("irq_work: Allow irq_work_sync() to sleep if irq_work() no IRQ support.")
+Suggested-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
+Suggested-by: Steven Rostedt <rostedt@goodmis.org>
+Signed-off-by: Jiayuan Chen <jiayuan.chen@linux.dev>
+Signed-off-by: Thomas Gleixner <tglx@kernel.org>
+Reviewed-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
+Link: https://patch.msgid.link/20260330073234.303732-1-jiayuan.chen@linux.dev
+Signed-off-by: Sasha Levin <sashal@kernel.org>
+---
+ kernel/irq_work.c | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/kernel/irq_work.c b/kernel/irq_work.c
+index 2f4fb336dda17..188721af8eb31 100644
+--- a/kernel/irq_work.c
++++ b/kernel/irq_work.c
+@@ -292,6 +292,12 @@ void irq_work_sync(struct irq_work *work)
+ 	    !arch_irq_work_has_interrupt()) {
+ 		rcuwait_wait_event(&work->irqwait, !irq_work_is_busy(work),
+ 				   TASK_UNINTERRUPTIBLE);
++		/*
++		 * Ensure irq_work_single() does not access @work
++		 * after removing IRQ_WORK_BUSY. It is always
++		 * accessed within a RCU-read section.
++		 */
++		synchronize_rcu();
+ 		return;
+ 	}
+ 
+@@ -302,6 +308,7 @@ EXPORT_SYMBOL_GPL(irq_work_sync);
+ 
+ static void run_irq_workd(unsigned int cpu)
+ {
++	guard(rcu)();
+ 	irq_work_run_list(this_cpu_ptr(&lazy_list));
+ }
+ 
+
+
+
+From 709339164c02bd0e76a0088e23ae1719a3ebd02b Mon Sep 17 00:00:00 2001
+From: Richard Chang <richardycc@google.com>
+Date: Thu, 30 Apr 2026 08:13:42 +0000
+Subject: [PATCH] ANDROID: zram: fix UAF and data corruption in prefetch
+
+The ZRAM_ANDROID_IOC_PROCESS_PREFETCH ioctl currently submits
+asynchronous bios and returns immediately. This introduces two race
+conditions:
+
+1. Use-After-Free (UAF) during the zram device reset:
+   The bio completion handler queues work that accesses `zram->table`
+   and `zram->mem_pool` without locks. `zram_reset_device` frees these
+   structures without waiting for the work to complete, leading to UAF.
+2. Data corruption during slot reuse:
+   Because the ioctl releases `pp_in_progress` and `init_lock` before
+   the bio completion handler finishes, a slot being prefetched can be
+   freed and promptly reused by a new writeback operation. When the
+   original prefetch bio finally completes, it sees the `ZRAM_WB` flag
+   set by the new writeback and overwrites the slot with stale data,
+   causing data corruption.
+
+Fix these issues by making the prefetch operation synchronous. We track
+in-flight bios using a local `struct zram_prefetch_ctl` within
+`zram_prefetch_slots` and wait for them to complete before returning to
+userspace and releasing the locks.
+
+Fixes: 160a4092db67 ("ANDROID: zram: Add ZRAM_ANDROID_IOC_PROCESS_PREFETCH ioctl")
+Bug: 499177393
+Bug: 512274150
+Change-Id: I21c7de883777c980907823334524315cb0db9545
+Signed-off-by: Richard Chang <richardycc@google.com>
+---
+ drivers/block/zram/zram_drv.c | 28 ++++++++++++++++++++++++++--
+ 1 file changed, 26 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/block/zram/zram_drv.c b/drivers/block/zram/zram_drv.c
+index 55f52f917fb31..523f56629e66d 100644
+--- a/drivers/block/zram/zram_drv.c
++++ b/drivers/block/zram/zram_drv.c
+@@ -463,6 +463,11 @@ struct zram_wb_req {
+ 	struct list_head entry;
+ };
+ 
++struct zram_prefetch_ctl {
++	atomic_t num_inflight;
++	wait_queue_head_t done_wait;
++};
++
+ struct zram_rb_req {
+ 	struct work_struct work;
+ 	struct zram *zram;
+@@ -477,6 +482,7 @@ struct zram_rb_req {
+ 		int error;
+ 	};
+ 	u32 index;
++	struct zram_prefetch_ctl *pf_ctl;
+ };
+ 
+ static ssize_t compressed_writeback_store(struct device *dev,
+@@ -1152,6 +1158,12 @@ static int zram_populate_table(struct zram *zram, struct page *page, u32 index)
+ 	return 0;
+ }
+ 
++static inline void zram_prefetch_dec_and_wake(struct zram_prefetch_ctl *pf_ctl)
++{
++	if (atomic_dec_and_test(&pf_ctl->num_inflight))
++		wake_up(&pf_ctl->done_wait);
++}
++
+ static void zram_deferred_prefetch(struct work_struct *w)
+ {
+ 	struct zram_rb_req *req = container_of(w, struct zram_rb_req, work);
+@@ -1163,6 +1175,7 @@ static void zram_deferred_prefetch(struct work_struct *w)
+ 
+ 	__free_page(page);
+ 	bio_put(req->bio);
++	zram_prefetch_dec_and_wake(req->pf_ctl);
+ 	kfree(req);
+ }
+ 
+@@ -1172,6 +1185,7 @@ static void zram_prefetch_read_endio(struct bio *bio)
+ 	struct page *page = bio_first_page_all(bio);
+ 
+ 	if (bio->bi_status) {
++		zram_prefetch_dec_and_wake(req->pf_ctl);
+ 		__free_page(page);
+ 		bio_put(bio);
+ 		kfree(req);
+@@ -1187,7 +1201,8 @@ static void zram_prefetch_read_endio(struct bio *bio)
+ }
+ 
+ static int zram_prefetch_from_bdev(struct zram *zram, struct page *page,
+-				   u32 index, unsigned long blk_idx)
++				   u32 index, unsigned long blk_idx,
++				   struct zram_prefetch_ctl *pf_ctl)
+ {
+ 	struct zram_rb_req *req;
+ 	struct bio *bio;
+@@ -1208,12 +1223,14 @@ static int zram_prefetch_from_bdev(struct zram *zram, struct page *page,
+ 	req->index = index;
+ 	req->blk_idx = blk_idx;
+ 	req->bio = bio;
++	req->pf_ctl = pf_ctl;
+ 
+ 	bio->bi_iter.bi_sector = blk_idx * (PAGE_SIZE >> 9);
+ 	bio->bi_private = req;
+ 	bio->bi_end_io = zram_prefetch_read_endio;
+ 
+ 	__bio_add_page(bio, page, PAGE_SIZE, 0);
++	atomic_inc(&pf_ctl->num_inflight);
+ 	submit_bio(bio);
+ 
+ 	return 0;
+@@ -1222,11 +1239,15 @@ static int zram_prefetch_from_bdev(struct zram *zram, struct page *page,
+ int zram_prefetch_slots(struct zram *zram, struct zram_pp_ctl *ctl)
+ {
+ 	struct zram_pp_slot *pps;
++	struct zram_prefetch_ctl pf_ctl;
+ 	int ret = 0;
+ 	u32 index = 0;
+ 	unsigned long blk_idx;
+ 	struct page *page = NULL;
+ 
++	atomic_set(&pf_ctl.num_inflight, 0);
++	init_waitqueue_head(&pf_ctl.done_wait);
++
+ 	while ((pps = select_pp_slot(ctl))) {
+ 		index = pps->index;
+ 		zram_slot_lock(zram, index);
+@@ -1246,7 +1267,8 @@ int zram_prefetch_slots(struct zram *zram, struct zram_pp_ctl *ctl)
+ 		}
+ 
+ 		/* Read the page from backing device and restore to zram */
+-		ret = zram_prefetch_from_bdev(zram, page, index, blk_idx);
++		ret = zram_prefetch_from_bdev(zram, page, index, blk_idx,
++					      &pf_ctl);
+ 		if (ret)
+ 			break;
+ 
+@@ -1262,6 +1284,8 @@ int zram_prefetch_slots(struct zram *zram, struct zram_pp_ctl *ctl)
+ 
+ 	if (page)
+ 		__free_page(page);
++
++	wait_event(pf_ctl.done_wait, atomic_read(&pf_ctl.num_inflight) == 0);
+ 	return ret;
+ }
+ 
+
+
+
+From 1dabe171717e19d4806db3819ce5a09f6650dc99 Mon Sep 17 00:00:00 2001
+From: Richard Chang <richardycc@google.com>
+Date: Tue, 12 May 2026 07:49:18 +0000
+Subject: [PATCH] BACKPORT: zram: fix use-after-free in zram_writeback_endio
+
+A crash was observed in zram_writeback_endio due to a NULL pointer
+dereference in wake_up.  The root cause is a race condition between the
+bio completion handler (zram_writeback_endio) and the writeback task.
+
+In zram_writeback_endio, wake_up() is called on &wb_ctl->done_wait after
+releasing wb_ctl->done_lock.  This creates a race window where the
+writeback task can see num_inflight become 0, return, and free wb_ctl
+before zram_writeback_endio calls wake_up().
+
+CPU 0 (zram_writeback_endio)     CPU 1 (writeback_store)
+============================     ============================
+                                 zram_writeback_slots
+                                   zram_submit_wb_request
+                                   zram_submit_wb_request
+                                   wait_event(wb_ctl->done_wait)
+spin_lock(&wb_ctl->done_lock);
+list_add(&req->entry, &wb_ctl->done_reqs);
+spin_unlock(&wb_ctl->done_lock);
+wake_up(&wb_ctl->done_wait);
+                                   zram_complete_done_reqs
+spin_lock(&wb_ctl->done_lock);
+list_add(&req->entry, &wb_ctl->done_reqs);
+spin_unlock(&wb_ctl->done_lock);
+                                   while (num_inflight) > 0)
+                                     spin_lock(&wb_ctl->done_lock);
+                                     list_del(&req->entry);
+                                     spin_unlock(&wb_ctl->done_lock);
+                                     // num_inflight becomes 0
+                                     atomic_dec(num_inflight);
+
+                                 // Leave zram_writeback_slots
+                                 // Free wb_ctl
+                                 release_wb_ctl(wb_ctl);
+// UAF crash!
+wake_up(&wb_ctl->done_wait);
+
+This patch fixes this race by using RCU.  By protecting wb_ctl with
+rcu_read_lock() in zram_writeback_endio and using kfree_rcu() to free it,
+we ensure that wb_ctl remains valid during the execution of
+zram_writeback_endio.
+
+Link: https://lore.kernel.org/20260512074918.2606208-1-richardycc@google.com
+Fixes: f405066a1f0d ("zram: introduce writeback bio batching")
+Signed-off-by: Richard Chang <richardycc@google.com>
+Suggested-by: Sergey Senozhatsky <senozhatsky@chromium.org>
+Suggested-by: Minchan Kim <minchan@kernel.org>
+Acked-by: Sergey Senozhatsky <senozhatsky@chromium.org>
+Acked-by: Minchan Kim <minchan@kernel.org>
+Cc: Brian Geffon <bgeffon@google.com>
+Cc: Jens Axboe <axboe@kernel.dk>
+Cc: Martin Liu <liumartin@google.com>
+Cc: wang wei <a929244872@163.com>
+Cc: <stable@vger.kernel.org>
+Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+
+Bug: 507564719
+Change-Id: I01b0fad4626956c59ed4a9b91db54d2d03383915
+(cherry picked from commit bf62f69574b19720ae5fbbbcdf24a0c4e3e05e43)
+[richardycc: move wbctl changes in zram_drv.h]
+Signed-off-by: Richard Chang <richardycc@google.com>
+---
+ drivers/block/zram/zram_drv.c | 4 +++-
+ drivers/block/zram/zram_drv.h | 1 +
+ 2 files changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/block/zram/zram_drv.c b/drivers/block/zram/zram_drv.c
+index 523f56629e66d..cb22fe9528c11 100644
+--- a/drivers/block/zram/zram_drv.c
++++ b/drivers/block/zram/zram_drv.c
+@@ -805,7 +805,7 @@ void release_wb_ctl(struct zram_wb_ctl *wb_ctl)
+ 		release_wb_req(req);
+ 	}
+ 
+-	kfree(wb_ctl);
++	kfree_rcu(wb_ctl, rcu);
+ }
+ 
+ struct zram_wb_ctl *init_wb_ctl(struct zram *zram)
+@@ -930,11 +930,13 @@ static void zram_writeback_endio(struct bio *bio)
+ 	struct zram_wb_ctl *wb_ctl = bio->bi_private;
+ 	unsigned long flags;
+ 
++	rcu_read_lock();
+ 	spin_lock_irqsave(&wb_ctl->done_lock, flags);
+ 	list_add(&req->entry, &wb_ctl->done_reqs);
+ 	spin_unlock_irqrestore(&wb_ctl->done_lock, flags);
+ 
+ 	wake_up(&wb_ctl->done_wait);
++	rcu_read_unlock();
+ }
+ 
+ static void zram_submit_wb_request(struct zram *zram,
+diff --git a/drivers/block/zram/zram_drv.h b/drivers/block/zram/zram_drv.h
+index 2a600c48baa1b..1df728ae19457 100644
+--- a/drivers/block/zram/zram_drv.h
++++ b/drivers/block/zram/zram_drv.h
+@@ -178,6 +178,7 @@ struct zram_wb_ctl {
+ 	wait_queue_head_t done_wait;
+ 	spinlock_t done_lock;
+ 	atomic_t num_inflight;
++	struct rcu_head rcu;
+ 	u64 processed_bytes;
+ };
+ 
+
+
+
+From 1be8e41962f1f695ebeec6eb847d314b60cb2c4b Mon Sep 17 00:00:00 2001
+From: Kemeng Shi <shikemeng@huaweicloud.com>
+Date: Mon, 23 Mar 2026 02:37:35 -0700
+Subject: [PATCH] mm: shmem: avoid unpaired folio_unlock() in
+ shmem_swapin_folio()
+
+commit e08d5f515613a9860bfee7312461a19f422adb5e upstream.
+
+If we get a folio from swap_cache_get_folio() successfully but encounter a
+failure before the folio is locked, we will unlock the folio which was not
+previously locked.
+
+Put the folio and set it to NULL when a failure occurs before the folio is
+locked to fix the issue.
+
+Link: https://lkml.kernel.org/r/20250516170939.965736-1-shikemeng@huaweicloud.com
+Link: https://lkml.kernel.org/r/20250516170939.965736-2-shikemeng@huaweicloud.com
+Fixes: 058313515d5a ("mm: shmem: fix potential data corruption during shmem swapin")
+Signed-off-by: Kemeng Shi <shikemeng@huaweicloud.com>
+Reviewed-by: Baolin Wang <baolin.wang@linux.alibaba.com>
+Reviewed-by: Kairui Song <kasong@tencent.com>
+Cc: Hugh Dickins <hughd@google.com>
+Cc: kernel test robot <oliver.sang@intel.com>
+Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+
+[ hughd: removed series cover letter comments ]
+Signed-off-by: Hugh Dickins <hughd@google.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ mm/shmem.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/mm/shmem.c b/mm/shmem.c
+index 9105c732f3411..9b7df8397efc0 100644
+--- a/mm/shmem.c
++++ b/mm/shmem.c
+@@ -2198,6 +2198,8 @@ static int shmem_swapin_folio(struct inode *inode, pgoff_t index,
+ 		 */
+ 		split_order = shmem_split_large_entry(inode, index, swap, gfp);
+ 		if (split_order < 0) {
++			folio_put(folio);
++			folio = NULL;
+ 			error = split_order;
+ 			goto failed;
+ 		}
+
+
+
+From 0bf2c000238b62bb7690197efd6c98bb83a55f5f Mon Sep 17 00:00:00 2001
+From: Qi Zheng <zhengqi.arch@bytedance.com>
+Date: Wed, 4 Dec 2024 19:09:41 +0800
+Subject: [PATCH] BACKPORT: mm: khugepaged: recheck pmd state in
+ retract_page_tables()
+
+Patch series "synchronously scan and reclaim empty user PTE pages", v4.
+
+Previously, we tried to use a completely asynchronous method to reclaim
+empty user PTE pages [1].  After discussing with David Hildenbrand, we
+decided to implement synchronous reclaimation in the case of
+madvise(MADV_DONTNEED) as the first step.
+
+So this series aims to synchronously free the empty PTE pages in
+madvise(MADV_DONTNEED) case.  We will detect and free empty PTE pages in
+zap_pte_range(), and will add zap_details.reclaim_pt to exclude cases
+other than madvise(MADV_DONTNEED).
+
+In zap_pte_range(), mmu_gather is used to perform batch tlb flushing and
+page freeing operations.  Therefore, if we want to free the empty PTE page
+in this path, the most natural way is to add it to mmu_gather as well.
+Now, if CONFIG_MMU_GATHER_RCU_TABLE_FREE is selected, mmu_gather will free
+page table pages by semi RCU:
+
+ - batch table freeing: asynchronous free by RCU
+ - single table freeing: IPI + synchronous free
+
+But this is not enough to free the empty PTE page table pages in paths
+other that munmap and exit_mmap path, because IPI cannot be synchronized
+with rcu_read_lock() in pte_offset_map{_lock}().  So we should let single
+table also be freed by RCU like batch table freeing.
+
+As a first step, we supported this feature on x86_64 and selectd the newly
+introduced CONFIG_ARCH_SUPPORTS_PT_RECLAIM.
+
+For other cases such as madvise(MADV_FREE), consider scanning and freeing
+empty PTE pages asynchronously in the future.
+
+Note: issues related to TLB flushing are not new to this series and are tracked
+      in the separate RFC patch [3]. And more context please refer to this
+      thread [4].
+
+[1]. https://lore.kernel.org/lkml/cover.1718267194.git.zhengqi.arch@bytedance.com/
+[2]. https://lore.kernel.org/lkml/cover.1727332572.git.zhengqi.arch@bytedance.com/
+[3]. https://lore.kernel.org/lkml/20240815120715.14516-1-zhengqi.arch@bytedance.com/
+[4]. https://lore.kernel.org/lkml/6f38cb19-9847-4f70-bbe7-06881bb016be@bytedance.com/
+
+This patch (of 11):
+
+In retract_page_tables(), the lock of new_folio is still held, we will be
+blocked in the page fault path, which prevents the pte entries from being
+set again.  So even though the old empty PTE page may be concurrently
+freed and a new PTE page is filled into the pmd entry, it is still empty
+and can be removed.
+
+So just refactor the retract_page_tables() a little bit and recheck the
+pmd state after holding the pmd lock.
+
+Link: https://lkml.kernel.org/r/cover.1733305182.git.zhengqi.arch@bytedance.com
+Link: https://lkml.kernel.org/r/70a51804cd19d44ccaf031825d9fb6eaf92f2bad.1733305182.git.zhengqi.arch@bytedance.com
+Signed-off-by: Qi Zheng <zhengqi.arch@bytedance.com>
+Suggested-by: Jann Horn <jannh@google.com>
+Cc: Andy Lutomirski <luto@kernel.org>
+Cc: Catalin Marinas <catalin.marinas@arm.com>
+Cc: Dave Hansen <dave.hansen@linux.intel.com>
+Cc: David Hildenbrand <david@redhat.com>
+Cc: David Rientjes <rientjes@google.com>
+Cc: Hugh Dickins <hughd@google.com>
+Cc: Lorenzo Stoakes <lorenzo.stoakes@oracle.com>
+Cc: Matthew Wilcox <willy@infradead.org>
+Cc: Mel Gorman <mgorman@suse.de>
+Cc: Muchun Song <muchun.song@linux.dev>
+Cc: Peter Xu <peterx@redhat.com>
+Cc: Peter Zijlstra <peterz@infradead.org>
+Cc: Will Deacon <will@kernel.org>
+Cc: Zach O'Keefe <zokeefe@google.com>
+Cc: Dan Carpenter <dan.carpenter@linaro.org>
+
+Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+Bug: 487357389
+Conflict resolution:
+- Documentation/mm/process_addrs.rst: Kept the file unchanged from the base branch and omitted the documentation updates from the upstream patch to keep the backport focused on code.
+(cherry picked from commit 6c18ec9af86ce96245324dd0cd5067dcfb026508)
+Change-Id: Idcd1c02cf453a9e8956dc26476614940c10f89bf
+Signed-off-by: Jordan Chang <jordanchang@google.com>
+---
+ mm/khugepaged.c | 45 +++++++++++++++++++++++++++++++--------------
+ 1 file changed, 31 insertions(+), 14 deletions(-)
+
+diff --git a/mm/khugepaged.c b/mm/khugepaged.c
+index bf6f4d4374470..5a8e7ca9c36c7 100644
+--- a/mm/khugepaged.c
++++ b/mm/khugepaged.c
+@@ -944,17 +944,10 @@ static int hugepage_vma_revalidate(struct mm_struct *mm, unsigned long address,
+ 	return SCAN_SUCCEED;
+ }
+ 
+-static int find_pmd_or_thp_or_none(struct mm_struct *mm,
+-				   unsigned long address,
+-				   pmd_t **pmd)
++static inline int check_pmd_state(pmd_t *pmd)
+ {
+-	pmd_t pmde;
++	pmd_t pmde = pmdp_get_lockless(pmd);
+ 
+-	*pmd = mm_find_pmd(mm, address);
+-	if (!*pmd)
+-		return SCAN_PMD_NULL;
+-
+-	pmde = pmdp_get_lockless(*pmd);
+ 	if (pmd_none(pmde))
+ 		return SCAN_PMD_NONE;
+ 	if (!pmd_present(pmde))
+@@ -968,6 +961,17 @@ static int find_pmd_or_thp_or_none(struct mm_struct *mm,
+ 	return SCAN_SUCCEED;
+ }
+ 
++static int find_pmd_or_thp_or_none(struct mm_struct *mm,
++				   unsigned long address,
++				   pmd_t **pmd)
++{
++	*pmd = mm_find_pmd(mm, address);
++	if (!*pmd)
++		return SCAN_PMD_NULL;
++
++	return check_pmd_state(*pmd);
++}
++
+ static int check_pmd_still_valid(struct mm_struct *mm,
+ 				 unsigned long address,
+ 				 pmd_t *pmd)
+@@ -1717,7 +1721,7 @@ static void retract_page_tables(struct address_space *mapping, pgoff_t pgoff)
+ 		pmd_t *pmd, pgt_pmd;
+ 		spinlock_t *pml;
+ 		spinlock_t *ptl;
+-		bool skipped_uffd = false;
++		bool success = false;
+ 
+ 		/*
+ 		 * Check vma->anon_vma to exclude MAP_PRIVATE mappings that
+@@ -1754,6 +1758,19 @@ static void retract_page_tables(struct address_space *mapping, pgoff_t pgoff)
+ 		mmu_notifier_invalidate_range_start(&range);
+ 
+ 		pml = pmd_lock(mm, pmd);
++		/*
++		 * The lock of new_folio is still held, we will be blocked in
++		 * the page fault path, which prevents the pte entries from
++		 * being set again. So even though the old empty PTE page may be
++		 * concurrently freed and a new PTE page is filled into the pmd
++		 * entry, it is still empty and can be removed.
++		 *
++		 * So here we only need to recheck if the state of pmd entry
++		 * still meets our requirements, rather than checking pmd_same()
++		 * like elsewhere.
++		 */
++		if (check_pmd_state(pmd) != SCAN_SUCCEED)
++			goto drop_pml;
+ 		ptl = pte_lockptr(mm, pmd);
+ 		if (ptl != pml)
+ 			spin_lock_nested(ptl, SINGLE_DEPTH_NESTING);
+@@ -1767,20 +1784,20 @@ static void retract_page_tables(struct address_space *mapping, pgoff_t pgoff)
+ 		 * repeating the anon_vma check protects from one category,
+ 		 * and repeating the userfaultfd_wp() check from another.
+ 		 */
+-		if (unlikely(vma->anon_vma || userfaultfd_wp(vma))) {
+-			skipped_uffd = true;
+-		} else {
++		if (likely(!vma->anon_vma && !userfaultfd_wp(vma))) {
+ 			pgt_pmd = pmdp_collapse_flush(vma, addr, pmd);
+ 			pmdp_get_lockless_sync();
++			success = true;
+ 		}
+ 
+ 		if (ptl != pml)
+ 			spin_unlock(ptl);
++drop_pml:
+ 		spin_unlock(pml);
+ 
+ 		mmu_notifier_invalidate_range_end(&range);
+ 
+-		if (!skipped_uffd) {
++		if (success) {
+ 			mm_dec_nr_ptes(mm);
+ 			page_table_check_pte_clear_range(mm, addr, pgt_pmd);
+ 			pte_free_defer(mm, pmd_pgtable(pgt_pmd));
+
+
+
+From 2efa9c02c9b4c0d6866aa445f11056809b25ca28 Mon Sep 17 00:00:00 2001
+From: Deepanshu Kartikey <kartikey406@gmail.com>
+Date: Mon, 12 Jan 2026 16:06:12 +0530
+Subject: [PATCH] mm/vmalloc: prevent RCU stalls in kasan_release_vmalloc_node
+
+[ Upstream commit 5747435e0fd474c24530ef1a6822f47e7d264b27 ]
+
+When CONFIG_PAGE_OWNER is enabled, freeing KASAN shadow pages during
+vmalloc cleanup triggers expensive stack unwinding that acquires RCU read
+locks.  Processing a large purge_list without rescheduling can cause the
+task to hold CPU for extended periods (10+ seconds), leading to RCU stalls
+and potential OOM conditions.
+
+The issue manifests in purge_vmap_node() -> kasan_release_vmalloc_node()
+where iterating through hundreds or thousands of vmap_area entries and
+freeing their associated shadow pages causes:
+
+  rcu: INFO: rcu_preempt detected stalls on CPUs/tasks:
+  rcu: Tasks blocked on level-0 rcu_node (CPUs 0-1): P6229/1:b..l
+  ...
+  task:kworker/0:17 state:R running task stack:28840 pid:6229
+  ...
+  kasan_release_vmalloc_node+0x1ba/0xad0 mm/vmalloc.c:2299
+  purge_vmap_node+0x1ba/0xad0 mm/vmalloc.c:2299
+
+Each call to kasan_release_vmalloc() can free many pages, and with
+page_owner tracking, each free triggers save_stack() which performs stack
+unwinding under RCU read lock.  Without yielding, this creates an
+unbounded RCU critical section.
+
+Add periodic cond_resched() calls within the loop to allow:
+- RCU grace periods to complete
+- Other tasks to run
+- Scheduler to preempt when needed
+
+The fix uses need_resched() for immediate response under load, with a
+batch count of 32 as a guaranteed upper bound to prevent worst-case stalls
+even under light load.
+
+Link: https://lkml.kernel.org/r/20260112103612.627247-1-kartikey406@gmail.com
+Signed-off-by: Deepanshu Kartikey <kartikey406@gmail.com>
+Reported-by: syzbot+d8d4c31d40f868eaea30@syzkaller.appspotmail.com
+Closes: https://syzkaller.appspot.com/bug?extid=d8d4c31d40f868eaea30
+Link: https://lore.kernel.org/all/20260112084723.622910-1-kartikey406@gmail.com/T/ [v1]
+Suggested-by: Uladzislau Rezki <urezki@gmail.com>
+Reviewed-by: Uladzislau Rezki (Sony) <urezki@gmail.com>
+Cc: Hillf Danton <hdanton@sina.com>
+Cc: <stable@vger.kernel.org>
+Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+Signed-off-by: Sasha Levin <sashal@kernel.org>
+---
+ mm/vmalloc.c | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/mm/vmalloc.c b/mm/vmalloc.c
+index 26e5ab2edaea3..1d2262fb54185 100644
+--- a/mm/vmalloc.c
++++ b/mm/vmalloc.c
+@@ -2190,11 +2190,14 @@ decay_va_pool_node(struct vmap_node *vn, bool full_decay)
+ 	reclaim_list_global(&decay_list);
+ }
+ 
++#define KASAN_RELEASE_BATCH_SIZE 32
++
+ static void
+ kasan_release_vmalloc_node(struct vmap_node *vn)
+ {
+ 	struct vmap_area *va;
+ 	unsigned long start, end;
++	unsigned int batch_count = 0;
+ 
+ 	start = list_first_entry(&vn->purge_list, struct vmap_area, list)->va_start;
+ 	end = list_last_entry(&vn->purge_list, struct vmap_area, list)->va_end;
+@@ -2204,6 +2207,11 @@ kasan_release_vmalloc_node(struct vmap_node *vn)
+ 			kasan_release_vmalloc(va->va_start, va->va_end,
+ 				va->va_start, va->va_end,
+ 				KASAN_VMALLOC_PAGE_RANGE);
++
++		if (need_resched() || (++batch_count >= KASAN_RELEASE_BATCH_SIZE)) {
++			cond_resched();
++			batch_count = 0;
++		}
+ 	}
+ 
+ 	kasan_release_vmalloc(start, end, start, end, KASAN_VMALLOC_TLB_FLUSH);
+
+
+
+From 11165f420b2a7994b2fd53ce2cc0d470a102633b Mon Sep 17 00:00:00 2001
+From: Vlastimil Babka <vbabka@suse.cz>
+Date: Fri, 19 Dec 2025 17:31:57 +0100
+Subject: [PATCH] mm, page_alloc, thp: prevent reclaim for __GFP_THISNODE THP
+ allocations
+
+[ Upstream commit 9c9828d3ead69416d731b1238802af31760c823e ]
+
+Since commit cc638f329ef6 ("mm, thp: tweak reclaim/compaction effort of
+local-only and all-node allocations"), THP page fault allocations have
+settled on the following scheme (from the commit log):
+
+1. local node only THP allocation with no reclaim, just compaction.
+2. for madvised VMA's or when synchronous compaction is enabled always - THP
+   allocation from any node with effort determined by global defrag setting
+   and VMA madvise
+3. fallback to base pages on any node
+
+Recent customer reports however revealed we have a gap in step 1 above.
+What we have seen is excessive reclaim due to THP page faults on a NUMA
+node that's close to its high watermark, while other nodes have plenty of
+free memory.
+
+The problem with step 1 is that it promises no reclaim after the
+compaction attempt, however reclaim is only avoided for certain compaction
+outcomes (deferred, or skipped due to insufficient free base pages), and
+not e.g.  when compaction is actually performed but fails (we did see
+compact_fail vmstat counter increasing).
+
+THP page faults can therefore exhibit a zone_reclaim_mode-like behavior,
+which is not the intention.
+
+Thus add a check for __GFP_THISNODE that corresponds to this exact
+situation and prevents continuing with reclaim/compaction once the initial
+compaction attempt isn't successful in allocating the page.
+
+Note that commit cc638f329ef6 has not introduced this over-reclaim
+possibility; it appears to exist in some form since commit 2f0799a0ffc0
+("mm, thp: restore node-local hugepage allocations").  Followup commits
+b39d0ee2632d ("mm, page_alloc: avoid expensive reclaim when compaction may
+not succeed") and cc638f329ef6 have moved in the right direction, but left
+the abovementioned gap.
+
+Link: https://lkml.kernel.org/r/20251219-costly-noretry-thisnode-fix-v1-1-e1085a4a0c34@suse.cz
+Fixes: 2f0799a0ffc0 ("mm, thp: restore node-local hugepage allocations")
+Signed-off-by: Vlastimil Babka <vbabka@suse.cz>
+Acked-by: Michal Hocko <mhocko@suse.com>
+Acked-by: Johannes Weiner <hannes@cmpxchg.org>
+Acked-by: Pedro Falcato <pfalcato@suse.de>
+Acked-by: Zi Yan <ziy@nvidia.com>
+Cc: Brendan Jackman <jackmanb@google.com>
+Cc: "David Hildenbrand (Red Hat)" <david@kernel.org>
+Cc: David Rientjes <rientjes@google.com>
+Cc: Joshua Hahn <joshua.hahnjy@gmail.com>
+Cc: Liam Howlett <liam.howlett@oracle.com>
+Cc: Lorenzo Stoakes <lorenzo.stoakes@oracle.com>
+Cc: Mike Rapoport <rppt@kernel.org>
+Cc: Suren Baghdasaryan <surenb@google.com>
+Cc: <stable@vger.kernel.org>
+Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+Signed-off-by: Sasha Levin <sashal@kernel.org>
+---
+ mm/page_alloc.c | 14 ++++++++++++++
+ 1 file changed, 14 insertions(+)
+
+diff --git a/mm/page_alloc.c b/mm/page_alloc.c
+index f30a4ab8f254c..4282c9d0a5ddd 100644
+--- a/mm/page_alloc.c
++++ b/mm/page_alloc.c
+@@ -4400,6 +4400,20 @@ __alloc_pages_slowpath(gfp_t gfp_mask, unsigned int order,
+ 			    compact_result == COMPACT_DEFERRED)
+ 				goto nopage;
+ 
++			/*
++			 * THP page faults may attempt local node only first,
++			 * but are then allowed to only compact, not reclaim,
++			 * see alloc_pages_mpol().
++			 *
++			 * Compaction can fail for other reasons than those
++			 * checked above and we don't want such THP allocations
++			 * to put reclaim pressure on a single node in a
++			 * situation where other nodes might have plenty of
++			 * available memory.
++			 */
++			if (gfp_mask & __GFP_THISNODE)
++				goto nopage;
++
+ 			/*
+ 			 * Looks like reclaim/compaction is worth trying, but
+ 			 * sync compaction could be very expensive, so keep
+
+
+
+From 08de46a75f91a6661bc1ce0a93614f4bc313c581 Mon Sep 17 00:00:00 2001
+From: Deepanshu Kartikey <kartikey406@gmail.com>
+Date: Sat, 14 Feb 2026 05:45:35 +0530
+Subject: [PATCH] mm: thp: deny THP for files on anonymous inodes
+
+commit dd085fe9a8ebfc5d10314c60452db38d2b75e609 upstream.
+
+file_thp_enabled() incorrectly allows THP for files on anonymous inodes
+(e.g. guest_memfd and secretmem). These files are created via
+alloc_file_pseudo(), which does not call get_write_access() and leaves
+inode->i_writecount at 0. Combined with S_ISREG(inode->i_mode) being
+true, they appear as read-only regular files when
+CONFIG_READ_ONLY_THP_FOR_FS is enabled, making them eligible for THP
+collapse.
+
+Anonymous inodes can never pass the inode_is_open_for_write() check
+since their i_writecount is never incremented through the normal VFS
+open path. The right thing to do is to exclude them from THP eligibility
+altogether, since CONFIG_READ_ONLY_THP_FOR_FS was designed for real
+filesystem files (e.g. shared libraries), not for pseudo-filesystem
+inodes.
+
+For guest_memfd, this allows khugepaged and MADV_COLLAPSE to create
+large folios in the page cache via the collapse path, but the
+guest_memfd fault handler does not support large folios. This triggers
+WARN_ON_ONCE(folio_test_large(folio)) in kvm_gmem_fault_user_mapping().
+
+For secretmem, collapse_file() tries to copy page contents through the
+direct map, but secretmem pages are removed from the direct map. This
+can result in a kernel crash:
+
+    BUG: unable to handle page fault for address: ffff88810284d000
+    RIP: 0010:memcpy_orig+0x16/0x130
+    Call Trace:
+     collapse_file
+     hpage_collapse_scan_file
+     madvise_collapse
+
+Secretmem is not affected by the crash on upstream as the memory failure
+recovery handles the failed copy gracefully, but it still triggers
+confusing false memory failure reports:
+
+    Memory failure: 0x106d96f: recovery action for clean unevictable
+    LRU page: Recovered
+
+Check IS_ANON_FILE(inode) in file_thp_enabled() to deny THP for all
+anonymous inode files.
+
+Link: https://syzkaller.appspot.com/bug?extid=33a04338019ac7e43a44
+Link: https://lore.kernel.org/linux-mm/CAEvNRgHegcz3ro35ixkDw39ES8=U6rs6S7iP0gkR9enr7HoGtA@mail.gmail.com
+Link: https://lkml.kernel.org/r/20260214001535.435626-1-kartikey406@gmail.com
+Fixes: 7fbb5e188248 ("mm: remove VM_EXEC requirement for THP eligibility")
+Signed-off-by: Deepanshu Kartikey <Kartikey406@gmail.com>
+Reported-by: syzbot+33a04338019ac7e43a44@syzkaller.appspotmail.com
+Closes: https://syzkaller.appspot.com/bug?extid=33a04338019ac7e43a44
+Tested-by: syzbot+33a04338019ac7e43a44@syzkaller.appspotmail.com
+Tested-by: Lance Yang <lance.yang@linux.dev>
+Acked-by: David Hildenbrand (Arm) <david@kernel.org>
+Reviewed-by: Barry Song <baohua@kernel.org>
+Reviewed-by: Ackerley Tng <ackerleytng@google.com>
+Tested-by: Ackerley Tng <ackerleytng@google.com>
+Reviewed-by: Lorenzo Stoakes <lorenzo.stoakes@oracle.com>
+Cc: Baolin Wang <baolin.wang@linux.alibaba.com>
+Cc: Dev Jain <dev.jain@arm.com>
+Cc: Fangrui Song <i@maskray.me>
+Cc: Liam Howlett <liam.howlett@oracle.com>
+Cc: Nico Pache <npache@redhat.com>
+Cc: Ryan Roberts <ryan.roberts@arm.com>
+Cc: Yang Shi <shy828301@gmail.com>
+Cc: Zi Yan <ziy@nvidia.com>
+Cc: <stable@vger.kernel.org>
+Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+[ Ackerley: we don't have IS_ANON_FILE() yet. As guest_memfd does
+  not apply yet, simply check for secretmem explicitly. ]
+Signed-off-by: Ackerley Tng <ackerleytng@google.com>
+Reviewed-by: David Hildenbrand (Arm) <david@kernel.org>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ include/linux/huge_mm.h | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/include/linux/huge_mm.h b/include/linux/huge_mm.h
+index f70b048596b53..bd34b70dd0cf9 100644
+--- a/include/linux/huge_mm.h
++++ b/include/linux/huge_mm.h
+@@ -7,6 +7,7 @@
+ 
+ #include <linux/fs.h> /* only for vma_is_dax() */
+ #include <linux/kobject.h>
++#include <linux/secretmem.h>
+ 
+ vm_fault_t do_huge_pmd_anonymous_page(struct vm_fault *vmf);
+ int copy_huge_pmd(struct mm_struct *dst_mm, struct mm_struct *src_mm,
+@@ -262,6 +263,9 @@ static inline bool file_thp_enabled(struct vm_area_struct *vma)
+ 
+ 	inode = vma->vm_file->f_inode;
+ 
++	if (secretmem_mapping(inode->i_mapping))
++		return false;
++
+ 	return (IS_ENABLED(CONFIG_READ_ONLY_THP_FOR_FS)) &&
+ 	       !inode_is_open_for_write(inode) && S_ISREG(inode->i_mode);
+ }
+
+
+
+From 44520da00f6b2cae464baf546e3289c048b2b977 Mon Sep 17 00:00:00 2001
+From: Alexander Potapenko <glider@google.com>
+Date: Fri, 13 Feb 2026 10:54:10 +0100
+Subject: [PATCH] mm/kfence: disable KFENCE upon KASAN HW tags enablement
+
+commit 09833d99db36d74456a4d13eb29c32d56ff8f2b6 upstream.
+
+KFENCE does not currently support KASAN hardware tags.  As a result, the
+two features are incompatible when enabled simultaneously.
+
+Given that MTE provides deterministic protection and KFENCE is a
+sampling-based debugging tool, prioritize the stronger hardware
+protections.  Disable KFENCE initialization and free the pre-allocated
+pool if KASAN hardware tags are detected to ensure the system maintains
+the security guarantees provided by MTE.
+
+Link: https://lkml.kernel.org/r/20260213095410.1862978-1-glider@google.com
+Fixes: 0ce20dd84089 ("mm: add Kernel Electric-Fence infrastructure")
+Signed-off-by: Alexander Potapenko <glider@google.com>
+Suggested-by: Marco Elver <elver@google.com>
+Reviewed-by: Marco Elver <elver@google.com>
+Cc: Andrey Konovalov <andreyknvl@gmail.com>
+Cc: Andrey Ryabinin <ryabinin.a.a@gmail.com>
+Cc: Dmitry Vyukov <dvyukov@google.com>
+Cc: Ernesto Martinez Garcia <ernesto.martinezgarcia@tugraz.at>
+Cc: Greg KH <gregkh@linuxfoundation.org>
+Cc: Kees Cook <kees@kernel.org>
+Cc: <stable@vger.kernel.org>
+Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ mm/kfence/core.c | 15 +++++++++++++++
+ 1 file changed, 15 insertions(+)
+
+diff --git a/mm/kfence/core.c b/mm/kfence/core.c
+index b301ca3375086..71ccf6be50aad 100644
+--- a/mm/kfence/core.c
++++ b/mm/kfence/core.c
+@@ -13,6 +13,7 @@
+ #include <linux/hash.h>
+ #include <linux/irq_work.h>
+ #include <linux/jhash.h>
++#include <linux/kasan-enabled.h>
+ #include <linux/kcsan-checks.h>
+ #include <linux/kfence.h>
+ #include <linux/kmemleak.h>
+@@ -880,6 +881,20 @@ void __init kfence_alloc_pool_and_metadata(void)
+ 	if (!kfence_sample_interval)
+ 		return;
+ 
++	/*
++	 * If KASAN hardware tags are enabled, disable KFENCE, because it
++	 * does not support MTE yet.
++	 */
++	if (kasan_hw_tags_enabled()) {
++		pr_info("disabled as KASAN HW tags are enabled\n");
++		if (__kfence_pool) {
++			memblock_free(__kfence_pool, KFENCE_POOL_SIZE);
++			__kfence_pool = NULL;
++		}
++		kfence_sample_interval = 0;
++		return;
++	}
++
+ 	/*
+ 	 * If the pool has already been initialized by arch, there is no need to
+ 	 * re-allocate the memory pool.
+
+
+
+From 0f7b73c3452635de83b8711b31abdda8e49aad7b Mon Sep 17 00:00:00 2001
+From: Jiayuan Chen <jiayuan.chen@linux.dev>
+Date: Wed, 27 May 2026 13:31:31 +0800
+Subject: [PATCH] ipv6: fix possible infinite loop in fib6_select_path()
+
+[ Upstream commit 9c7da87c2dc860bb17ca1ece942495d28b1ce3b9 ]
+
+Found while auditing the same pattern Sashiko reported in
+rt6_fill_node() [1]. Apply the same fix as
+commit f8d8ce1b515a ("ipv6: fix possible infinite loop in fib6_info_uses_dev()").
+
+Writers holding tb6_lock can list_del_rcu(&first->fib6_siblings)
+without waiting for RCU readers; first->fib6_siblings.next then
+still points into the old ring and this softirq-side walker never
+reaches &first->fib6_siblings as its terminator. fib6_purge_rt()
+always WRITE_ONCE()s first->fib6_nsiblings to 0 before
+list_del_rcu(), so an inside-loop check is a reliable detach signal.
+
+[1] https://sashiko.dev/#/patchset/20260526020227.4857-1-jiayuan.chen%40linux.dev
+
+Fixes: d9ccb18f83ea ("ipv6: Fix soft lockups in fib6_select_path under high next hop churn")
+Signed-off-by: Jiayuan Chen <jiayuan.chen@linux.dev>
+Reviewed-by: Ido Schimmel <idosch@nvidia.com>
+Link: https://patch.msgid.link/20260527053133.180695-2-jiayuan.chen@linux.dev
+Signed-off-by: Jakub Kicinski <kuba@kernel.org>
+Signed-off-by: Sasha Levin <sashal@kernel.org>
+---
+ net/ipv6/route.c | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/net/ipv6/route.c b/net/ipv6/route.c
+index c73218fd82c61..9e7470e815442 100644
+--- a/net/ipv6/route.c
++++ b/net/ipv6/route.c
+@@ -482,6 +482,9 @@ void fib6_select_path(const struct net *net, struct fib6_result *res,
+ 		const struct fib6_nh *nh = sibling->fib6_nh;
+ 		int nh_upper_bound;
+ 
++		if (!READ_ONCE(first->fib6_nsiblings))
++			break;
++
+ 		nh_upper_bound = atomic_read(&nh->fib_nh_upper_bound);
+ 		if (hash > nh_upper_bound)
+ 			continue;
+
+
+
+From c65b1f60237daac7c56c2652e064cc566a45dc81 Mon Sep 17 00:00:00 2001
+From: Jiayuan Chen <jiayuan.chen@linux.dev>
+Date: Wed, 27 May 2026 13:31:30 +0800
+Subject: [PATCH] ipv6: fix possible infinite loop in rt6_fill_node()
+
+[ Upstream commit 9f72412bcf60144f252b0d6205106abf14344abc ]
+
+Sashiko reported this issue [1]. Apply the same fix as
+commit f8d8ce1b515a ("ipv6: fix possible infinite loop in fib6_info_uses_dev()").
+
+Writers holding tb6_lock can list_del_rcu(&rt->fib6_siblings)
+without waiting for RCU readers; rt->fib6_siblings.next then still
+points into the old ring and this softirq-side walker never reaches
+&rt->fib6_siblings, causing a CPU stall. fib6_del_route() always
+WRITE_ONCE()s rt->fib6_nsiblings to 0 before list_del_rcu(), so an
+inside-loop check is a reliable detach signal.
+
+[1] https://sashiko.dev/#/patchset/20260526020227.4857-1-jiayuan.chen%40linux.dev
+
+Fixes: d9ccb18f83ea ("ipv6: Fix soft lockups in fib6_select_path under high next hop churn")
+Signed-off-by: Jiayuan Chen <jiayuan.chen@linux.dev>
+Reviewed-by: Ido Schimmel <idosch@nvidia.com>
+Link: https://patch.msgid.link/20260527053133.180695-1-jiayuan.chen@linux.dev
+Signed-off-by: Jakub Kicinski <kuba@kernel.org>
+Signed-off-by: Sasha Levin <sashal@kernel.org>
+---
+ net/ipv6/route.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/net/ipv6/route.c b/net/ipv6/route.c
+index 31c9e3b73f2da..c73218fd82c61 100644
+--- a/net/ipv6/route.c
++++ b/net/ipv6/route.c
+@@ -5812,6 +5812,8 @@ static int rt6_fill_node(struct net *net, struct sk_buff *skb,
+ 
+ 				goto nla_put_failure;
+ 			}
++			if (!READ_ONCE(rt->fib6_nsiblings))
++				break;
+ 		}
+ 
+ 		rcu_read_unlock();
+
+
+
+From 1e1f0f89ee4692a64be3f3707ff8ac1ae57b03e7 Mon Sep 17 00:00:00 2001
+From: Eric Dumazet <edumazet@google.com>
+Date: Thu, 16 Apr 2026 10:35:05 +0000
+Subject: [PATCH] ipv6: fix possible UAF in icmpv6_rcv()
+
+[ Upstream commit f996edd7615e686ada141b7f3395025729ff8ccb ]
+
+Caching saddr and daddr before pskb_pull() is problematic
+since skb->head can change.
+
+Remove these temporary variables:
+
+- We only access &ipv6_hdr(skb)->saddr and &ipv6_hdr(skb)->daddr
+  when net_dbg_ratelimited() is called in the slow path.
+
+- Avoid potential future misuse after pskb_pull() call.
+
+Fixes: 4b3418fba0fe ("ipv6: icmp: include addresses in debug messages")
+Signed-off-by: Eric Dumazet <edumazet@google.com>
+Reviewed-by: Fernando Fernandez Mancera <fmancera@suse.de>
+Reviewed-by: Joe Damato <joe@dama.to>
+Reviewed-by: Ido Schimmel <idosch@nvidia.com>
+Link: https://patch.msgid.link/20260416103505.2380753-1-edumazet@google.com
+Signed-off-by: Jakub Kicinski <kuba@kernel.org>
+Signed-off-by: Sasha Levin <sashal@kernel.org>
+---
+ net/ipv6/icmp.c | 10 ++++------
+ 1 file changed, 4 insertions(+), 6 deletions(-)
+
+diff --git a/net/ipv6/icmp.c b/net/ipv6/icmp.c
+index 387400829b207..229ae205450d3 100644
+--- a/net/ipv6/icmp.c
++++ b/net/ipv6/icmp.c
+@@ -910,7 +910,6 @@ static int icmpv6_rcv(struct sk_buff *skb)
+ 	struct net *net = dev_net_rcu(skb->dev);
+ 	struct net_device *dev = icmp6_dev(skb);
+ 	struct inet6_dev *idev = __in6_dev_get(dev);
+-	const struct in6_addr *saddr, *daddr;
+ 	struct icmp6hdr *hdr;
+ 	u8 type;
+ 
+@@ -941,12 +940,10 @@ static int icmpv6_rcv(struct sk_buff *skb)
+ 
+ 	__ICMP6_INC_STATS(dev_net_rcu(dev), idev, ICMP6_MIB_INMSGS);
+ 
+-	saddr = &ipv6_hdr(skb)->saddr;
+-	daddr = &ipv6_hdr(skb)->daddr;
+-
+ 	if (skb_checksum_validate(skb, IPPROTO_ICMPV6, ip6_compute_pseudo)) {
+ 		net_dbg_ratelimited("ICMPv6 checksum failed [%pI6c > %pI6c]\n",
+-				    saddr, daddr);
++				    &ipv6_hdr(skb)->saddr,
++				    &ipv6_hdr(skb)->daddr);
+ 		goto csum_error;
+ 	}
+ 
+@@ -1029,7 +1026,8 @@ static int icmpv6_rcv(struct sk_buff *skb)
+ 			break;
+ 
+ 		net_dbg_ratelimited("icmpv6: msg of unknown type [%pI6c > %pI6c]\n",
+-				    saddr, daddr);
++				    &ipv6_hdr(skb)->saddr,
++				    &ipv6_hdr(skb)->daddr);
+ 
+ 		/*
+ 		 * error of unknown type.
+
+
+
+From 25357b670afb5b517096da783abaa5cc4bf8359e Mon Sep 17 00:00:00 2001
+From: Paolo Abeni <pabeni@redhat.com>
+Date: Fri, 27 Mar 2026 10:52:57 +0100
+Subject: [PATCH] ipv6: prevent possible UaF in addrconf_permanent_addr()
+
+[ Upstream commit fd63f185979b047fb22a0dfc6bd94d0cab6a6a70 ]
+
+The mentioned helper try to warn the user about an exceptional
+condition, but the message is delivered too late, accessing the ipv6
+after its possible deletion.
+
+Reorder the statement to avoid the possible UaF; while at it, place the
+warning outside the idev->lock as it needs no protection.
+
+Reported-by: Jakub Kicinski <kuba@kernel.org>
+Closes: https://sashiko.dev/#/patchset/8c8bfe2e1a324e501f0e15fef404a77443fd8caf.1774365668.git.pabeni%40redhat.com
+Fixes: f1705ec197e7 ("net: ipv6: Make address flushing on ifdown optional")
+Signed-off-by: Paolo Abeni <pabeni@redhat.com>
+Link: https://patch.msgid.link/ef973c3a8cb4f8f1787ed469f3e5391b9fe95aa0.1774601542.git.pabeni@redhat.com
+Signed-off-by: Jakub Kicinski <kuba@kernel.org>
+Signed-off-by: Sasha Levin <sashal@kernel.org>
+---
+ net/ipv6/addrconf.c | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/net/ipv6/addrconf.c b/net/ipv6/addrconf.c
+index 63ada312061c6..e104ec8efe1c0 100644
+--- a/net/ipv6/addrconf.c
++++ b/net/ipv6/addrconf.c
+@@ -3642,12 +3642,12 @@ static void addrconf_permanent_addr(struct net *net, struct net_device *dev)
+ 		if ((ifp->flags & IFA_F_PERMANENT) &&
+ 		    fixup_permanent_addr(net, idev, ifp) < 0) {
+ 			write_unlock_bh(&idev->lock);
+-			in6_ifa_hold(ifp);
+-			ipv6_del_addr(ifp);
+-			write_lock_bh(&idev->lock);
+ 
+ 			net_info_ratelimited("%s: Failed to add prefix route for address %pI6c; dropping\n",
+ 					     idev->dev->name, &ifp->addr);
++			in6_ifa_hold(ifp);
++			ipv6_del_addr(ifp);
++			write_lock_bh(&idev->lock);
+ 		}
+ 	}
+ 
+
+
+
+From 0591d6509c2ff13f09ea2998434aba0c0472e978 Mon Sep 17 00:00:00 2001
+From: Qanux <qjx1298677004@gmail.com>
+Date: Wed, 11 Feb 2026 12:04:12 +0800
+Subject: [PATCH] ipv6: ioam: fix heap buffer overflow in
+ __ioam6_fill_trace_data()
+
+[ Upstream commit 6db8b56eed62baacaf37486e83378a72635c04cc ]
+
+On the receive path, __ioam6_fill_trace_data() uses trace->nodelen
+to decide how much data to write for each node. It trusts this field
+as-is from the incoming packet, with no consistency check against
+trace->type (the 24-bit field that tells which data items are
+present). A crafted packet can set nodelen=0 while setting type bits
+0-21, causing the function to write ~100 bytes past the allocated
+region (into skb_shared_info), which corrupts adjacent heap memory
+and leads to a kernel panic.
+
+Add a shared helper ioam6_trace_compute_nodelen() in ioam6.c to
+derive the expected nodelen from the type field, and use it:
+
+  - in ioam6_iptunnel.c (send path, existing validation) to replace
+    the open-coded computation;
+  - in exthdrs.c (receive path, ipv6_hop_ioam) to drop packets whose
+    nodelen is inconsistent with the type field, before any data is
+    written.
+
+Per RFC 9197, bits 12-21 are each short (4-octet) fields, so they
+are included in IOAM6_MASK_SHORT_FIELDS (changed from 0xff100000 to
+0xff1ffc00).
+
+Fixes: 9ee11f0fff20 ("ipv6: ioam: Data plane support for Pre-allocated Trace")
+Cc: stable@vger.kernel.org
+Signed-off-by: Junxi Qian <qjx1298677004@gmail.com>
+Reviewed-by: Justin Iurman <justin.iurman@gmail.com>
+Link: https://patch.msgid.link/20260211040412.86195-1-qjx1298677004@gmail.com
+Signed-off-by: Jakub Kicinski <kuba@kernel.org>
+Signed-off-by: Sasha Levin <sashal@kernel.org>
+---
+ include/net/ioam6.h       |  2 ++
+ net/ipv6/exthdrs.c        |  5 +++++
+ net/ipv6/ioam6.c          | 14 ++++++++++++++
+ net/ipv6/ioam6_iptunnel.c | 10 +---------
+ 4 files changed, 22 insertions(+), 9 deletions(-)
+
+diff --git a/include/net/ioam6.h b/include/net/ioam6.h
+index 2cbbee6e806aa..a75912fe247e6 100644
+--- a/include/net/ioam6.h
++++ b/include/net/ioam6.h
+@@ -60,6 +60,8 @@ void ioam6_fill_trace_data(struct sk_buff *skb,
+ 			   struct ioam6_trace_hdr *trace,
+ 			   bool is_input);
+ 
++u8 ioam6_trace_compute_nodelen(u32 trace_type);
++
+ int ioam6_init(void);
+ void ioam6_exit(void);
+ 
+diff --git a/net/ipv6/exthdrs.c b/net/ipv6/exthdrs.c
+index fb1aa587a0d6a..1a627c24e4c30 100644
+--- a/net/ipv6/exthdrs.c
++++ b/net/ipv6/exthdrs.c
+@@ -933,6 +933,11 @@ static bool ipv6_hop_ioam(struct sk_buff *skb, int optoff)
+ 		if (hdr->opt_len < 2 + sizeof(*trace) + trace->remlen * 4)
+ 			goto drop;
+ 
++		/* Inconsistent Pre-allocated Trace header */
++		if (trace->nodelen !=
++		    ioam6_trace_compute_nodelen(be32_to_cpu(trace->type_be32)))
++			goto drop;
++
+ 		/* Ignore if the IOAM namespace is unknown */
+ 		ns = ioam6_namespace(dev_net(skb->dev), trace->namespace_id);
+ 		if (!ns)
+diff --git a/net/ipv6/ioam6.c b/net/ipv6/ioam6.c
+index 08c9295130657..b6ed67d7027c1 100644
+--- a/net/ipv6/ioam6.c
++++ b/net/ipv6/ioam6.c
+@@ -694,6 +694,20 @@ struct ioam6_namespace *ioam6_namespace(struct net *net, __be16 id)
+ 	return rhashtable_lookup_fast(&nsdata->namespaces, &id, rht_ns_params);
+ }
+ 
++#define IOAM6_MASK_SHORT_FIELDS 0xff1ffc00
++#define IOAM6_MASK_WIDE_FIELDS  0x00e00000
++
++u8 ioam6_trace_compute_nodelen(u32 trace_type)
++{
++	u8 nodelen = hweight32(trace_type & IOAM6_MASK_SHORT_FIELDS)
++				* (sizeof(__be32) / 4);
++
++	nodelen += hweight32(trace_type & IOAM6_MASK_WIDE_FIELDS)
++				* (sizeof(__be64) / 4);
++
++	return nodelen;
++}
++
+ static void __ioam6_fill_trace_data(struct sk_buff *skb,
+ 				    struct ioam6_namespace *ns,
+ 				    struct ioam6_trace_hdr *trace,
+diff --git a/net/ipv6/ioam6_iptunnel.c b/net/ipv6/ioam6_iptunnel.c
+index 9e4774771023b..7cbff7a0501bb 100644
+--- a/net/ipv6/ioam6_iptunnel.c
++++ b/net/ipv6/ioam6_iptunnel.c
+@@ -22,9 +22,6 @@
+ #include <net/ip6_route.h>
+ #include <net/addrconf.h>
+ 
+-#define IOAM6_MASK_SHORT_FIELDS 0xff100000
+-#define IOAM6_MASK_WIDE_FIELDS 0xe00000
+-
+ struct ioam6_lwt_encap {
+ 	struct ipv6_hopopt_hdr eh;
+ 	u8 pad[2];			/* 2-octet padding for 4n-alignment */
+@@ -92,13 +89,8 @@ static bool ioam6_validate_trace_hdr(struct ioam6_trace_hdr *trace)
+ 	    trace->type.bit21 | trace->type.bit23)
+ 		return false;
+ 
+-	trace->nodelen = 0;
+ 	fields = be32_to_cpu(trace->type_be32);
+-
+-	trace->nodelen += hweight32(fields & IOAM6_MASK_SHORT_FIELDS)
+-				* (sizeof(__be32) / 4);
+-	trace->nodelen += hweight32(fields & IOAM6_MASK_WIDE_FIELDS)
+-				* (sizeof(__be64) / 4);
++	trace->nodelen = ioam6_trace_compute_nodelen(fields);
+ 
+ 	return true;
+ }
+
+
+
+From 4f810c686fde509d1cdaa706322d9d2531f8f1a4 Mon Sep 17 00:00:00 2001
+From: Yochai Eisenrich <echelonh@gmail.com>
+Date: Wed, 25 Mar 2026 00:49:25 +0200
+Subject: [PATCH] net: ipv6: ndisc: fix ndisc_ra_useropt to initialize
+ nduseropt_padX fields to zero to prevent an info-leak
+
+[ Upstream commit ae05340ccaa9d347fe85415609e075545bec589f ]
+
+When processing Router Advertisements with user options the kernel
+builds an RTM_NEWNDUSEROPT netlink message. The nduseroptmsg struct
+has three padding fields that are never zeroed and can leak kernel data
+
+The fix is simple, just zeroes the padding fields.
+
+Fixes: 31910575a9de ("[IPv6]: Export userland ND options through netlink (RDNSS support)")
+Signed-off-by: Yochai Eisenrich <echelonh@gmail.com>
+Reviewed-by: Simon Horman <horms@kernel.org>
+Link: https://patch.msgid.link/20260324224925.2437775-1-echelonh@gmail.com
+Signed-off-by: Jakub Kicinski <kuba@kernel.org>
+Signed-off-by: Sasha Levin <sashal@kernel.org>
+---
+ net/ipv6/ndisc.c | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/net/ipv6/ndisc.c b/net/ipv6/ndisc.c
+index 480c906cb374c..64bd0cbb67d70 100644
+--- a/net/ipv6/ndisc.c
++++ b/net/ipv6/ndisc.c
+@@ -1220,6 +1220,9 @@ static void ndisc_ra_useropt(struct sk_buff *ra, struct nd_opt_hdr *opt)
+ 	ndmsg->nduseropt_icmp_type = icmp6h->icmp6_type;
+ 	ndmsg->nduseropt_icmp_code = icmp6h->icmp6_code;
+ 	ndmsg->nduseropt_opts_len = opt->nd_opt_len << 3;
++	ndmsg->nduseropt_pad1 = 0;
++	ndmsg->nduseropt_pad2 = 0;
++	ndmsg->nduseropt_pad3 = 0;
+ 
+ 	memcpy(ndmsg + 1, opt, opt->nd_opt_len << 3);
+ 
+
+
+
+From 5aea79b91084d4ebdf0b0bb36c41b7b7ef0ae91e Mon Sep 17 00:00:00 2001
+From: Eric Dumazet <edumazet@google.com>
+Date: Mon, 16 Feb 2026 14:28:28 +0000
+Subject: [PATCH] icmp: prevent possible overflow in icmp_global_allow()
+
+[ Upstream commit 034bbd806298e9ba4197dd1587b0348ee30996ea ]
+
+Following expression can overflow
+if sysctl_icmp_msgs_per_sec is big enough.
+
+sysctl_icmp_msgs_per_sec * delta / HZ;
+
+Fixes: 4cdf507d5452 ("icmp: add a global rate limitation")
+Signed-off-by: Eric Dumazet <edumazet@google.com>
+Reviewed-by: Kuniyuki Iwashima <kuniyu@google.com>
+Link: https://patch.msgid.link/20260216142832.3834174-2-edumazet@google.com
+Signed-off-by: Jakub Kicinski <kuba@kernel.org>
+Signed-off-by: Sasha Levin <sashal@kernel.org>
+---
+ net/ipv4/icmp.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/net/ipv4/icmp.c b/net/ipv4/icmp.c
+index ee24728fc60bf..8ab51b51cc9b2 100644
+--- a/net/ipv4/icmp.c
++++ b/net/ipv4/icmp.c
+@@ -247,7 +247,8 @@ bool icmp_global_allow(struct net *net)
+ 	if (delta < HZ / 50)
+ 		return false;
+ 
+-	incr = READ_ONCE(net->ipv4.sysctl_icmp_msgs_per_sec) * delta / HZ;
++	incr = READ_ONCE(net->ipv4.sysctl_icmp_msgs_per_sec);
++	incr = div_u64((u64)incr * delta, HZ);
+ 	if (!incr)
+ 		return false;
+ 
+
+
+
+From 0c699035b7baafa7402d59b071688e14f0c26f90 Mon Sep 17 00:00:00 2001
+From: Altan Hacigumus <ahacigu.linux@gmail.com>
+Date: Thu, 23 Apr 2026 18:46:38 -0700
+Subject: [PATCH] tcp: make probe0 timer handle expired user timeout
+
+[ Upstream commit 2b9f6f7065d4cfb65ba19126e0b35ac4544c3f3a ]
+
+tcp_clamp_probe0_to_user_timeout() computes remaining time in jiffies
+using subtraction with an unsigned lvalue.  If elapsed probing time
+exceeds the configured TCP_USER_TIMEOUT, the underflow yields a large
+value.
+
+This ends up re-arming the probe timer for a full backoff interval
+instead of expiring immediately, delaying connection teardown beyond
+the configured timeout.
+
+Fix this by preventing underflow so user-set timeout expiration is
+handled correctly without extending the probe timer.
+
+Fixes: 344db93ae3ee ("tcp: make TCP_USER_TIMEOUT accurate for zero window probes")
+Link: https://lore.kernel.org/r/20260414013634.43997-1-ahacigu.linux@gmail.com
+Signed-off-by: Altan Hacigumus <ahacigu.linux@gmail.com>
+Reviewed-by: Eric Dumazet <edumazet@google.com>
+Link: https://patch.msgid.link/20260424014639.54110-1-ahacigu.linux@gmail.com
+Signed-off-by: Jakub Kicinski <kuba@kernel.org>
+Signed-off-by: Sasha Levin <sashal@kernel.org>
+---
+ net/ipv4/tcp_timer.c | 5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/net/ipv4/tcp_timer.c b/net/ipv4/tcp_timer.c
+index 79064580c8c0d..0cc8f19bc1024 100644
+--- a/net/ipv4/tcp_timer.c
++++ b/net/ipv4/tcp_timer.c
+@@ -49,7 +49,8 @@ static u32 tcp_clamp_rto_to_user_timeout(const struct sock *sk)
+ u32 tcp_clamp_probe0_to_user_timeout(const struct sock *sk, u32 when)
+ {
+ 	const struct inet_connection_sock *icsk = inet_csk(sk);
+-	u32 remaining, user_timeout;
++	u32 user_timeout;
++	s32 remaining;
+ 	s32 elapsed;
+ 
+ 	user_timeout = READ_ONCE(icsk->icsk_user_timeout);
+@@ -60,7 +61,7 @@ u32 tcp_clamp_probe0_to_user_timeout(const struct sock *sk, u32 when)
+ 	if (unlikely(elapsed < 0))
+ 		elapsed = 0;
+ 	remaining = msecs_to_jiffies(user_timeout) - elapsed;
+-	remaining = max_t(u32, remaining, TCP_TIMEOUT_MIN);
++	remaining = max_t(int, remaining, TCP_TIMEOUT_MIN);
+ 
+ 	return min_t(u32, remaining, when);
+ }
+
+
+
+From 5a1a4b049ddde41466ccac0daeec326254b133f2 Mon Sep 17 00:00:00 2001
+From: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+Date: Mon, 6 Apr 2026 17:33:03 +0200
+Subject: [PATCH] xfrm_user: fix info leak in build_mapping()
+
+[ Upstream commit 1beb76b2053b68c491b78370794b8ff63c8f8c02 ]
+
+struct xfrm_usersa_id has a one-byte padding hole after the proto
+field, which ends up never getting set to zero before copying out to
+userspace.  Fix that up by zeroing out the whole structure before
+setting individual variables.
+
+Fixes: 3a2dfbe8acb1 ("xfrm: Notify changes in UDP encapsulation via netlink")
+Cc: Steffen Klassert <steffen.klassert@secunet.com>
+Cc: Herbert Xu <herbert@gondor.apana.org.au>
+Cc: "David S. Miller" <davem@davemloft.net>
+Cc: Eric Dumazet <edumazet@google.com>
+Cc: Jakub Kicinski <kuba@kernel.org>
+Cc: Paolo Abeni <pabeni@redhat.com>
+Cc: Simon Horman <horms@kernel.org>
+Assisted-by: gregkh_clanker_t1000
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+Signed-off-by: Steffen Klassert <steffen.klassert@secunet.com>
+Signed-off-by: Sasha Levin <sashal@kernel.org>
+---
+ net/xfrm/xfrm_user.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/net/xfrm/xfrm_user.c b/net/xfrm/xfrm_user.c
+index 9516655e92f19..c00c33c39f20c 100644
+--- a/net/xfrm/xfrm_user.c
++++ b/net/xfrm/xfrm_user.c
+@@ -4062,6 +4062,7 @@ static int build_mapping(struct sk_buff *skb, struct xfrm_state *x,
+ 
+ 	um = nlmsg_data(nlh);
+ 
++	memset(&um->id, 0, sizeof(um->id));
+ 	memcpy(&um->id.daddr, &x->id.daddr, sizeof(um->id.daddr));
+ 	um->id.spi = x->id.spi;
+ 	um->id.family = x->props.family;
+
+
+
+From 21e235a36cfb6d145cefb10728f12f5dc5412f54 Mon Sep 17 00:00:00 2001
+From: Kotlyarov Mihail <mihailkotlyarow@gmail.com>
+Date: Sat, 4 Apr 2026 12:05:20 +0300
+Subject: [PATCH] xfrm: fix refcount leak in xfrm_migrate_policy_find
+
+[ Upstream commit 83317cce60a032c49480dcdabe146435bd689d03 ]
+
+syzkaller reported a memory leak in xfrm_policy_alloc:
+
+  BUG: memory leak
+  unreferenced object 0xffff888114d79000 (size 1024):
+    comm "syz.1.17", pid 931
+    ...
+    xfrm_policy_alloc+0xb3/0x4b0 net/xfrm/xfrm_policy.c:432
+
+The root cause is a double call to xfrm_pol_hold_rcu() in
+xfrm_migrate_policy_find(). The lookup function already returns
+a policy with held reference, making the second call redundant.
+
+Remove the redundant xfrm_pol_hold_rcu() call to fix the refcount
+imbalance and prevent the memory leak.
+
+Found by Linux Verification Center (linuxtesting.org) with Syzkaller.
+
+Fixes: 563d5ca93e88 ("xfrm: switch migrate to xfrm_policy_lookup_bytype")
+Signed-off-by: Kotlyarov Mihail <mihailkotlyarow@gmail.com>
+Reviewed-by: Florian Westphal <fw@strlen.de>
+Signed-off-by: Steffen Klassert <steffen.klassert@secunet.com>
+Signed-off-by: Sasha Levin <sashal@kernel.org>
+---
+ net/xfrm/xfrm_policy.c | 3 ---
+ 1 file changed, 3 deletions(-)
+
+diff --git a/net/xfrm/xfrm_policy.c b/net/xfrm/xfrm_policy.c
+index 5fa648a5abe96..fca07f8e60749 100644
+--- a/net/xfrm/xfrm_policy.c
++++ b/net/xfrm/xfrm_policy.c
+@@ -4516,9 +4516,6 @@ static struct xfrm_policy *xfrm_migrate_policy_find(const struct xfrm_selector *
+ 	pol = xfrm_policy_lookup_bytype(net, type, &fl, sel->family, dir, if_id);
+ 	if (IS_ERR_OR_NULL(pol))
+ 		goto out_unlock;
+-
+-	if (!xfrm_pol_hold_rcu(pol))
+-		pol = NULL;
+ out_unlock:
+ 	rcu_read_unlock();
+ 	return pol;
+
+
+
+From 1a8e4ffda5d194da39bcb99609f382ec664e1a15 Mon Sep 17 00:00:00 2001
+From: Pavel Begunkov <asml.silence@gmail.com>
+Date: Thu, 28 May 2026 19:43:53 +0100
+Subject: [PATCH] net: skbuff: fix pskb_carve leaking zcopy pages
+
+[ Upstream commit ff6e798c2eac3ebd0501ad7e796f583fab928de8 ]
+
+When SKBFL_MANAGED_FRAG_REFS is set, frag pages are not refcounted but
+their lifetime is controlled by the attached ubuf_info. To make a copy
+of the skb_shared_info, we either should clear the flag and reference
+the frags, or keep the flag and have frags unreferenced.
+
+pskb_carve_inside_header() and pskb_carve_inside_nonlinear() don't
+follow the rule and thus can leak page references. Let's clear
+SKBFL_MANAGED_FRAG_REFS from the original skb to fix it. It's the
+simplest way to address it, but there are more performant ways to do
+that if it ever becomes a problem.
+
+Link: https://lore.kernel.org/all/20260523085809.26331-1-nvminh232@clc.fitus.edu.vn/
+Fixes: 753f1ca4e1e50 ("net: introduce managed frags infrastructure")
+Reported-by: Minh Nguyen <minhnguyen.080505@gmail.com>
+Reported-by: Willem de Bruijn <willemdebruijn.kernel@gmail.com>
+Signed-off-by: Pavel Begunkov <asml.silence@gmail.com>
+Reviewed-by: Willem de Bruijn <willemb@google.com>
+Link: https://patch.msgid.link/1e2086aa69217d7f9c8da3d38f5be7160f1b4cd1.1779993185.git.asml.silence@gmail.com
+Signed-off-by: Jakub Kicinski <kuba@kernel.org>
+Signed-off-by: Sasha Levin <sashal@kernel.org>
+---
+ net/core/skbuff.c | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/net/core/skbuff.c b/net/core/skbuff.c
+index 8c9f026182a6f..c8653ed1991ae 100644
+--- a/net/core/skbuff.c
++++ b/net/core/skbuff.c
+@@ -6689,6 +6689,11 @@ static int pskb_carve_inside_header(struct sk_buff *skb, const u32 off,
+ 	skb_copy_from_linear_data_offset(skb, off, data, new_hlen);
+ 	skb->len -= off;
+ 
++	/* Remove SKBFL_MANAGED_FRAG_REFS instead of trying to honour it
++	 * while refcounting frags below.
++	 */
++	skb_zcopy_downgrade_managed(skb);
++
+ 	memcpy((struct skb_shared_info *)(data + size),
+ 	       skb_shinfo(skb),
+ 	       offsetof(struct skb_shared_info,
+@@ -6801,6 +6806,11 @@ static int pskb_carve_inside_nonlinear(struct sk_buff *skb, const u32 off,
+ 		return -ENOMEM;
+ 	size = SKB_WITH_OVERHEAD(size);
+ 
++	/* Remove SKBFL_MANAGED_FRAG_REFS instead of trying to honour it
++	 * while refcounting frags below.
++	 */
++	skb_zcopy_downgrade_managed(skb);
++
+ 	memcpy((struct skb_shared_info *)(data + size),
+ 	       skb_shinfo(skb), offsetof(struct skb_shared_info, frags[0]));
+ 	if (skb_orphan_frags(skb, gfp_mask)) {
+
+
+
+From 2993266692b6531d84c4459a60d4312d9e3b3b30 Mon Sep 17 00:00:00 2001
+From: Todd Kjos <tkjos@google.com>
+Date: Mon, 20 Jul 2026 21:13:31 +0000
+Subject: [PATCH] ANDROID: netfilter: xt_quota2: fix UAF in q2_get_counter
+ error path
+
+In q2_get_counter(), a new counter entry is added to counter_list
+and counter_list_lock is released before proc_create_data() is
+invoked. During this window, another thread can locate the counter
+in counter_list and increment its reference count via
+atomic_inc(&e->ref).
+
+If proc_create_data() subsequently fails, the error handling path
+previously called list_del() and kfree() unconditionally, ignoring
+the refcount. If another thread acquired a reference in the interim,
+this resulted in a Use-After-Free (UAF) condition.
+
+Fix this by using atomic_dec_and_test(&e->ref) under
+counter_list_lock when proc_create_data() fails. Only remove from
+counter_list and free the memory if the refcount reaches zero. If
+another thread holds a reference, set procfs_entry to NULL and
+leave the counter intact for the surviving thread.
+
+Fixes: 2e134f75ce91 ("ANDROID: netfilter: xt_quota2: add quota2 from xtables-addons")
+Bug: 499166786
+
+Change-Id: I1270d6d94ec0bd6a83858ad053434dae0393b7e3
+Signed-off-by: Todd Kjos <tkjos@google.com>
+(cherry picked from commit 4fa3c1db38c4d05772384cfad9b831b2bcb55d3b)
+---
+ net/netfilter/xt_quota2.c | 15 ++++++++-------
+ 1 file changed, 8 insertions(+), 7 deletions(-)
+
+diff --git a/net/netfilter/xt_quota2.c b/net/netfilter/xt_quota2.c
+index e05616ee2be9c..a2cbfa4019116 100644
+--- a/net/netfilter/xt_quota2.c
++++ b/net/netfilter/xt_quota2.c
+@@ -209,7 +209,7 @@ q2_get_counter(const struct xt_quota_mtinfo2 *q)
+ 	/* No need to hold a lock while getting a new counter */
+ 	new_e = q2_new_counter(q, false);
+ 	if (new_e == NULL)
+-		goto out;
++		return NULL;
+ 
+ 	spin_lock_bh(&counter_list_lock);
+ 	list_for_each_entry(e, &counter_list, list)
+@@ -238,16 +238,17 @@ q2_get_counter(const struct xt_quota_mtinfo2 *q)
+ 
+ 	if (IS_ERR_OR_NULL(p)) {
+ 		spin_lock_bh(&counter_list_lock);
+-		list_del(&e->list);
++		if (atomic_dec_and_test(&e->ref)) {
++			list_del(&e->list);
++			kfree(e);
++		} else {
++			e->procfs_entry = NULL;
++		}
+ 		spin_unlock_bh(&counter_list_lock);
+-		goto out;
++		return NULL;
+ 	}
+ 	proc_set_user(p, quota_list_uid, quota_list_gid);
+ 	return e;
+-
+- out:
+-	kfree(e);
+-	return NULL;
+ }
+ 
+ static int quota_mt2_check(const struct xt_mtchk_param *par)
+
+
+
+From 1bd286fa3e21200133478ed523cc6a2788baf38a Mon Sep 17 00:00:00 2001
+From: Vinicius Costa Gomes <vinicius.gomes@intel.com>
+Date: Fri, 10 Apr 2026 18:57:57 -0700
+Subject: [PATCH] net/sched: taprio: fix use-after-free in advance_sched() on
+ schedule switch
+
+[ Upstream commit 105425b1969c5affe532713cfac1c0b320d7ac2b ]
+
+In advance_sched(), when should_change_schedules() returns true,
+switch_schedules() is called to promote the admin schedule to oper.
+switch_schedules() queues the old oper schedule for RCU freeing via
+call_rcu(), but 'next' still points into an entry of the old oper
+schedule. The subsequent 'next->end_time = end_time' and
+rcu_assign_pointer(q->current_entry, next) are use-after-free.
+
+Fix this by selecting 'next' from the new oper schedule immediately
+after switch_schedules(), and using its pre-calculated end_time.
+setup_first_end_time() sets the first entry's end_time to
+base_time + interval when the schedule is installed, so the value
+is already correct.
+
+The deleted 'end_time = sched_base_time(admin)' assignment was also
+harmful independently: it would overwrite the new first entry's
+pre-calculated end_time with just base_time.
+
+Fixes: a3d43c0d56f1 ("taprio: Add support adding an admin schedule")
+Reported-by: Junxi Qian <qjx1298677004@gmail.com>
+Signed-off-by: Vinicius Costa Gomes <vinicius.gomes@intel.com>
+Signed-off-by: Jakub Kicinski <kuba@kernel.org>
+Signed-off-by: Sasha Levin <sashal@kernel.org>
+---
+ net/sched/sch_taprio.c | 9 +++++----
+ 1 file changed, 5 insertions(+), 4 deletions(-)
+
+diff --git a/net/sched/sch_taprio.c b/net/sched/sch_taprio.c
+index 1620f0fd78ce7..366eb7627b30d 100644
+--- a/net/sched/sch_taprio.c
++++ b/net/sched/sch_taprio.c
+@@ -971,11 +971,12 @@ static enum hrtimer_restart advance_sched(struct hrtimer *timer)
+ 	}
+ 
+ 	if (should_change_schedules(admin, oper, end_time)) {
+-		/* Set things so the next time this runs, the new
+-		 * schedule runs.
+-		 */
+-		end_time = sched_base_time(admin);
+ 		switch_schedules(q, &admin, &oper);
++		/* After changing schedules, the next entry is the first one
++		 * in the new schedule, with a pre-calculated end_time.
++		 */
++		next = list_first_entry(&oper->entries, struct sched_entry, list);
++		end_time = next->end_time;
+ 	}
+ 
+ 	next->end_time = end_time;
+
+
+
+From 13a66ca1e235d4bcd53d12d4c68490cad7f8e46f Mon Sep 17 00:00:00 2001
+From: Yucheng Lu <kanolyc@gmail.com>
+Date: Tue, 31 Mar 2026 16:00:21 +0800
+Subject: [PATCH] net/sched: sch_netem: fix out-of-bounds access in packet
+ corruption
+
+[ Upstream commit d64cb81dcbd54927515a7f65e5e24affdc73c14b ]
+
+In netem_enqueue(), the packet corruption logic uses
+get_random_u32_below(skb_headlen(skb)) to select an index for
+modifying skb->data. When an AF_PACKET TX_RING sends fully non-linear
+packets over an IPIP tunnel, skb_headlen(skb) evaluates to 0.
+
+Passing 0 to get_random_u32_below() takes the variable-ceil slow path
+which returns an unconstrained 32-bit random integer. Using this
+unconstrained value as an offset into skb->data results in an
+out-of-bounds memory access.
+
+Fix this by verifying skb_headlen(skb) is non-zero before attempting
+to corrupt the linear data area. Fully non-linear packets will silently
+bypass the corruption logic.
+
+Fixes: c865e5d99e25 ("[PKT_SCHED] netem: packet corruption option")
+Reported-by: Yifan Wu <yifanwucs@gmail.com>
+Reported-by: Juefei Pu <tomapufckgml@gmail.com>
+Signed-off-by: Yuan Tan <tanyuan98@outlook.com>
+Signed-off-by: Xin Liu <bird@lzu.edu.cn>
+Signed-off-by: Yuhang Zheng <z1652074432@gmail.com>
+Signed-off-by: Yucheng Lu <kanolyc@gmail.com>
+Reviewed-by: Stephen Hemminger <stephen@networkplumber.org>
+Link: https://patch.msgid.link/45435c0935df877853a81e6d06205ac738ec65fa.1774941614.git.kanolyc@gmail.com
+Signed-off-by: Jakub Kicinski <kuba@kernel.org>
+Signed-off-by: Sasha Levin <sashal@kernel.org>
+---
+ net/sched/sch_netem.c | 5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/net/sched/sch_netem.c b/net/sched/sch_netem.c
+index 2270547b51df8..825c398aa1232 100644
+--- a/net/sched/sch_netem.c
++++ b/net/sched/sch_netem.c
+@@ -517,8 +517,9 @@ static int netem_enqueue(struct sk_buff *skb, struct Qdisc *sch,
+ 			goto finish_segs;
+ 		}
+ 
+-		skb->data[get_random_u32_below(skb_headlen(skb))] ^=
+-			1<<get_random_u32_below(8);
++		if (skb_headlen(skb))
++			skb->data[get_random_u32_below(skb_headlen(skb))] ^=
++				1 << get_random_u32_below(8);
+ 	}
+ 
+ 	if (unlikely(q->t_len >= sch->limit)) {
+
+
+
+From d02e2fbf60de46678e2ea698a6a904fd21e1cc31 Mon Sep 17 00:00:00 2001
+From: Weiming Shi <bestswngs@gmail.com>
+Date: Thu, 23 Apr 2026 00:19:58 +0800
+Subject: [PATCH] net/sched: taprio: fix NULL pointer dereference in class dump
+
+[ Upstream commit 3d07ca5c0fae311226f737963984bd94bb159a87 ]
+
+When a TAPRIO child qdisc is deleted via RTM_DELQDISC, taprio_graft()
+is called with new == NULL and stores NULL into q->qdiscs[cl - 1].
+Subsequent RTM_GETTCLASS dump operations walk all classes via
+taprio_walk() and call taprio_dump_class(), which calls taprio_leaf()
+returning the NULL pointer, then dereferences it to read child->handle,
+causing a kernel NULL pointer dereference.
+
+The bug is reachable with namespace-scoped CAP_NET_ADMIN on any kernel
+with CONFIG_NET_SCH_TAPRIO enabled. On systems with unprivileged user
+namespaces enabled, an unprivileged local user can trigger a kernel
+panic by creating a taprio qdisc inside a new network namespace,
+grafting an explicit child qdisc, deleting it, and requesting a class
+dump. The RTM_GETTCLASS dump itself requires no capability.
+
+ Oops: general protection fault, probably for non-canonical address 0xdffffc0000000007: 0000 [#1] SMP KASAN NOPTI
+ KASAN: null-ptr-deref in range [0x0000000000000038-0x000000000000003f]
+ RIP: 0010:taprio_dump_class (net/sched/sch_taprio.c:2478)
+ Call Trace:
+  <TASK>
+  tc_fill_tclass (net/sched/sch_api.c:1966)
+  qdisc_class_dump (net/sched/sch_api.c:2326)
+  taprio_walk (net/sched/sch_taprio.c:2514)
+  tc_dump_tclass_qdisc (net/sched/sch_api.c:2352)
+  tc_dump_tclass_root (net/sched/sch_api.c:2370)
+  tc_dump_tclass (net/sched/sch_api.c:2431)
+  rtnl_dumpit (net/core/rtnetlink.c:6864)
+  netlink_dump (net/netlink/af_netlink.c:2325)
+  rtnetlink_rcv_msg (net/core/rtnetlink.c:6959)
+  netlink_rcv_skb (net/netlink/af_netlink.c:2550)
+  </TASK>
+
+Fix this by substituting &noop_qdisc when new is NULL in
+taprio_graft(), a common pattern used by other qdiscs (e.g.,
+multiq_graft()) to ensure the q->qdiscs[] slots are never NULL.
+This makes control-plane dump paths safe without requiring individual
+NULL checks.
+
+Since the data-plane paths (taprio_enqueue and taprio_dequeue_from_txq)
+previously had explicit NULL guards that would drop/skip the packet
+cleanly, update those checks to test for &noop_qdisc instead. Without
+this, packets would reach taprio_enqueue_one() which increments the root
+qdisc's qlen and backlog before calling the child's enqueue; noop_qdisc
+drops the packet but those counters are never rolled back, permanently
+inflating the root qdisc's statistics.
+
+After this change *old can be a valid qdisc, NULL, or &noop_qdisc.
+Only call qdisc_put(*old) in the first case to avoid decreasing
+noop_qdisc's refcount, which was never increased.
+
+Fixes: 665338b2a7a0 ("net/sched: taprio: dump class stats for the actual q->qdiscs[]")
+Reported-by: Xiang Mei <xmei5@asu.edu>
+Signed-off-by: Weiming Shi <bestswngs@gmail.com>
+Acked-by: Jamal Hadi Salim <jhs@mojatatu.com>
+Tested-by: Weiming Shi <bestswngs@gmail.com>
+Link: https://patch.msgid.link/20260422161958.2517539-3-bestswngs@gmail.com
+Signed-off-by: Jakub Kicinski <kuba@kernel.org>
+Signed-off-by: Sasha Levin <sashal@kernel.org>
+---
+ net/sched/sch_taprio.c | 13 ++++++++-----
+ 1 file changed, 8 insertions(+), 5 deletions(-)
+
+diff --git a/net/sched/sch_taprio.c b/net/sched/sch_taprio.c
+index 366eb7627b30d..f1709efb5f04e 100644
+--- a/net/sched/sch_taprio.c
++++ b/net/sched/sch_taprio.c
+@@ -633,7 +633,7 @@ static int taprio_enqueue(struct sk_buff *skb, struct Qdisc *sch,
+ 	queue = skb_get_queue_mapping(skb);
+ 
+ 	child = q->qdiscs[queue];
+-	if (unlikely(!child))
++	if (unlikely(child == &noop_qdisc))
+ 		return qdisc_drop(skb, sch, to_free);
+ 
+ 	if (taprio_skb_exceeds_queue_max_sdu(sch, skb)) {
+@@ -716,7 +716,7 @@ static struct sk_buff *taprio_dequeue_from_txq(struct Qdisc *sch, int txq,
+ 	int len;
+ 	u8 tc;
+ 
+-	if (unlikely(!child))
++	if (unlikely(child == &noop_qdisc))
+ 		return NULL;
+ 
+ 	if (TXTIME_ASSIST_IS_ENABLED(q->flags))
+@@ -2191,6 +2191,9 @@ static int taprio_graft(struct Qdisc *sch, unsigned long cl,
+ 	if (!dev_queue)
+ 		return -EINVAL;
+ 
++	if (!new)
++		new = &noop_qdisc;
++
+ 	if (dev->flags & IFF_UP)
+ 		dev_deactivate(dev);
+ 
+@@ -2204,14 +2207,14 @@ static int taprio_graft(struct Qdisc *sch, unsigned long cl,
+ 	*old = q->qdiscs[cl - 1];
+ 	if (FULL_OFFLOAD_IS_ENABLED(q->flags)) {
+ 		WARN_ON_ONCE(dev_graft_qdisc(dev_queue, new) != *old);
+-		if (new)
++		if (new != &noop_qdisc)
+ 			qdisc_refcount_inc(new);
+-		if (*old)
++		if (*old && *old != &noop_qdisc)
+ 			qdisc_put(*old);
+ 	}
+ 
+ 	q->qdiscs[cl - 1] = new;
+-	if (new)
++	if (new != &noop_qdisc)
+ 		new->flags |= TCQ_F_ONETXQUEUE | TCQ_F_NOPARENT;
+ 
+ 	if (dev->flags & IFF_UP)
+
+
+
+From 0196f36ad01e46f2fc2991d4cee7ece497fa1aed Mon Sep 17 00:00:00 2001
+From: Eric Dumazet <edumazet@google.com>
+Date: Wed, 4 Mar 2026 01:56:40 +0000
+Subject: [PATCH] net_sched: sch_fq: clear q->band_pkt_count[] in fq_reset()
+
+[ Upstream commit a4c2b8be2e5329e7fac6e8f64ddcb8958155cfcb ]
+
+When/if a NIC resets, queues are deactivated by dev_deactivate_many(),
+then reactivated when the reset operation completes.
+
+fq_reset() removes all the skbs from various queues.
+
+If we do not clear q->band_pkt_count[], these counters keep growing
+and can eventually reach sch->limit, preventing new packets to be queued.
+
+Many thanks to Praveen for discovering the root cause.
+
+Fixes: 29f834aa326e ("net_sched: sch_fq: add 3 bands and WRR scheduling")
+Diagnosed-by: Praveen Kaligineedi <pkaligineedi@google.com>
+Signed-off-by: Eric Dumazet <edumazet@google.com>
+Reviewed-by: Neal Cardwell <ncardwell@google.com>
+Reviewed-by: Willem de Bruijn <willemb@google.com>
+Link: https://patch.msgid.link/20260304015640.961780-1-edumazet@google.com
+Signed-off-by: Jakub Kicinski <kuba@kernel.org>
+Signed-off-by: Sasha Levin <sashal@kernel.org>
+---
+ net/sched/sch_fq.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/net/sched/sch_fq.c b/net/sched/sch_fq.c
+index 1af9768cd8ff6..682daf79af373 100644
+--- a/net/sched/sch_fq.c
++++ b/net/sched/sch_fq.c
+@@ -815,6 +815,7 @@ static void fq_reset(struct Qdisc *sch)
+ 	for (idx = 0; idx < FQ_BANDS; idx++) {
+ 		q->band_flows[idx].new_flows.first = NULL;
+ 		q->band_flows[idx].old_flows.first = NULL;
++		q->band_pkt_count[idx] = 0;
+ 	}
+ 	q->delayed		= RB_ROOT;
+ 	q->flows		= 0;
+
+
+
+From 48b27a955d22391c7f30169fa7b6b2e1977f1ce4 Mon Sep 17 00:00:00 2001
+From: Gao Xiang <hsiangkao@linux.alibaba.com>
+Date: Tue, 21 Apr 2026 15:59:52 +0800
+Subject: [PATCH] erofs: fix the out-of-bounds nameoff handling for trailing
+ dirents
+
+commit d18a3b5d337fa412a38e776e6b4b857a58836575 upstream.
+
+Currently we already have boundary-checks for nameoffs, but the trailing
+dirents are special since the namelens are calculated with strnlen()
+with unchecked nameoffs.
+
+If a crafted EROFS has a trailing dirent with nameoff >= maxsize,
+maxsize - nameoff can underflow, causing strnlen() to read past the
+directory block.
+
+nameoff0 should also be verified to be a multiple of
+`sizeof(struct erofs_dirent)` as well [1].
+
+[1] https://sashiko.dev/#/patchset/20260416063511.3173774-1-hsiangkao%40linux.alibaba.com
+
+Fixes: 3aa8ec716e52 ("staging: erofs: add directory operations")
+Fixes: 33bac912840f ("staging: erofs: keep corrupted fs from crashing kernel in erofs_readdir()")
+Reported-by: Yuhao Jiang <danisjiang@gmail.com>
+Reported-by: Junrui Luo <moonafterrain@outlook.com>
+Closes: https://lore.kernel.org/r/A0FD7E0F-7558-49B0-8BC8-EB1ECDB2479A@outlook.com
+Cc: stable@vger.kernel.org
+Signed-off-by: Gao Xiang <hsiangkao@linux.alibaba.com>
+Reviewed-by: Chao Yu <chao@kernel.org>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ fs/erofs/dir.c | 28 +++++++++++++++-------------
+ 1 file changed, 15 insertions(+), 13 deletions(-)
+
+diff --git a/fs/erofs/dir.c b/fs/erofs/dir.c
+index c3b90abdee37a..19efbff53048b 100644
+--- a/fs/erofs/dir.c
++++ b/fs/erofs/dir.c
+@@ -18,20 +18,18 @@ static int erofs_fill_dentries(struct inode *dir, struct dir_context *ctx,
+ 		const char *de_name = (char *)dentry_blk + nameoff;
+ 		unsigned int de_namelen;
+ 
+-		/* the last dirent in the block? */
+-		if (de + 1 >= end)
+-			de_namelen = strnlen(de_name, maxsize - nameoff);
+-		else
++		/* non-trailing dirent in the directory block? */
++		if (de + 1 < end)
+ 			de_namelen = le16_to_cpu(de[1].nameoff) - nameoff;
++		else if (maxsize <= nameoff)
++			goto err_bogus;
++		else
++			de_namelen = strnlen(de_name, maxsize - nameoff);
+ 
+-		/* a corrupted entry is found */
+-		if (nameoff + de_namelen > maxsize ||
+-		    de_namelen > EROFS_NAME_LEN) {
+-			erofs_err(dir->i_sb, "bogus dirent @ nid %llu",
+-				  EROFS_I(dir)->nid);
+-			DBG_BUGON(1);
+-			return -EFSCORRUPTED;
+-		}
++		/* a corrupted entry is found (including negative namelen) */
++		if (!in_range32(de_namelen, 1, EROFS_NAME_LEN) ||
++		    nameoff + de_namelen > maxsize)
++			goto err_bogus;
+ 
+ 		if (!dir_emit(ctx, de_name, de_namelen,
+ 			      le64_to_cpu(de->nid), d_type))
+@@ -40,6 +38,10 @@ static int erofs_fill_dentries(struct inode *dir, struct dir_context *ctx,
+ 		ctx->pos += sizeof(struct erofs_dirent);
+ 	}
+ 	return 0;
++err_bogus:
++	erofs_err(dir->i_sb, "bogus dirent @ nid %llu", EROFS_I(dir)->nid);
++	DBG_BUGON(1);
++	return -EFSCORRUPTED;
+ }
+ 
+ static int erofs_readdir(struct file *f, struct dir_context *ctx)
+@@ -67,7 +69,7 @@ static int erofs_readdir(struct file *f, struct dir_context *ctx)
+ 		}
+ 
+ 		nameoff = le16_to_cpu(de->nameoff);
+-		if (nameoff < sizeof(struct erofs_dirent) || nameoff >= bsz) {
++		if (!nameoff || nameoff >= bsz || (nameoff % sizeof(*de))) {
+ 			erofs_err(sb, "invalid de[0].nameoff %u @ nid %llu",
+ 				  nameoff, EROFS_I(dir)->nid);
+ 			err = -EFSCORRUPTED;
+
+
+
+From 6c31f1b71b9dda398eb7553b37421ea09de216ed Mon Sep 17 00:00:00 2001
+From: Bart Van Assche <bvanassche@google.com>
+Date: Tue, 7 Jul 2026 12:56:51 -0700
+Subject: [PATCH] ANDROID: block: Reinsert requeued requests
+
+When blk_mq_dispatch_rq_list() fails to dispatch requests (e.g. because
+the driver returns BLK_STS_RESOURCE or BLK_STS_DEV_RESOURCE), the
+remaining requests are requeued.
+
+Previously, these requests were appended to the hctx->dispatch list
+directly. However, if multiple sequential zoned writes are pending,
+they might get requeued in a different order than they were submitted,
+or they might get interleaved with other requests in hctx->dispatch,
+violating the sequential write order required for zoned devices.
+
+Fix this by inserting the failed requests back into the software queue
+or elevator using blk_mq_insert_request().
+- If blk_mq_preserve_order(rq) is true, insert them using
+  BLK_MQ_INSERT_ORDERED to restore their LBA-sorted order.
+- Otherwise, insert them using BLK_MQ_INSERT_AT_HEAD to preserve their
+  dispatch priority.
+
+This aligns the dispatch failure path with the requeue path in
+blk_mq_requeue_work().
+
+Bug: 449729210
+Change-Id: I4ea3006cee8a4ba2050dde804ab821ed43b68cba
+Signed-off-by: Bart Van Assche <bvanassche@google.com>
+---
+ block/blk-mq.c | 21 +++++++++++++++------
+ 1 file changed, 15 insertions(+), 6 deletions(-)
+
+diff --git a/block/blk-mq.c b/block/blk-mq.c
+index 8b38164000a28..7a76d870f7bce 100644
+--- a/block/blk-mq.c
++++ b/block/blk-mq.c
+@@ -2125,6 +2125,19 @@ static void blk_mq_commit_rqs(struct blk_mq_hw_ctx *hctx, int queued,
+ 	}
+ }
+ 
++static void blk_mq_reinsert_list(struct list_head *list)
++{
++	struct request *rq;
++
++	while (!list_empty(list)) {
++		rq = list_last_entry(list, struct request, queuelist);
++		list_del_init(&rq->queuelist);
++		blk_mq_insert_request(rq, blk_mq_preserve_order(rq) ?
++				      BLK_MQ_INSERT_ORDERED :
++				      BLK_MQ_INSERT_AT_HEAD);
++	}
++}
++
+ /*
+  * Returns true if we did some work AND can potentially do more.
+  */
+@@ -2202,9 +2215,7 @@ bool blk_mq_dispatch_rq_list(struct blk_mq_hw_ctx *hctx, struct list_head *list,
+ 		if (nr_budgets)
+ 			blk_mq_release_budgets(q, list);
+ 
+-		spin_lock(&hctx->lock);
+-		list_splice_tail_init(list, &hctx->dispatch);
+-		spin_unlock(&hctx->lock);
++		blk_mq_reinsert_list(list);
+ 
+ 		/*
+ 		 * Order adding requests to hctx->dispatch and checking
+@@ -3833,9 +3844,7 @@ static int blk_mq_hctx_notify_dead(unsigned int cpu, struct hlist_node *node)
+ 	if (list_empty(&tmp))
+ 		return 0;
+ 
+-	spin_lock(&hctx->lock);
+-	list_splice_tail_init(&tmp, &hctx->dispatch);
+-	spin_unlock(&hctx->lock);
++	blk_mq_reinsert_list(&tmp);
+ 
+ 	blk_mq_run_hw_queue(hctx, true);
+ 	return 0;
+
+
+
+From 9fdd9f3eaf4c7237dc93216140afc92c4eb051d0 Mon Sep 17 00:00:00 2001
+From: Bart Van Assche <bvanassche@google.com>
+Date: Wed, 8 Jul 2026 13:07:43 -0700
+Subject: [PATCH] ANDROID: block: Do not sleep while holding an RCU reader lock
+
+blk_mq_try_issue_list_directly() may be called with an RCU reader lock
+held. blk_mq_run_hw_queue() may sleep if blk_mq_zwp_mutex(hctx) != NULL.
+Hence, run hctx asynchronously if  blk_mq_zwp_mutex(hctx) != NULL.
+
+This patch fixes the following kernel warning:
+
+Voluntary context switch within RCU read-side critical section!
+WARNING: CPU: 6 PID: 9412 at kernel/rcu/tree_plugin.h:332 rcu_note_context_switch+0x344/0x4fc
+Call trace:
+rcu_note_context_switch+0x344/0x4fc
+__schedule+0xb0/0x10c4
+schedule+0x4c/0x114
+schedule_preempt_disabled+0x24/0x44
+__mutex_lock+0x330/0xd1c
+__mutex_lock_slowpath+0x14/0x24
+mutex_lock+0x70/0xc8
+blk_mq_run_hw_queue+0x340/0x404
+blk_mq_try_issue_list_directly+0x210/0x300
+blk_mq_flush_plug_list+0x69c/0x928
+blk_finish_plug+0x58/0x178
+__iomap_dio_rw+0x1e4/0x5b4
+f2fs_file_read_iter+0x13c/0x3f8
+ksys_read+0x1c8/0x358
+__arm64_sys_read+0x1c/0x2c
+invoke_syscall+0x58/0xe4
+do_el0_svc+0x8c/0xb0
+el0_svc+0x4c/0xd8
+el0t_64_sync_handler+0x6c/
+
+Bug: 449729210
+Fixes: f1dfc8938ea4 ("ANDROID: blk-mq: Serialize dispatching for zoned write pipelining")
+Change-Id: I928579ee4a0ca2628145c750cd6be146b5804ca2
+Signed-off-by: Bart Van Assche <bvanassche@google.com>
+---
+ block/blk-mq.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/block/blk-mq.c b/block/blk-mq.c
+index 6700766ee11d7..7c974c65d3533 100644
+--- a/block/blk-mq.c
++++ b/block/blk-mq.c
+@@ -3011,7 +3011,8 @@ static void blk_mq_try_issue_list_directly(struct blk_mq_hw_ctx *hctx,
+ 		case BLK_STS_DEV_RESOURCE:
+ 			blk_mq_request_bypass_insert(rq, 0);
+ 			if (list_empty(list))
+-				blk_mq_run_hw_queue(hctx, false);
++				blk_mq_run_hw_queue(hctx,
++					blk_mq_zwp_mutex(hctx) != NULL);
+ 			goto out;
+ 		default:
+ 			blk_mq_end_request(rq, ret);
+
+
+
+From 323d252a4a378834e4fe68298ca61cfc5dd3a460 Mon Sep 17 00:00:00 2001
+From: Mikulas Patocka <mpatocka@redhat.com>
+Date: Mon, 20 Apr 2026 19:56:44 +0200
+Subject: [PATCH] dm-thin: fix metadata refcount underflow
+
+commit 09a65adc7d8bbfce06392cb6d375468e2728ead5 upstream.
+
+There's a bug in dm-thin in the function rebalance_children. If the
+internal btree node has one entry, the code tries to copy all btree
+entries from the node's child to the node itself and then decrement the
+child's reference count.
+
+If the child node is shared (it has reference count > 1), we won't free
+it, so there would be two pointers to each of the grandchildren nodes.
+But the reference counts of the grandchildren is not increased, thus the
+reference count doesn't match the number of pointers that point to the
+grandchildren. This results in "device mapper: space map common: unable
+to decrement block" errors.
+
+Fix this bug by incrementing reference counts on the grandchildren if the
+btree node is shared.
+
+Signed-off-by: Mikulas Patocka <mpatocka@redhat.com>
+Fixes: 3241b1d3e0aa ("dm: add persistent data library")
+Cc: stable@vger.kernel.org
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ drivers/md/persistent-data/dm-btree-remove.c | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/drivers/md/persistent-data/dm-btree-remove.c b/drivers/md/persistent-data/dm-btree-remove.c
+index 942cd47eb52da..aeec5b9a1dd5c 100644
+--- a/drivers/md/persistent-data/dm-btree-remove.c
++++ b/drivers/md/persistent-data/dm-btree-remove.c
+@@ -490,12 +490,20 @@ static int rebalance_children(struct shadow_spine *s,
+ 
+ 	if (le32_to_cpu(n->header.nr_entries) == 1) {
+ 		struct dm_block *child;
++		int is_shared;
+ 		dm_block_t b = value64(n, 0);
+ 
++		r = dm_tm_block_is_shared(info->tm, b, &is_shared);
++		if (r)
++			return r;
++
+ 		r = dm_tm_read_lock(info->tm, b, &btree_node_validator, &child);
+ 		if (r)
+ 			return r;
+ 
++		if (is_shared)
++			inc_children(info->tm, dm_block_data(child), vt);
++
+ 		memcpy(n, dm_block_data(child),
+ 		       dm_bm_block_size(dm_tm_get_bm(info->tm)));
+ 
+
+
+
+From 029be23f553bdc544680b1fe7d16c4d2a75ee7a0 Mon Sep 17 00:00:00 2001
+From: Jann Horn <jannh@google.com>
+Date: Mon, 23 Feb 2026 20:59:33 +0100
+Subject: [PATCH] eventpoll: Fix integer overflow in ep_loop_check_proc()
+
+commit fdcfce93073d990ed4b71752e31ad1c1d6e9d58b upstream.
+
+If a recursive call to ep_loop_check_proc() hits the `result = INT_MAX`,
+an integer overflow will occur in the calling ep_loop_check_proc() at
+`result = max(result, ep_loop_check_proc(ep_tovisit, depth + 1) + 1)`,
+breaking the recursion depth check.
+
+Fix it by using a different placeholder value that can't lead to an
+overflow.
+
+Reported-by: Guenter Roeck <linux@roeck-us.net>
+Fixes: f2e467a48287 ("eventpoll: Fix semi-unbounded recursion")
+Cc: stable@vger.kernel.org
+Signed-off-by: Jann Horn <jannh@google.com>
+Link: https://patch.msgid.link/20260223-epoll-int-overflow-v1-1-452f35132224@google.com
+Signed-off-by: Christian Brauner <brauner@kernel.org>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ fs/eventpoll.c | 5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/fs/eventpoll.c b/fs/eventpoll.c
+index 8711fac20804c..aa4318271eee4 100644
+--- a/fs/eventpoll.c
++++ b/fs/eventpoll.c
+@@ -2012,7 +2012,8 @@ static int ep_poll(struct eventpoll *ep, struct epoll_event __user *events,
+  * @ep: the &struct eventpoll to be currently checked.
+  * @depth: Current depth of the path being checked.
+  *
+- * Return: depth of the subtree, or INT_MAX if we found a loop or went too deep.
++ * Return: depth of the subtree, or a value bigger than EP_MAX_NESTS if we found
++ * a loop or went too deep.
+  */
+ static int ep_loop_check_proc(struct eventpoll *ep, int depth)
+ {
+@@ -2031,7 +2032,7 @@ static int ep_loop_check_proc(struct eventpoll *ep, int depth)
+ 			struct eventpoll *ep_tovisit;
+ 			ep_tovisit = epi->ffd.file->private_data;
+ 			if (ep_tovisit == inserting_into || depth > EP_MAX_NESTS)
+-				result = INT_MAX;
++				result = EP_MAX_NESTS+1;
+ 			else
+ 				result = max(result, ep_loop_check_proc(ep_tovisit, depth + 1) + 1);
+ 			if (result > EP_MAX_NESTS)
+
+
+
+From 0a36c1f72888bca0237295a4da19cd91821a90be Mon Sep 17 00:00:00 2001
+From: Mykyta Yatsenko <yatsenko@meta.com>
+Date: Thu, 16 Apr 2026 11:08:07 -0700
+Subject: [PATCH] bpf: Fix NULL deref in map_kptr_match_type for scalar regs
+
+[ Upstream commit 4d0a375887ab4d49e4da1ff10f9606cab8f7c3ad ]
+
+Commit ab6c637ad027 ("bpf: Fix a bpf_kptr_xchg() issue with local
+kptr") refactored map_kptr_match_type() to branch on btf_is_kernel()
+before checking base_type(). A scalar register stored into a kptr
+slot has no btf, so the btf_is_kernel(reg->btf) call dereferences
+NULL.
+
+Move the base_type() != PTR_TO_BTF_ID guard before any reg->btf
+access.
+
+Fixes: ab6c637ad027 ("bpf: Fix a bpf_kptr_xchg() issue with local kptr")
+Reported-by: Hiker Cl <clhiker365@gmail.com>
+Closes: https://bugzilla.kernel.org/show_bug.cgi?id=221372
+Signed-off-by: Mykyta Yatsenko <yatsenko@meta.com>
+Acked-by: Paul Chaignon <paul.chaignon@gmail.com>
+Link: https://lore.kernel.org/r/20260416-kptr_crash-v1-1-5589356584b4@meta.com
+Signed-off-by: Alexei Starovoitov <ast@kernel.org>
+Signed-off-by: Sasha Levin <sashal@kernel.org>
+---
+ kernel/bpf/verifier.c | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/kernel/bpf/verifier.c b/kernel/bpf/verifier.c
+index 56a74ce4a29b9..64a6ec8eb847b 100644
+--- a/kernel/bpf/verifier.c
++++ b/kernel/bpf/verifier.c
+@@ -5473,6 +5473,9 @@ static int map_kptr_match_type(struct bpf_verifier_env *env,
+ 	int perm_flags;
+ 	const char *reg_name = "";
+ 
++	if (base_type(reg->type) != PTR_TO_BTF_ID)
++		goto bad_type;
++
+ 	if (btf_is_kernel(reg->btf)) {
+ 		perm_flags = PTR_MAYBE_NULL | PTR_TRUSTED | MEM_RCU;
+ 
+@@ -5485,7 +5488,7 @@ static int map_kptr_match_type(struct bpf_verifier_env *env,
+ 			perm_flags |= MEM_PERCPU;
+ 	}
+ 
+-	if (base_type(reg->type) != PTR_TO_BTF_ID || (type_flag(reg->type) & ~perm_flags))
++	if (type_flag(reg->type) & ~perm_flags)
+ 		goto bad_type;
+ 
+ 	/* We need to verify reg->type and reg->btf, before accessing reg->btf */
+
+
+
+From 183128da0406b1c10e6f60b7b9fe70788b9c8c1d Mon Sep 17 00:00:00 2001
+From: Jiayuan Chen <jiayuan.chen@linux.dev>
+Date: Sat, 11 Apr 2026 08:55:19 +0800
+Subject: [PATCH] net, bpf: fix null-ptr-deref in xdp_master_redirect() for
+ down master
+
+[ Upstream commit 1921f91298d1388a0bb9db8f83800c998b649cb3 ]
+
+syzkaller reported a kernel panic in bond_rr_gen_slave_id() reached via
+xdp_master_redirect(). Full decoded trace:
+
+  https://syzkaller.appspot.com/bug?extid=80e046b8da2820b6ba73
+
+bond_rr_gen_slave_id() dereferences bond->rr_tx_counter, a per-CPU
+counter that bonding only allocates in bond_open() when the mode is
+round-robin. If the bond device was never brought up, rr_tx_counter
+stays NULL.
+
+The XDP redirect path can still reach that code on a bond that was
+never opened: bpf_master_redirect_enabled_key is a global static key,
+so as soon as any bond device has native XDP attached, the
+XDP_TX -> xdp_master_redirect() interception is enabled for every
+slave system-wide. The path xdp_master_redirect() ->
+bond_xdp_get_xmit_slave() -> bond_xdp_xmit_roundrobin_slave_get() ->
+bond_rr_gen_slave_id() then runs against a bond that has no
+rr_tx_counter and crashes.
+
+Fix this in the generic xdp_master_redirect() by refusing to call into
+the master's ->ndo_xdp_get_xmit_slave() when the master device is not
+up. IFF_UP is only set after ->ndo_open() has successfully returned,
+so this reliably excludes masters whose XDP state has not been fully
+initialized. Drop the frame with XDP_ABORTED so the exception is
+visible via trace_xdp_exception() rather than silently falling through.
+This is not specific to bonding: any current or future master that
+defers XDP state allocation to ->ndo_open() is protected.
+
+Fixes: 879af96ffd72 ("net, core: Add support for XDP redirection to slave device")
+Reported-by: syzbot+80e046b8da2820b6ba73@syzkaller.appspotmail.com
+Closes: https://lore.kernel.org/all/698f84c6.a70a0220.2c38d7.00cc.GAE@google.com/T/
+Suggested-by: Daniel Borkmann <daniel@iogearbox.net>
+Acked-by: Daniel Borkmann <daniel@iogearbox.net>
+Signed-off-by: Jiayuan Chen <jiayuan.chen@linux.dev>
+Link: https://patch.msgid.link/20260411005524.201200-2-jiayuan.chen@linux.dev
+Signed-off-by: Paolo Abeni <pabeni@redhat.com>
+Signed-off-by: Sasha Levin <sashal@kernel.org>
+---
+ net/core/filter.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/net/core/filter.c b/net/core/filter.c
+index 1f96c3aa01cad..795e558155c6d 100644
+--- a/net/core/filter.c
++++ b/net/core/filter.c
+@@ -4388,6 +4388,8 @@ u32 xdp_master_redirect(struct xdp_buff *xdp)
+ 	struct net_device *master, *slave;
+ 
+ 	master = netdev_master_upper_dev_get_rcu(xdp->rxq->dev);
++	if (unlikely(!(master->flags & IFF_UP)))
++		return XDP_ABORTED;
+ 	slave = master->netdev_ops->ndo_xdp_get_xmit_slave(master, xdp);
+ 	if (slave && slave != xdp->rxq->dev) {
+ 		/* The target device is different from the receiving device, so
+
+
+
+From 1468f39243ccb155b6d97f9a9932f610d1205d75 Mon Sep 17 00:00:00 2001
+From: David Howells <dhowells@redhat.com>
+Date: Tue, 12 May 2026 13:33:51 +0100
+Subject: [PATCH] netfs: Fix potential deadlock in write-through mode
+
+[ Upstream commit b6a4ae1634b3ad2aaa05222e53d36da532852faf ]
+
+Fix netfs_advance_writethrough() to always unlock the supplied folio and to
+mark it dirty if it isn't yet written to the end.  Unfortunately, it can't
+be marked for writeback until the folio is done with as that may cause a
+deadlock against mmapped reads and writes.
+
+Even though it has been marked dirty, premature writeback can't occur as
+the caller is holding both inode->i_rwsem (which will prevent concurrent
+truncation, fallocation, DIO and other writes) and ictx->wb_lock (which
+will cause flushing to wait and writeback to skip or wait).
+
+Note that this may be easier to deal with once the queuing of folios is
+split from the generation of subrequests.
+
+Fixes: 288ace2f57c9 ("netfs: New writeback implementation")
+Closes: https://sashiko.dev/#/patchset/20260427154639.180684-1-dhowells%40redhat.com
+Signed-off-by: David Howells <dhowells@redhat.com>
+Link: https://patch.msgid.link/20260512123404.719402-15-dhowells@redhat.com
+cc: Paulo Alcantara <pc@manguebit.org>
+cc: netfs@lists.linux.dev
+cc: linux-fsdevel@vger.kernel.org
+Signed-off-by: Christian Brauner <brauner@kernel.org>
+Signed-off-by: Sasha Levin <sashal@kernel.org>
+---
+ fs/netfs/write_issue.c | 39 +++++++++++++++++++++++++--------------
+ 1 file changed, 25 insertions(+), 14 deletions(-)
+
+diff --git a/fs/netfs/write_issue.c b/fs/netfs/write_issue.c
+index b7830a15ae40f..2789ac4c80272 100644
+--- a/fs/netfs/write_issue.c
++++ b/fs/netfs/write_issue.c
+@@ -402,12 +402,7 @@ static int netfs_write_folio(struct netfs_io_request *wreq,
+ 	if (streamw)
+ 		netfs_issue_write(wreq, cache);
+ 
+-	/* Flip the page to the writeback state and unlock.  If we're called
+-	 * from write-through, then the page has already been put into the wb
+-	 * state.
+-	 */
+-	if (wreq->origin == NETFS_WRITEBACK)
+-		folio_start_writeback(folio);
++	folio_start_writeback(folio);
+ 	folio_unlock(folio);
+ 
+ 	if (fgroup == NETFS_FOLIO_COPY_TO_CACHE) {
+@@ -632,29 +627,41 @@ int netfs_advance_writethrough(struct netfs_io_request *wreq, struct writeback_c
+ 			       struct folio *folio, size_t copied, bool to_page_end,
+ 			       struct folio **writethrough_cache)
+ {
++	int ret;
++
+ 	_enter("R=%x ic=%zu ws=%u cp=%zu tp=%u",
+ 	       wreq->debug_id, wreq->iter.count, wreq->wsize, copied, to_page_end);
+ 
+-	if (!*writethrough_cache) {
+-		if (folio_test_dirty(folio))
+-			/* Sigh.  mmap. */
+-			folio_clear_dirty_for_io(folio);
++	/* The folio is locked. */
+ 
++	if (*writethrough_cache != folio) {
++		if (*writethrough_cache) {
++			/* Did the folio get moved? */
++			folio_put(*writethrough_cache);
++			*writethrough_cache = NULL;
++		}
+ 		/* We can make multiple writes to the folio... */
+-		folio_start_writeback(folio);
+ 		if (wreq->len == 0)
+ 			trace_netfs_folio(folio, netfs_folio_trace_wthru);
+ 		else
+ 			trace_netfs_folio(folio, netfs_folio_trace_wthru_plus);
+ 		*writethrough_cache = folio;
++		folio_get(folio);
+ 	}
+ 
+ 	wreq->len += copied;
+-	if (!to_page_end)
++
++	if (!to_page_end) {
++		folio_mark_dirty(folio);
++		folio_unlock(folio);
+ 		return 0;
++	}
+ 
++	ret = netfs_write_folio(wreq, wbc, folio);
++	folio_put(*writethrough_cache);
+ 	*writethrough_cache = NULL;
+-	return netfs_write_folio(wreq, wbc, folio);
++	wreq->submitted = wreq->len;
++	return ret;
+ }
+ 
+ /*
+@@ -668,8 +675,12 @@ int netfs_end_writethrough(struct netfs_io_request *wreq, struct writeback_contr
+ 
+ 	_enter("R=%x", wreq->debug_id);
+ 
+-	if (writethrough_cache)
++	if (writethrough_cache) {
++		folio_lock(writethrough_cache);
+ 		netfs_write_folio(wreq, wbc, writethrough_cache);
++		folio_put(writethrough_cache);
++		wreq->submitted = wreq->len;
++	}
+ 
+ 	netfs_end_issue_write(wreq);
+ 
+
+
+

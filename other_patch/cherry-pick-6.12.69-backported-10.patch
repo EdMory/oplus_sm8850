@@ -498,10 +498,10 @@ index eadf0d0a4d8f..069de54a7473 100644
  }
  
 diff --git a/mm/memory.c b/mm/memory.c
-index b8dad89fee3f..0b6f10e6b3bf 100644
+index f1e027581..06b1c1de2 100644
 --- a/mm/memory.c
 +++ b/mm/memory.c
-@@ -1442,7 +1442,7 @@ copy_page_range(struct vm_area_struct *dst_vma, struct vm_area_struct *src_vma)
+@@ -1444,7 +1444,7 @@ copy_page_range(struct vm_area_struct *dst_vma, struct vm_area_struct *src_vma)
  static inline bool should_zap_cows(struct zap_details *details)
  {
  	/* By default, zap all pages */
@@ -510,18 +510,18 @@ index b8dad89fee3f..0b6f10e6b3bf 100644
  		return true;
  
  	/* Or, we zap COWed pages only if the caller wants to */
-@@ -1605,6 +1605,10 @@ static unsigned long zap_pte_range(struct mmu_gather *tlb,
+@@ -1607,6 +1607,10 @@ static unsigned long zap_pte_range(struct mmu_gather *tlb,
  	pte_t *start_pte;
  	pte_t *pte;
  	swp_entry_t entry;
 +	pmd_t pmdval;
 +	unsigned long start = addr;
 +	bool can_reclaim_pt = reclaim_pt_is_enabled(start, end, details);
-+	bool direct_reclaim = false;
++	bool direct_reclaim = true;
  	int nr;
  	bool bypass = false;
  
-@@ -1626,8 +1630,10 @@ static unsigned long zap_pte_range(struct mmu_gather *tlb,
+@@ -1628,8 +1632,10 @@ static unsigned long zap_pte_range(struct mmu_gather *tlb,
  		if (pte_none(ptent))
  			continue;
  
@@ -533,7 +533,7 @@ index b8dad89fee3f..0b6f10e6b3bf 100644
  
  		if (pte_present(ptent)) {
  			max_nr = (end - addr) / PAGE_SIZE;
-@@ -1636,6 +1642,7 @@ static unsigned long zap_pte_range(struct mmu_gather *tlb,
+@@ -1638,6 +1644,7 @@ static unsigned long zap_pte_range(struct mmu_gather *tlb,
  					      &force_break);
  			if (unlikely(force_break)) {
  				addr += nr * PAGE_SIZE;
@@ -541,17 +541,25 @@ index b8dad89fee3f..0b6f10e6b3bf 100644
  				break;
  			}
  			continue;
-@@ -1705,6 +1712,9 @@ static unsigned long zap_pte_range(struct mmu_gather *tlb,
+@@ -1707,6 +1714,17 @@ static unsigned long zap_pte_range(struct mmu_gather *tlb,
  		zap_install_uffd_wp_if_needed(vma, addr, pte, nr, details, ptent);
  	} while (pte += nr, addr += PAGE_SIZE * nr, addr != end);
  
-+	if (can_reclaim_pt && addr == end)
++	/*
++	 * Fast path: try to hold the pmd lock and unmap the PTE page.
++	 *
++	 * If the pte lock was released midway (retry case), or if the attempt
++	 * to hold the pmd lock failed, then we need to recheck all pte entries
++	 * to ensure they are still none, thereby preventing the pte entries
++	 * from being repopulated by another thread.
++	 */
++	if (can_reclaim_pt && direct_reclaim && addr == end)
 +		direct_reclaim = try_get_and_clear_pmd(mm, pmd, &pmdval);
 +
  	add_mm_rss_vec(mm, rss);
  	arch_leave_lazy_mmu_mode();
  
-@@ -1724,6 +1734,13 @@ static unsigned long zap_pte_range(struct mmu_gather *tlb,
+@@ -1726,6 +1744,13 @@ static unsigned long zap_pte_range(struct mmu_gather *tlb,
  	if (force_flush)
  		tlb_flush_mmu(tlb);
  
@@ -565,210 +573,6 @@ index b8dad89fee3f..0b6f10e6b3bf 100644
  	return addr;
  }
  
-diff --git a/mm/pt_reclaim.c b/mm/pt_reclaim.c
-new file mode 100644
-index 000000000000..7e9455a18aae
---- /dev/null
-+++ b/mm/pt_reclaim.c
-@@ -0,0 +1,71 @@
-+// SPDX-License-Identifier: GPL-2.0
-+#include <linux/hugetlb.h>
-+#include <asm-generic/tlb.h>
-+#include <asm/pgalloc.h>
-+
-+#include "internal.h"
-+
-+bool reclaim_pt_is_enabled(unsigned long start, unsigned long end,
-+			   struct zap_details *details)
-+{
-+	return details && details->reclaim_pt && (end - start >= PMD_SIZE);
-+}
-+
-+bool try_get_and_clear_pmd(struct mm_struct *mm, pmd_t *pmd, pmd_t *pmdval)
-+{
-+	spinlock_t *pml = pmd_lockptr(mm, pmd);
-+
-+	if (!spin_trylock(pml))
-+		return false;
-+
-+	*pmdval = pmdp_get_lockless(pmd);
-+	pmd_clear(pmd);
-+	spin_unlock(pml);
-+
-+	return true;
-+}
-+
-+void free_pte(struct mm_struct *mm, unsigned long addr, struct mmu_gather *tlb,
-+	      pmd_t pmdval)
-+{
-+	pte_free_tlb(tlb, pmd_pgtable(pmdval), addr);
-+	mm_dec_nr_ptes(mm);
-+}
-+
-+void try_to_free_pte(struct mm_struct *mm, pmd_t *pmd, unsigned long addr,
-+		     struct mmu_gather *tlb)
-+{
-+	pmd_t pmdval;
-+	spinlock_t *pml, *ptl = NULL;
-+	pte_t *start_pte, *pte;
-+	int i;
-+
-+	pml = pmd_lock(mm, pmd);
-+	start_pte = pte_offset_map_rw_nolock(mm, pmd, addr, &pmdval, &ptl);
-+	if (!start_pte)
-+		goto out_ptl;
-+	if (ptl != pml)
-+		spin_lock_nested(ptl, SINGLE_DEPTH_NESTING);
-+
-+	/* Check if it is empty PTE page */
-+	for (i = 0, pte = start_pte; i < PTRS_PER_PTE; i++, pte++) {
-+		if (!pte_none(ptep_get(pte)))
-+			goto out_ptl;
-+	}
-+	pte_unmap(start_pte);
-+
-+	pmd_clear(pmd);
-+
-+	if (ptl != pml)
-+		spin_unlock(ptl);
-+	spin_unlock(pml);
-+
-+	free_pte(mm, addr, tlb, pmdval);
-+
-+	return;
-+out_ptl:
-+	if (start_pte)
-+		pte_unmap_unlock(start_pte, ptl);
-+	if (ptl != pml)
-+		spin_unlock(pml);
-+}
--- 
-2.55.0.windows.3
-
-
-
-From b98453de899e89df5ad6ba221bf54b1ff3a701c4 Mon Sep 17 00:00:00 2001
-From: Qi Zheng <zhengqi.arch@bytedance.com>
-Date: Tue, 11 Feb 2025 15:26:25 +0800
-Subject: [PATCH 11/21] UPSTREAM: mm: pgtable: fix incorrect reclaim of
- non-empty PTE pages
-
-In zap_pte_range(), if the pte lock was released midway, the pte entries
-may be refilled with physical pages by another thread, which may cause a
-non-empty PTE page to be reclaimed and eventually cause the system to
-crash.
-
-To fix it, fall back to the slow path in this case to recheck if all pte
-entries are still none.
-
-Link: https://lkml.kernel.org/r/20250211072625.89188-1-zhengqi.arch@bytedance.com
-Fixes: 6375e95f381e ("mm: pgtable: reclaim empty PTE page in madvise(MADV_DONTNEED)")
-Signed-off-by: Qi Zheng <zhengqi.arch@bytedance.com>
-Reported-by: Christian Brauner <brauner@kernel.org>
-Closes: https://lore.kernel.org/all/20250207-anbot-bankfilialen-acce9d79a2c7@brauner/
-Reported-by: Qu Wenruo <quwenruo.btrfs@gmx.com>
-Closes: https://lore.kernel.org/all/152296f3-5c81-4a94-97f3-004108fba7be@gmx.com/
-Tested-by: Zi Yan <ziy@nvidia.com>
-Cc: <stable@vger.kernel.org>
-Cc: "Darrick J. Wong" <djwong@kernel.org>
-Cc: Dave Chinner <david@fromorbit.com>
-Cc: David Hildenbrand <david@redhat.com>
-Cc: Jann Horn <jannh@google.com>
-Cc: Matthew Wilcox <willy@infradead.org>
-Cc: Muchun Song <muchun.song@linux.dev>
-Cc: Zi Yan <ziy@nvidia.com>
-
-Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
-Bug: 487357389
-(cherry picked from commit f39edcf6349abb2ca2df96acc8645f4d2631d0a7)
-Change-Id: I47988211d19710fa37a1c8a6a5729e5134995598
-Signed-off-by: Jordan Chang <jordanchang@google.com>
----
- mm/memory.c | 12 ++++++++++--
- 1 file changed, 10 insertions(+), 2 deletions(-)
-
-diff --git a/mm/memory.c b/mm/memory.c
-index c656c522c..06b1c1de2 100644
---- a/mm/memory.c
-+++ b/mm/memory.c
-@@ -1610,7 +1610,7 @@ static unsigned long zap_pte_range(struct mmu_gather *tlb,
- 	pmd_t pmdval;
- 	unsigned long start = addr;
- 	bool can_reclaim_pt = reclaim_pt_is_enabled(start, end, details);
--	bool direct_reclaim = false;
-+	bool direct_reclaim = true;
- 	int nr;
- 	bool bypass = false;
- 
-@@ -1714,7 +1714,15 @@ static unsigned long zap_pte_range(struct mmu_gather *tlb,
- 		zap_install_uffd_wp_if_needed(vma, addr, pte, nr, details, ptent);
- 	} while (pte += nr, addr += PAGE_SIZE * nr, addr != end);
- 
--	if (can_reclaim_pt && addr == end)
-+	/*
-+	 * Fast path: try to hold the pmd lock and unmap the PTE page.
-+	 *
-+	 * If the pte lock was released midway (retry case), or if the attempt
-+	 * to hold the pmd lock failed, then we need to recheck all pte entries
-+	 * to ensure they are still none, thereby preventing the pte entries
-+	 * from being repopulated by another thread.
-+	 */
-+	if (can_reclaim_pt && direct_reclaim && addr == end)
- 		direct_reclaim = try_get_and_clear_pmd(mm, pmd, &pmdval);
- 
- 	add_mm_rss_vec(mm, rss);
-
-From 9da55ec9ae580a67618b96c99320f70b64d25a07 Mon Sep 17 00:00:00 2001
-From: Mikhail Gavrilov <mikhail.v.gavrilov@gmail.com>
-Date: Fri, 29 May 2026 13:02:30 +0800
-Subject: [PATCH 13/21] mm/page_alloc: clear page->private in
- free_pages_prepare()
-
-[ Upstream commit ac1ea219590c09572ed5992dc233bbf7bb70fef9 ]
-
-Several subsystems (slub, shmem, ttm, etc.) use page->private but don't
-clear it before freeing pages.  When these pages are later allocated as
-high-order pages and split via split_page(), tail pages retain stale
-page->private values.
-
-This causes a use-after-free in the swap subsystem.  The swap code uses
-page->private to track swap count continuations, assuming freshly
-allocated pages have page->private == 0.  When stale values are present,
-swap_count_continued() incorrectly assumes the continuation list is valid
-and iterates over uninitialized page->lru containing LIST_POISON values,
-causing a crash:
-
-  KASAN: maybe wild-memory-access in range [0xdead000000000100-0xdead000000000107]
-  RIP: 0010:__do_sys_swapoff+0x1151/0x1860
-
-Fix this by clearing page->private in free_pages_prepare(), ensuring all
-freed pages have clean state regardless of previous use.
-
-Link: https://lkml.kernel.org/r/20260207173615.146159-1-mikhail.v.gavrilov@gmail.com
-Fixes: 3b8000ae185c ("mm/vmalloc: huge vmalloc backing pages should be split rather than compound")
-Signed-off-by: Mikhail Gavrilov <mikhail.v.gavrilov@gmail.com>
-Suggested-by: Zi Yan <ziy@nvidia.com>
-Acked-by: Zi Yan <ziy@nvidia.com>
-Acked-by: David Hildenbrand (Arm) <david@kernel.org>
-Reviewed-by: Vlastimil Babka <vbabka@suse.cz>
-Cc: Brendan Jackman <jackmanb@google.com>
-Cc: Chris Li <chrisl@kernel.org>
-Cc: Hugh Dickins <hughd@google.com>
-Cc: Johannes Weiner <hannes@cmpxchg.org>
-Cc: Kairui Song <ryncsn@gmail.com>
-Cc: Matthew Wilcox (Oracle) <willy@infradead.org>
-Cc: Michal Hocko <mhocko@suse.com>
-Cc: Nicholas Piggin <npiggin@gmail.com>
-Cc: Suren Baghdasaryan <surenb@google.com>
-Cc: <stable@vger.kernel.org>
-Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
-[backport: context only]
-Signed-off-by: Li Wang <li.wang@windriver.com>
-Signed-off-by: Sasha Levin <sashal@kernel.org>
----
- mm/page_alloc.c | 1 +
- 1 file changed, 1 insertion(+)
-
 diff --git a/mm/page_alloc.c b/mm/page_alloc.c
 index 691898e785be..2866d0df7ec9 100644
 --- a/mm/page_alloc.c

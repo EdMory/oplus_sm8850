@@ -1313,6 +1313,25 @@ jobs:
           fi
           patch -p1 -F 0 < $PATCH
           echo "cherry-pick 验证通过补丁集(35条)应用完成"
+
+      - name: 应用 cherry-pick backport 补丁集(10条)
+        run: |
+          echo "正在集成 6.12.69 backport 补丁集(10条，cctv18 6.12.69 树内置的11条已剔除)..."
+          cd kernel_workspace/common
+          PATCH=cherry-pick-6.12.69-backported-10.patch
+          wget -O $PATCH https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/$PATCH \
+            || wget -O $PATCH https://github.com/EdMory/oplus_sm8850/raw/refs/heads/main/other_patch/$PATCH
+          if grep -qE '^\+.*EXPORT_SYMBOL' $PATCH; then
+            echo "错误：$PATCH 新增了 EXPORT_SYMBOL，可能破坏 KMI，已中止"; exit 1
+          fi
+          if grep -qE '^\+\+\+ b/include/' $PATCH; then
+            echo "错误：$PATCH 改动了 include/ 头文件，可能破坏 KMI，已中止"; exit 1
+          fi
+          if ! patch -p1 --dry-run -F 0 < $PATCH; then
+            echo "错误：$PATCH 无法零 fuzz 应用，请确认内核源码未被上游改动（可关闭 cherry_pick_enable 后重试）"; exit 1
+          fi
+          patch -p1 -F 0 < $PATCH
+          echo "cherry-pick backport 补丁集(10条)应用完成"
          
       - name: 添加制作名称
         run: |

@@ -263,9 +263,10 @@ index 92a111ecb9d4..bd1cf57556bc 100644
  }
  
  /*
-@@ -2152,12 +2164,17 @@ static int shmem_swapin_folio(struct inode *inode, pgoff_t index,
+@@ -2152,12 +2164,18 @@ static int shmem_swapin_folio(struct inode *inode, pgoff_t index,
  		return -EIO;
  
++	int order;
  	si = get_swap_device(swap);
 -	if (!si) {
 -		if (!shmem_confirm_swap(mapping, index, swap))

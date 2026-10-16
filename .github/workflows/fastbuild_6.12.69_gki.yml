@@ -1292,7 +1292,7 @@ jobs:
           cp include/linux/sched.h /tmp/hmbird_sched.h.before
           cp kernel/sched/sched.h /tmp/hmbird_sched_sched.h.before
 
-          # 五、显式写入开关 + 集成结果校验: defconfig 开关/调度类挂载/uapi 枚举必须齐全
+          patch -p1 --no-backup-if-mismatch -F 0 < "$HMBIRD_PATCH"
           grep -q '^CONFIG_HMBIRD_SCHED=' arch/arm64/configs/gki_defconfig \
             || echo "CONFIG_HMBIRD_SCHED=y" >> arch/arm64/configs/gki_defconfig
           check() { grep -qF "$2" "$1" || { echo "HMBIRD 集成校验失败: $1 缺少 '$2'"; exit 1; }; }

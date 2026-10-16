@@ -12,13 +12,11 @@
 diff --git a/include/asm-generic/vmlinux.lds.h b/include/asm-generic/vmlinux.lds.h
 --- a/include/asm-generic/vmlinux.lds.h
 +++ b/include/asm-generic/vmlinux.lds.h
-@@ -125,6 +125,9 @@
+@@ -125,6 +125,7 @@
  	*(__dl_sched_class)			\
  	*(__rt_sched_class)			\
  	*(__fair_sched_class)			\
-+#ifdef CONFIG_HMBIRD_SCHED
 +	*(__hmbird_sched_class)			\
-+#endif
  	*(__ext_sched_class)			\
  	*(__idle_sched_class)			\
  	__sched_class_lowest = .;

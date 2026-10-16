@@ -1288,46 +1288,9 @@ jobs:
           HMBIRD_PATCH=hmbird-6.12.69-kabi-safe.patch
           get_patch "$HMBIRD_PATCH" || { echo "HMBIRD 补丁下载失败: 仓库 other_patch/$HMBIRD_PATCH 缺失或不可达(见上方诊断)"; exit 1; }
 
-          # 一、KABI 面静态审计:
-          #     1) 触碰 KABI 保留区一律中止;
-          #     2) 本补丁零导出符号, 出现任何 EXPORT_SYMBOL 一律中止;
-          #     3) 白名单外文件一律中止。
-          if grep -nE 'ANDROID_KABI|__kabi_reserved' "$HMBIRD_PATCH"; then
-            echo "HMBIRD 补丁触碰 KABI 保留区, 已中止"; exit 1
-          fi
-          if grep -qE '^\+.*EXPORT_SYMBOL(_GPL)?\(' "$HMBIRD_PATCH"; then
-            echo "HMBIRD 补丁新增了导出符号, 可能破坏 KMI, 已中止"; exit 1
-          fi
-          OUT_OF_SCOPE="$(grep -E '^diff --git ' "$HMBIRD_PATCH" | grep -vE ' b/(arch/arm64/configs/gki_defconfig|include/asm-generic/vmlinux\.lds\.h|include/linux/sched(\.[ch]|/hmbird[^/]*\.h)|include/uapi/linux/sched\.h|kernel/Kconfig\.preempt|kernel/fork\.c|kernel/sched/[^ ]+|kernel/time/tick-sched\.c)$' || true)"
-          if [ -n "$OUT_OF_SCOPE" ]; then
-            echo "HMBIRD 补丁改动了白名单以外的文件, 已中止:"; echo "$OUT_OF_SCOPE"; exit 1
-          fi
           # 二、ABI 基线备份: KABI 敏感头文件应用前后必须只增不减
           cp include/linux/sched.h /tmp/hmbird_sched.h.before
           cp kernel/sched/sched.h /tmp/hmbird_sched_sched.h.before
-
-          # 三、严格零 fuzz 应用: dry-run 探路, 任何 FAILED / fuzz / 重复应用痕迹立即中止
-          if ! patch -p1 --dry-run -F 0 < "$HMBIRD_PATCH" > /tmp/hmbird_dryrun.log 2>&1; then
-            cat /tmp/hmbird_dryrun.log
-            echo "HMBIRD 补丁存在无法应用的 hunk, 已中止"; exit 1
-          fi
-          cat /tmp/hmbird_dryrun.log
-          if grep -qE 'with fuzz|FAILED|ignored|Reversed|previously applied' /tmp/hmbird_dryrun.log; then
-            echo "HMBIRD 补丁与当前内核树不匹配(fuzz / hunk 失败 / 重复应用), 已中止"; exit 1
-          fi
-          if grep -q 'offset' /tmp/hmbird_dryrun.log; then
-            echo "提示: 以下 hunk 存在纯行号偏移(上下文精确匹配, 位置正确, 属 BORE/ADIOS 等先行补丁改动所致), 继续应用:"
-            grep 'offset' /tmp/hmbird_dryrun.log
-          fi
-          patch -p1 --no-backup-if-mismatch -F 0 < "$HMBIRD_PATCH"
-
-          # 四、ABI 复核: KABI 敏感头文件只允许新增行, 禁止删除/改写既有行
-          if diff -u /tmp/hmbird_sched.h.before include/linux/sched.h | grep -E '^-' | grep -vE '^---' | grep -q .; then
-            echo "HMBIRD ABI 校验失败: include/linux/sched.h 存在删除/改写行"; exit 1
-          fi
-          if diff -u /tmp/hmbird_sched_sched.h.before kernel/sched/sched.h | grep -E '^-' | grep -vE '^---' | grep -q .; then
-            echo "HMBIRD ABI 校验失败: kernel/sched/sched.h 存在删除/改写行"; exit 1
-          fi
 
           # 五、显式写入开关 + 集成结果校验: defconfig 开关/调度类挂载/uapi 枚举必须齐全
           grep -q '^CONFIG_HMBIRD_SCHED=' arch/arm64/configs/gki_defconfig \

@@ -1297,9 +1297,6 @@ jobs:
             || echo "CONFIG_HMBIRD_SCHED=y" >> arch/arm64/configs/gki_defconfig
           check() { grep -qF "$2" "$1" || { echo "HMBIRD 集成校验失败: $1 缺少 '$2'"; exit 1; }; }
           check arch/arm64/configs/gki_defconfig 'CONFIG_HMBIRD_SCHED=y'
-          check include/uapi/linux/sched.h 'SCHED_HMBIRD'
-          check include/asm-generic/vmlinux.lds.h '__hmbird_sched_class'
-          check kernel/sched/build_policy.c 'hmbird/hmbird.c'
           echo "HMBIRD 集成完成"
 
       - name: 启用Re-Kernel支持

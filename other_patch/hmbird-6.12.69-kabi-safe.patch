@@ -25,14 +25,13 @@ diff --git a/include/asm-generic/vmlinux.lds.h b/include/asm-generic/vmlinux.lds
 diff --git a/include/linux/sched.h b/include/linux/sched.h
 --- a/include/linux/sched.h
 +++ b/include/linux/sched.h
-@@ -2388,3 +2388,89 @@
+@@ -2388,3 +2388,91 @@
  #endif
  
  #endif
 +#ifdef CONFIG_HMBIRD_SCHED
 +#include <linux/sched/hmbird.h>
 +
-+#ifdef CONFIG_HMBIRD_SCHED
 +static inline bool task_is_top_task(struct task_struct *p)
 +{
 +	return (((struct hmbird_entity *)(p->android_oem_data1[HMBIRD_TS_IDX]))
@@ -114,6 +113,9 @@ diff --git a/include/linux/sched.h b/include/linux/sched.h
 +	if (entity)
 +		return entity->dsq_sync_ux;
 +	else
++		return 0;
++}
++
 +#endif /* CONFIG_HMBIRD_SCHED */
 diff --git a/include/linux/sched/hmbird.h b/include/linux/sched/hmbird.h
 new file mode 100644

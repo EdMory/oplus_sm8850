@@ -23,10 +23,11 @@ diff --git a/include/asm-generic/vmlinux.lds.h b/include/asm-generic/vmlinux.lds
 diff --git a/include/linux/sched.h b/include/linux/sched.h
 --- a/include/linux/sched.h
 +++ b/include/linux/sched.h
-@@ -2388,3 +2388,90 @@
+@@ -2387,4 +2387,91 @@
+ #define alloc_tag_restore(_tag, _old)		do {} while (0)
  #endif
  
- #endif
+-#endif
 +#ifdef CONFIG_HMBIRD_SCHED
 +#include <linux/sched/hmbird.h>
 +
@@ -114,6 +115,7 @@ diff --git a/include/linux/sched.h b/include/linux/sched.h
 +		return 0;
 +}
 +#endif /* CONFIG_HMBIRD_SCHED */
++#endif
 diff --git a/include/linux/sched/hmbird.h b/include/linux/sched/hmbird.h
 new file mode 100644
 --- /dev/null

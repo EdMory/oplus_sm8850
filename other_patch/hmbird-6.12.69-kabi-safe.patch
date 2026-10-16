@@ -120,7 +120,7 @@ diff --git a/include/linux/sched/hmbird.h b/include/linux/sched/hmbird.h
 new file mode 100644
 --- /dev/null
 +++ b/include/linux/sched/hmbird.h
-@@ -0,0 +1,389 @@
+@@ -0,0 +1,390 @@
 +/* SPDX-License-Identifier: GPL-2.0 */
 +/*
 + * HMBIRD scheduler class: Documentation/scheduler/hmbird.rst
@@ -180,6 +180,7 @@ new file mode 100644
 +#ifdef CONFIG_HMBIRD_SCHED
 +extern const struct sched_class hmbird_sched_class;
 +#endif
++#include <linux/time64.h>
 +#include <linux/units.h>
 +
 +extern atomic_t non_hmbird_task;

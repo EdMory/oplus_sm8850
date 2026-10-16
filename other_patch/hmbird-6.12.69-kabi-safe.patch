@@ -1,4 +1,4 @@
-﻿diff --git a/arch/arm64/configs/gki_defconfig b/arch/arm64/configs/gki_defconfig
+diff --git a/arch/arm64/configs/gki_defconfig b/arch/arm64/configs/gki_defconfig
 --- a/arch/arm64/configs/gki_defconfig
 +++ b/arch/arm64/configs/gki_defconfig
 @@ -10,6 +10,7 @@
@@ -23,9 +23,10 @@ diff --git a/include/asm-generic/vmlinux.lds.h b/include/asm-generic/vmlinux.lds
 diff --git a/include/linux/sched.h b/include/linux/sched.h
 --- a/include/linux/sched.h
 +++ b/include/linux/sched.h
-@@ -2388,3 +2388,91 @@
+@@ -2388,3 +2388,90 @@
  #endif
  
+ #endif
 +#ifdef CONFIG_HMBIRD_SCHED
 +#include <linux/sched/hmbird.h>
 +
@@ -112,14 +113,12 @@ diff --git a/include/linux/sched.h b/include/linux/sched.h
 +	else
 +		return 0;
 +}
-+
 +#endif /* CONFIG_HMBIRD_SCHED */
- #endif
 diff --git a/include/linux/sched/hmbird.h b/include/linux/sched/hmbird.h
 new file mode 100644
 --- /dev/null
 +++ b/include/linux/sched/hmbird.h
-@@ -0,0 +1,383 @@
+@@ -0,0 +1,389 @@
 +/* SPDX-License-Identifier: GPL-2.0 */
 +/*
 + * HMBIRD scheduler class: Documentation/scheduler/hmbird.rst
@@ -144,6 +143,9 @@ new file mode 100644
 +
 +#define get_hmbird_ops(rq)	\
 +	((struct hmbird_ops *)(rq->android_oem_data1[HMBIRD_OPS_IDX]))
++
++struct hmbird_rq;
++struct hmbird_ops;
 +
 +#define SCHED_PROP_DEADLINE_MASK (0xFF) /* deadline for ext sched class */
 +/*
@@ -172,9 +174,12 @@ new file mode 100644
 +#define TOP_TASK_BITS_MASK      (0xFF)
 +#define TOP_TASK_BITS           (8)
 +#include <linux/llist.h>
++
++#ifdef CONFIG_HMBIRD_SCHED
++extern const struct sched_class hmbird_sched_class;
++#endif
 +#include <linux/units.h>
 +
-+extern const struct sched_class hmbird_sched_class;
 +extern atomic_t non_hmbird_task;
 +extern atomic_t __hmbird_ops_enabled;
 +#define hmbird_enabled()           atomic_read(&__hmbird_ops_enabled)
@@ -576,15 +581,15 @@ new file mode 100644
 +				hmbird_version_type = HMBIRD_GKI_VERSION;
 +				pr_debug("hmbird version use HMBIRD_GKI_VERSION, set by dtsi");
 +			} else {
-+				hmbird_version_type = HMBIRD_OGKI_VERSION;
-+				pr_debug("hmbird version use default HMBIRD_OGKI_VERSION, set by dtsi");
++				hmbird_version_type = HMBIRD_UNKNOW_VERSION;
++				pr_debug("hmbird version use default HMBIRD_UNKNOW_VERSION, set by dtsi");
 +			}
 +			return hmbird_version_type;
 +		}
 +	}
 +
-+	hmbird_version_type = HMBIRD_OGKI_VERSION;
-+	pr_debug("hmbird version use default HMBIRD_OGKI_VERSION");
++	hmbird_version_type = HMBIRD_UNKNOW_VERSION;
++	pr_debug("hmbird version use default HMBIRD_UNKNOW_VERSION");
 +	return hmbird_version_type;
 +}
 +
@@ -646,11 +651,12 @@ diff --git a/kernel/fork.c b/kernel/fork.c
 diff --git a/kernel/sched/build_policy.c b/kernel/sched/build_policy.c
 --- a/kernel/sched/build_policy.c
 +++ b/kernel/sched/build_policy.c
-@@ -63,4 +63,12 @@
+@@ -63,4 +63,13 @@
  # include "ext.c"
  #endif
  
 +#ifdef CONFIG_HMBIRD_SCHED
++# include "hmbird.h"
 +# include "hmbird/hmbird_util_track.c"
 +# include "hmbird/hmbird_sched_proc.c"
 +# include "hmbird/hmbird_shadow_tick.c"
@@ -1021,7 +1027,7 @@ diff --git a/kernel/sched/hmbird/hmbird.c b/kernel/sched/hmbird/hmbird.c
 new file mode 100644
 --- /dev/null
 +++ b/kernel/sched/hmbird/hmbird.c
-@@ -0,0 +1,4316 @@
+@@ -0,0 +1,4300 @@
 +// SPDX-License-Identifier: GPL-2.0
 +
 +/*
@@ -1061,23 +1067,7 @@ new file mode 100644
 +	HMBIRD_OPS_DISABLED,
 +};
 +
-+static inline struct task_group *css_tg(struct cgroup_subsys_state *css)
-+{
-+	return css ? container_of(css, struct task_group, css) : NULL;
-+}
 +
-+static inline void check_class_changed(struct rq *rq, struct task_struct *p,
-+							const struct sched_class *prev_class,
-+							int oldprio)
-+{
-+	if (prev_class != p->sched_class) {
-+		if (prev_class->switched_from)
-+			prev_class->switched_from(rq, p);
-+
-+		p->sched_class->switched_to(rq, p);
-+	} else if (oldprio != p->prio || dl_task(p))
-+		p->sched_class->prio_changed(rq, p, oldprio);
-+}
 +
 +/*
 + * hmbird_entity->ops_state
@@ -1180,7 +1170,7 @@ new file mode 100644
 +static struct {
 +	cpumask_var_t cpu;
 +	cpumask_var_t smt;
-+} idle_masks CL_ALIGNED_IF_ONSTACK;
++} hmbird_idle_masks CL_ALIGNED_IF_ONSTACK;
 +
 +static bool __cacheline_aligned_in_smp hmbird_has_idle_cpus;
 +#endif	/* CONFIG_SMP */
@@ -1594,10 +1584,10 @@ new file mode 100644
 +		for_each_cpu(cpu, mask) {
 +			rq = cpu_rq(cpu);
 +			if (is_idle_task(rq->curr))
-+				cpumask_set_cpu(cpu, idle_masks.cpu);
++				cpumask_set_cpu(cpu, hmbird_idle_masks.cpu);
 +		}
 +	} else
-+		cpumask_andnot(idle_masks.cpu, idle_masks.cpu, mask);
++		cpumask_andnot(hmbird_idle_masks.cpu, hmbird_idle_masks.cpu, mask);
 +}
 +
 +static void set_partial_status(bool enable, bool little, bool big)
@@ -3717,8 +3707,8 @@ new file mode 100644
 +
 +static bool test_and_clear_cpu_idle(int cpu)
 +{
-+	if (cpumask_test_and_clear_cpu(cpu, idle_masks.cpu)) {
-+		if (cpumask_empty(idle_masks.cpu))
++	if (cpumask_test_and_clear_cpu(cpu, hmbird_idle_masks.cpu)) {
++		if (cpumask_empty(hmbird_idle_masks.cpu))
 +			hmbird_has_idle_cpus = false;
 +		return true;
 +	} else {
@@ -3731,7 +3721,7 @@ new file mode 100644
 +	int cpu;
 +
 +	do {
-+		cpu = cpumask_any_and_distribute(idle_masks.cpu, cpus_allowed);
++		cpu = cpumask_any_and_distribute(hmbird_idle_masks.cpu, cpus_allowed);
 +		if (cpu >= nr_cpu_ids)
 +			return -EBUSY;
 +	} while (!test_and_clear_cpu_idle(cpu));
@@ -3940,10 +3930,10 @@ new file mode 100644
 +
 +static void reset_idle_masks(void)
 +{
-+	cpumask_or(idle_masks.cpu, idle_masks.cpu, iso_masks.little);
-+	cpumask_or(idle_masks.cpu, idle_masks.cpu, iso_masks.big);
++	cpumask_or(hmbird_idle_masks.cpu, hmbird_idle_masks.cpu, iso_masks.little);
++	cpumask_or(hmbird_idle_masks.cpu, hmbird_idle_masks.cpu, iso_masks.big);
 +	if (is_partial_enabled())
-+		cpumask_or(idle_masks.cpu, idle_masks.cpu, iso_masks.partial);
++		cpumask_or(hmbird_idle_masks.cpu, hmbird_idle_masks.cpu, iso_masks.partial);
 +	hmbird_has_idle_cpus = true;
 +}
 +
@@ -3956,25 +3946,25 @@ new file mode 100644
 +		return;
 +
 +	if (idle) {
-+		cpumask_set_cpu(cpu, idle_masks.cpu);
++		cpumask_set_cpu(cpu, hmbird_idle_masks.cpu);
 +		if (!hmbird_has_idle_cpus)
 +			hmbird_has_idle_cpus = true;
 +
 +		/*
-+		 * idle_masks.smt handling is racy but that's fine as it's only
++		 * hmbird_idle_masks.smt handling is racy but that's fine as it's only
 +		 * for optimization and self-correcting.
 +		 */
 +		for_each_cpu(cpu, sib_mask) {
-+			if (!cpumask_test_cpu(cpu, idle_masks.cpu))
++			if (!cpumask_test_cpu(cpu, hmbird_idle_masks.cpu))
 +				return;
 +		}
-+		cpumask_or(idle_masks.smt, idle_masks.smt, sib_mask);
++		cpumask_or(hmbird_idle_masks.smt, hmbird_idle_masks.smt, sib_mask);
 +	} else {
-+		cpumask_clear_cpu(cpu, idle_masks.cpu);
-+		if (hmbird_has_idle_cpus && cpumask_empty(idle_masks.cpu))
++		cpumask_clear_cpu(cpu, hmbird_idle_masks.cpu);
++		if (hmbird_has_idle_cpus && cpumask_empty(hmbird_idle_masks.cpu))
 +			hmbird_has_idle_cpus = false;
 +
-+		cpumask_andnot(idle_masks.smt, idle_masks.smt, sib_mask);
++		cpumask_andnot(hmbird_idle_masks.smt, hmbird_idle_masks.smt, sib_mask);
 +	}
 +}
 +
@@ -5277,8 +5267,8 @@ new file mode 100644
 +	hb_timer_init();
 +	init_sched_prop_to_preempt_prio();
 +#ifdef CONFIG_SMP
-+	WARN_ON(!alloc_cpumask_var(&idle_masks.cpu, GFP_KERNEL));
-+	WARN_ON(!alloc_cpumask_var(&idle_masks.smt, GFP_KERNEL));
++	WARN_ON(!alloc_cpumask_var(&hmbird_idle_masks.cpu, GFP_KERNEL));
++	WARN_ON(!alloc_cpumask_var(&hmbird_idle_masks.smt, GFP_KERNEL));
 +#endif
 +
 +	/*
@@ -5563,7 +5553,7 @@ diff --git a/kernel/sched/hmbird/hmbird_sched_proc.c b/kernel/sched/hmbird/hmbir
 new file mode 100644
 --- /dev/null
 +++ b/kernel/sched/hmbird/hmbird_sched_proc.c
-@@ -0,0 +1,530 @@
+@@ -0,0 +1,543 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * Copyright (C) 2024 Oplus. All rights reserved.
@@ -5574,6 +5564,7 @@ new file mode 100644
 +#include <linux/seq_file.h>
 +#include <linux/uaccess.h>
 +#include <linux/slab.h>
++#include <linux/cpufreq.h>
 +#include "hmbird_sched_proc.h"
 +#include <linux/sched/hmbird_version.h>
 +
@@ -5762,6 +5753,21 @@ new file mode 100644
 +HMBIRD_PROC_OPS(sched_ravg_window_frame_per_sec, hmbird_common_open,
 +			sched_ravg_window_frame_per_sec_proc_write);
 +/* sched_ravg_window_frame_per_sec ops end */
++
++static ssize_t show_scaling_governor(struct kobject *kobj,
++				struct kobj_attribute *attr, char *buf)
++{
++	ssize_t ret = 0;
++	char *governor = NULL;
++	struct cpufreq_policy *policy = cpufreq_cpu_get(0);
++	if (!policy)
++		return ret;
++	governor = cpufreq_cpu_get_governor(policy);
++	if (governor)
++		ret = scnprintf(buf, PAGE_SIZE, "%s\n", governor);
++	cpufreq_cpu_put(policy);
++	return ret;
++}
 +
 +static ssize_t save_gov_str(struct file *file, const char __user *buf,
 +					size_t count, loff_t *ppos)
@@ -6086,9 +6092,6 @@ new file mode 100644
 +					hmbird_dir,
 +					&hmbird_common_proc_ops,
 +					&cluster_separate);
-+
-+	/* enable hmbird scheduler by default after /proc/hmbird_sched is ready */
-+	hmbird_ctrl(true);
 +
 +	return 0;
 +}
@@ -7139,7 +7142,18 @@ new file mode 100644
 diff --git a/kernel/sched/idle.c b/kernel/sched/idle.c
 --- a/kernel/sched/idle.c
 +++ b/kernel/sched/idle.c
-@@ -460,6 +460,9 @@
+@@ -9,6 +9,10 @@
+ 
+ /* Linker adds these: start and end of __cpuidle functions */
+ extern char __cpuidle_text_start[], __cpuidle_text_end[];
++
++#ifdef CONFIG_HMBIRD_SCHED
++#include "hmbird.h"
++#endif
+ 
+ /**
+  * sched_idle_set_state - Record idle state for the current CPU.
+@@ -460,6 +464,9 @@
  {
  	update_idle_core(rq);
  	scx_update_idle(rq, true, true);

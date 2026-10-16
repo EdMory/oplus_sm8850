@@ -574,15 +574,15 @@ new file mode 100644
 +				hmbird_version_type = HMBIRD_GKI_VERSION;
 +				pr_debug("hmbird version use HMBIRD_GKI_VERSION, set by dtsi");
 +			} else {
-+				hmbird_version_type = HMBIRD_UNKNOW_VERSION;
-+				pr_debug("hmbird version use default HMBIRD_UNKNOW_VERSION, set by dtsi");
++				hmbird_version_type = HMBIRD_OGKI_VERSION;
++				pr_debug("hmbird version use default HMBIRD_OGKI_VERSION, set by dtsi");
 +			}
 +			return hmbird_version_type;
 +		}
 +	}
 +
-+	hmbird_version_type = HMBIRD_UNKNOW_VERSION;
-+	pr_debug("hmbird version use default HMBIRD_UNKNOW_VERSION");
++	hmbird_version_type = HMBIRD_OGKI_VERSION;
++	pr_debug("hmbird version use default HMBIRD_OGKI_VERSION");
 +	return hmbird_version_type;
 +}
 +
@@ -5561,7 +5561,7 @@ diff --git a/kernel/sched/hmbird/hmbird_sched_proc.c b/kernel/sched/hmbird/hmbir
 new file mode 100644
 --- /dev/null
 +++ b/kernel/sched/hmbird/hmbird_sched_proc.c
-@@ -0,0 +1,527 @@
+@@ -0,0 +1,530 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * Copyright (C) 2024 Oplus. All rights reserved.
@@ -6084,6 +6084,9 @@ new file mode 100644
 +					hmbird_dir,
 +					&hmbird_common_proc_ops,
 +					&cluster_separate);
++
++	/* enable hmbird scheduler by default after /proc/hmbird_sched is ready */
++	hmbird_ctrl(true);
 +
 +	return 0;
 +}

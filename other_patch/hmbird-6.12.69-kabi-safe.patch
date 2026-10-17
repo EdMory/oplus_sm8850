@@ -5,7 +5,7 @@ diff --git a/arch/arm64/configs/gki_defconfig b/arch/arm64/configs/gki_defconfig
  CONFIG_BPF_LSM=y
  CONFIG_PREEMPT=y
  CONFIG_SCHED_CLASS_EXT=y
-+CONFIG_HMBIRD_SCHED=n
++CONFIG_HMBIRD_SCHED=y
  CONFIG_IRQ_TIME_ACCOUNTING=y
  CONFIG_TASKSTATS=y
  CONFIG_TASK_DELAY_ACCT=y
@@ -1264,7 +1264,7 @@ diff --git a/kernel/sched/hmbird/hmbird.c b/kernel/sched/hmbird/hmbird.c
 new file mode 100644
 --- /dev/null
 +++ b/kernel/sched/hmbird/hmbird.c
-@@ -0,0 +1,4343 @@
+@@ -0,0 +1,4345 @@
 +// SPDX-License-Identifier: GPL-2.0
 +
 +/*
@@ -5532,6 +5532,8 @@ new file mode 100644
 +	int cpu;
 +	u32 v;
 +	struct hmbird_entity *init_hmbird;
++
++	printk(KERN_INFO "hmbird: patch v25 compiled in (enabled=%d)\n", hmbird_enabled());
 +
 +	/*
 +	 * The following is to prevent the compiler from optimizing out the enum

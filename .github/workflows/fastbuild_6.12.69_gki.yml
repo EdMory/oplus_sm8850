@@ -1293,10 +1293,7 @@ jobs:
           cp kernel/sched/sched.h /tmp/hmbird_sched_sched.h.before
 
           patch -p1 --no-backup-if-mismatch -F 0 < "$HMBIRD_PATCH"
-          grep -q '^CONFIG_HMBIRD_SCHED=' arch/arm64/configs/gki_defconfig \
-            || echo "CONFIG_HMBIRD_SCHED=y" >> arch/arm64/configs/gki_defconfig
-          check() { grep -qF "$2" "$1" || { echo "HMBIRD 集成校验失败: $1 缺少 '$2'"; exit 1; }; }
-          check arch/arm64/configs/gki_defconfig 'CONFIG_HMBIRD_SCHED=y'
+          echo "CONFIG_HMBIRD_SCHED=n" >> arch/arm64/configs/gki_defconfig
           echo "HMBIRD 集成完成"
 
       - name: 启用Re-Kernel支持

@@ -671,12 +671,20 @@ diff --git a/kernel/sched/build_policy.c b/kernel/sched/build_policy.c
 diff --git a/kernel/sched/core.c b/kernel/sched/core.c
 --- a/kernel/sched/core.c
 +++ b/kernel/sched/core.c
-@@ -2274,6 +2274,42 @@
+@@ -2274,6 +2274,50 @@
  	dequeue_task(rq, p, flags);
  }
  EXPORT_SYMBOL_GPL(deactivate_task);
 +
 +#ifdef CONFIG_HMBIRD_SCHED
++struct hmbird_sched_change_guard {
++	struct task_struct		*p;
++	struct rq			*rq;
++	bool				queued;
++	bool				running;
++	bool				done;
++};
++
 +struct hmbird_sched_change_guard
 +hmbird_sched_change_guard_init(struct rq *rq, struct task_struct *p, int flags)
 +{
@@ -714,7 +722,7 @@ diff --git a/kernel/sched/core.c b/kernel/sched/core.c
  
  static void block_task(struct rq *rq, struct task_struct *p, int flags)
  {
-@@ -6637,6 +6673,16 @@
+@@ -6637,6 +6681,16 @@
  			start_class = &ext_sched_class;
  	}
  #endif

@@ -584,15 +584,15 @@ new file mode 100644
 +				hmbird_version_type = HMBIRD_GKI_VERSION;
 +				pr_debug("hmbird version use HMBIRD_GKI_VERSION, set by dtsi");
 +			} else {
-+				hmbird_version_type = HMBIRD_UNKNOW_VERSION;
-+				pr_debug("hmbird version use default HMBIRD_UNKNOW_VERSION, set by dtsi");
++				hmbird_version_type = HMBIRD_OGKI_VERSION;
++				pr_debug("hmbird version use default HMBIRD_OGKI_VERSION, set by dtsi");
 +			}
 +			return hmbird_version_type;
 +		}
 +	}
 +
-+	hmbird_version_type = HMBIRD_UNKNOW_VERSION;
-+	pr_debug("hmbird version use default HMBIRD_UNKNOW_VERSION");
++	hmbird_version_type = HMBIRD_OGKI_VERSION;
++	pr_debug("hmbird version use default HMBIRD_OGKI_VERSION");
 +	return hmbird_version_type;
 +}
 +
@@ -5539,7 +5539,7 @@ new file mode 100644
 +	u32 v;
 +	struct hmbird_entity *init_hmbird;
 +
-+	printk(KERN_INFO "hmbird: patch v35 compiled in (ctrl unlocked, handlers gated)\n");
++	printk(KERN_INFO "hmbird: patch v36 compiled in (dt gate default OGKI)\n");
 +
 +	/*
 +	 * The following is to prevent the compiler from optimizing out the enum

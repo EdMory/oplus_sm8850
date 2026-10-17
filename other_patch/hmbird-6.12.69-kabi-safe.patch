@@ -891,6 +891,16 @@ diff --git a/kernel/sched/core.c b/kernel/sched/core.c
  #endif
  
  	return &fair_sched_class;
+@@ -9780,6 +9888,9 @@
+ #endif
+ 	init_sched_fair_class();
+ 	init_sched_ext_class();
++#ifdef CONFIG_HMBIRD_SCHED
++	init_sched_hmbird_class();
++#endif
+ 
+ 	psi_init();
+ 
 diff --git a/kernel/sched/debug.c b/kernel/sched/debug.c
 --- a/kernel/sched/debug.c
 +++ b/kernel/sched/debug.c
@@ -4459,11 +4469,11 @@ new file mode 100644
 +		hmbird_ops_enable_task(p);
 +		refresh_hmbird_weight(p);
 +		task_rq_unlock(rq, p, &rf);
-+	}
 +
-+	spin_lock_irq(&hmbird_tasks_lock);
-+	list_add_tail(&get_hmbird_ts(p)->tasks_node, &hmbird_tasks);
-+	spin_unlock_irq(&hmbird_tasks_lock);
++		spin_lock_irq(&hmbird_tasks_lock);
++		list_add_tail(&get_hmbird_ts(p)->tasks_node, &hmbird_tasks);
++		spin_unlock_irq(&hmbird_tasks_lock);
++	}
 +
 +	percpu_up_read(&hmbird_fork_rwsem);
 +}

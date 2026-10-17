@@ -7441,17 +7441,18 @@ diff --git a/kernel/sched/idle.c b/kernel/sched/idle.c
 diff --git a/kernel/sched/sched.h b/kernel/sched/sched.h
 --- a/kernel/sched/sched.h
 +++ b/kernel/sched/sched.h
-@@ -2644,6 +2644,9 @@
+@@ -2644,6 +2644,10 @@
  extern const struct sched_class rt_sched_class;
  extern const struct sched_class fair_sched_class;
  extern const struct sched_class idle_sched_class;
 +#ifdef CONFIG_HMBIRD_SCHED
 +extern const struct sched_class hmbird_sched_class;
++extern const struct file_operations sched_hmbird_fops;
 +#endif
  
  #ifdef CONFIG_SCHED_CLASS_EXT
  extern const struct sched_class ext_sched_class;
-@@ -2669,6 +2672,12 @@
+@@ -2669,6 +2673,12 @@
  	if (scx_switched_all() && class == &fair_sched_class)
  		class++;
  	if (!scx_enabled() && class == &ext_sched_class)

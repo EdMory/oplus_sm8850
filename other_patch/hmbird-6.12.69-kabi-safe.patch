@@ -902,6 +902,16 @@ diff --git a/kernel/sched/core.c b/kernel/sched/core.c
  #endif
  
  	return &fair_sched_class;
+@@ -9780,6 +9888,9 @@
+ #endif
+ 	init_sched_fair_class();
+ 	init_sched_ext_class();
++#ifdef CONFIG_HMBIRD_SCHED
++	init_sched_hmbird_class();
++#endif
+ 
+ 	psi_init();
+ 
 diff --git a/kernel/sched/debug.c b/kernel/sched/debug.c
 --- a/kernel/sched/debug.c
 +++ b/kernel/sched/debug.c
@@ -6180,7 +6190,7 @@ new file mode 100644
 +
 +	/* v28 bootloop control: never create /proc/hmbird_sched.
 +	 * Boot marker doubles as flash-version identification. */
-+	printk(KERN_INFO "hmbird: patch v32 compiled in (chain + nac fix + pick_task)\n");
++	printk(KERN_INFO "hmbird: patch v33 compiled in (init call restored)\n");
 +	return 0;
 +
 +	if (get_hmbird_version_type() != HMBIRD_OGKI_VERSION)

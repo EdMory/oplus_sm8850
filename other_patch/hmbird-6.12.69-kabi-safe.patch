@@ -891,16 +891,6 @@ diff --git a/kernel/sched/core.c b/kernel/sched/core.c
  #endif
  
  	return &fair_sched_class;
-@@ -9780,6 +9888,9 @@
- #endif
- 	init_sched_fair_class();
- 	init_sched_ext_class();
-+#ifdef CONFIG_HMBIRD_SCHED
-+	init_sched_hmbird_class();
-+#endif
- 
- 	psi_init();
- 
 diff --git a/kernel/sched/debug.c b/kernel/sched/debug.c
 --- a/kernel/sched/debug.c
 +++ b/kernel/sched/debug.c

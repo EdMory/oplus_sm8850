@@ -5832,7 +5832,7 @@ diff --git a/kernel/sched/hmbird/hmbird_sched_proc.c b/kernel/sched/hmbird/hmbir
 new file mode 100644
 --- /dev/null
 +++ b/kernel/sched/hmbird/hmbird_sched_proc.c
-@@ -0,0 +1,541 @@
+@@ -0,0 +1,546 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * Copyright (C) 2024 Oplus. All rights reserved.
@@ -6171,6 +6171,11 @@ new file mode 100644
 +	struct proc_dir_entry *hmbird_dir;
 +	struct proc_dir_entry *load_track_dir;
 +	struct proc_dir_entry *freq_gov_dir;
++
++	/* v28 bootloop control: never create /proc/hmbird_sched.
++	 * Boot marker doubles as flash-version identification. */
++	printk(KERN_INFO "hmbird: patch v28 compiled in (proc disabled)\n");
++	return 0;
 +
 +	if (get_hmbird_version_type() != HMBIRD_OGKI_VERSION)
 +		return 0;

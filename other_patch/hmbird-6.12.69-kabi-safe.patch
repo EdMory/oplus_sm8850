@@ -886,7 +886,7 @@ diff --git a/kernel/sched/core.c b/kernel/sched/core.c
  		return &ext_sched_class;
 +#endif
 +#ifdef CONFIG_HMBIRD_SCHED
-+	if (policy == SCHED_HMBIRD)
++	if (policy == SCHED_HMBIRD && hmbird_enabled())
 +		return &hmbird_sched_class;
  #endif
  

@@ -1,3 +1,14 @@
+diff --git a/include/asm-generic/vmlinux.lds.h b/include/asm-generic/vmlinux.lds.h
+--- a/include/asm-generic/vmlinux.lds.h
++++ b/include/asm-generic/vmlinux.lds.h
+@@ -125,6 +125,7 @@
+ 	*(__dl_sched_class)			\
+ 	*(__rt_sched_class)			\
+ 	*(__fair_sched_class)			\
++	*(__hmbird_sched_class)			\
+ 	*(__ext_sched_class)			\
+ 	*(__idle_sched_class)			\
+ 	__sched_class_lowest = .;
 diff --git a/include/linux/sched.h b/include/linux/sched.h
 --- a/include/linux/sched.h
 +++ b/include/linux/sched.h
@@ -7249,17 +7260,3 @@ diff --git a/kernel/sched/sched.h b/kernel/sched/sched.h
  	return class;
  }
  
-diff --git a/kernel/time/tick-sched.c b/kernel/time/tick-sched.c
---- a/kernel/time/tick-sched.c
-+++ b/kernel/time/tick-sched.c
-@@ -1217,6 +1217,10 @@
- 	ktime_t expires;
- 
- 	trace_android_vh_tick_nohz_idle_stop_tick(NULL);
-+#ifdef CONFIG_HMBIRD_SCHED
-+	extern void android_vh_tick_nohz_idle_stop_tick_handler(void *unused, void *data);
-+	android_vh_tick_nohz_idle_stop_tick_handler(NULL, NULL);
-+#endif
- 
- 	/*
- 	 * If tick_nohz_get_sleep_length() ran tick_nohz_next_event(), the

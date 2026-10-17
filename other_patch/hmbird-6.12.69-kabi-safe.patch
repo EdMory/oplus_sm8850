@@ -1254,7 +1254,7 @@ diff --git a/kernel/sched/hmbird/hmbird.c b/kernel/sched/hmbird/hmbird.c
 new file mode 100644
 --- /dev/null
 +++ b/kernel/sched/hmbird/hmbird.c
-@@ -0,0 +1,4353 @@
+@@ -0,0 +1,4352 @@
 +// SPDX-License-Identifier: GPL-2.0
 +
 +/*
@@ -4648,8 +4648,7 @@ new file mode 100644
 + *
 + * - task_woken, switched_from: Unnecessary.
 + */
-+/* v29b: direct struct def, no __hmbird_sched_class section (class-chain excluded) */
-+const struct sched_class hmbird_sched_class = {
++DEFINE_SCHED_CLASS(hmbird) = {
 +	.enqueue_task		= enqueue_task_hmbird,
 +	.dequeue_task		= dequeue_task_hmbird,
 +	.yield_task		= yield_task_hmbird,
@@ -6175,7 +6174,7 @@ new file mode 100644
 +
 +	/* v28 bootloop control: never create /proc/hmbird_sched.
 +	 * Boot marker doubles as flash-version identification. */
-+	printk(KERN_INFO "hmbird: patch v29b compiled in (class chain excluded)\n");
++	printk(KERN_INFO "hmbird: patch v30 compiled in (class chain fixed)\n");
 +	return 0;
 +
 +	if (get_hmbird_version_type() != HMBIRD_OGKI_VERSION)
@@ -7471,16 +7470,27 @@ diff --git a/kernel/sched/sched.h b/kernel/sched/sched.h
  
  #ifdef CONFIG_SCHED_CLASS_EXT
  extern const struct sched_class ext_sched_class;
-@@ -2669,6 +2673,12 @@
- 	if (scx_switched_all() && class == &fair_sched_class)
+@@ -2670,6 +2674,23 @@
  		class++;
  	if (!scx_enabled() && class == &ext_sched_class)
-+		class++;
+ 		class++;
 +#endif
 +#ifdef CONFIG_HMBIRD_SCHED
 +	if (hmbird_enabled() && class == &fair_sched_class)
 +		class++;
 +	if (!hmbird_enabled() && class == &hmbird_sched_class)
- 		class++;
++		class++;
++#ifdef CONFIG_SCHED_CLASS_EXT
++	/*
++	 * v30 fix: the !hmbird_enabled() skip above may have
++	 * advanced @class to ext; re-check the SCX-disabled
++	 * skip so balance_scx()/pick_task_scx() are never
++	 * reached before scx_ops_init() (global_dsqs == NULL
++	 * until ext.c scx_ops_init allocates it).
++	 */
++	if (!scx_enabled() && class == &ext_sched_class)
++		class++;
++#endif
  #endif
  	return class;
+ }

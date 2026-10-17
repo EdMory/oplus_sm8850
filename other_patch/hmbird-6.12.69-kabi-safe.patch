@@ -1264,7 +1264,7 @@ diff --git a/kernel/sched/hmbird/hmbird.c b/kernel/sched/hmbird/hmbird.c
 new file mode 100644
 --- /dev/null
 +++ b/kernel/sched/hmbird/hmbird.c
-@@ -0,0 +1,4345 @@
+@@ -0,0 +1,4352 @@
 +// SPDX-License-Identifier: GPL-2.0
 +
 +/*
@@ -5283,6 +5283,13 @@ new file mode 100644
 + */
 +int hmbird_ctrl(bool enable)
 +{
++	/* v26 bootloop control: compiled in but NEVER enable-able.
++	 * If v26 boots, the v25 bootloop is caused by hmbird being
++	 * actually enabled at early boot, not by any static
++	 * compiled-in path. Remove this block for bring-up. */
++	if (enable)
++		return -EINVAL;
++
 +	if (!atomic_read(&hmbird_module_loaded)) {
 +		hmbird_switch_log(hmbird_enabled() ? HMBIRD_ENABLED : HMBIRD_DISABLED,
 +					0, enable, "ext module unloaded\n");
@@ -5533,7 +5540,7 @@ new file mode 100644
 +	u32 v;
 +	struct hmbird_entity *init_hmbird;
 +
-+	printk(KERN_INFO "hmbird: patch v25 compiled in (enabled=%d)\n", hmbird_enabled());
++	printk(KERN_INFO "hmbird: patch v26 compiled in (enabled=%d)\n", hmbird_enabled());
 +
 +	/*
 +	 * The following is to prevent the compiler from optimizing out the enum

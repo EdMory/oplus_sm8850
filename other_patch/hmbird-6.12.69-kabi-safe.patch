@@ -1254,7 +1254,7 @@ diff --git a/kernel/sched/hmbird/hmbird.c b/kernel/sched/hmbird/hmbird.c
 new file mode 100644
 --- /dev/null
 +++ b/kernel/sched/hmbird/hmbird.c
-@@ -0,0 +1,4353 @@
+@@ -0,0 +1,4358 @@
 +// SPDX-License-Identifier: GPL-2.0
 +
 +/*
@@ -3894,6 +3894,11 @@ new file mode 100644
 +	return NULL;
 +}
 +
++static struct task_struct *pick_task_hmbird(struct rq *rq)
++{
++	return hmbird_first_local_task(rq);
++}
++
 +static struct task_struct *pick_next_task_hmbird(struct rq *rq,
 +					      struct task_struct *prev __maybe_unused)
 +{
@@ -4648,8 +4653,8 @@ new file mode 100644
 + *
 + * - task_woken, switched_from: Unnecessary.
 + */
-+/* v31: direct struct def, no __hmbird_sched_class section (class-chain excluded, NAC fix kept) */
-+const struct sched_class hmbird_sched_class = {
++DEFINE_SCHED_CLASS(hmbird) = {
++	.pick_task		= pick_task_hmbird,
 +	.enqueue_task		= enqueue_task_hmbird,
 +	.dequeue_task		= dequeue_task_hmbird,
 +	.yield_task		= yield_task_hmbird,
@@ -6175,7 +6180,7 @@ new file mode 100644
 +
 +	/* v28 bootloop control: never create /proc/hmbird_sched.
 +	 * Boot marker doubles as flash-version identification. */
-+	printk(KERN_INFO "hmbird: patch v31 compiled in (chain excl + nac fix)\n");
++	printk(KERN_INFO "hmbird: patch v32 compiled in (chain + nac fix + pick_task)\n");
 +	return 0;
 +
 +	if (get_hmbird_version_type() != HMBIRD_OGKI_VERSION)

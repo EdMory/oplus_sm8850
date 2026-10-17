@@ -1253,7 +1253,7 @@ diff --git a/kernel/sched/hmbird/hmbird.c b/kernel/sched/hmbird/hmbird.c
 new file mode 100644
 --- /dev/null
 +++ b/kernel/sched/hmbird/hmbird.c
-@@ -0,0 +1,4340 @@
+@@ -0,0 +1,4343 @@
 +// SPDX-License-Identifier: GPL-2.0
 +
 +/*
@@ -4495,6 +4495,9 @@ new file mode 100644
 +{
 +	unsigned long flags;
 +	struct hmbird_entity *see = get_hmbird_ts(p);
++
++	if (!hmbird_enabled())
++		return;
 +
 +	spin_lock_irqsave(&hmbird_tasks_lock, flags);
 +	list_del_init(&get_hmbird_ts(p)->tasks_node);

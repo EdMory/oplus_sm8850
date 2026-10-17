@@ -666,9 +666,9 @@ diff --git a/kernel/sched/core.c b/kernel/sched/core.c
  #include "sched.h"
 +
 +#ifdef CONFIG_HMBIRD_SCHED
++#include "hmbird.h"
 +#include "hmbird/slim.h"
 +#include "hmbird/hmbird_shadow_tick.h"
-+#include "hmbird.h"
 +#endif
  #include "stats.h"
  
@@ -684,20 +684,12 @@ diff --git a/kernel/sched/core.c b/kernel/sched/core.c
  
  	if (rq->cfs.h_nr_queued > 1)
  		return false;
-@@ -2274,6 +2284,50 @@
+@@ -2274,6 +2284,42 @@
  	dequeue_task(rq, p, flags);
  }
  EXPORT_SYMBOL_GPL(deactivate_task);
 +
 +#ifdef CONFIG_HMBIRD_SCHED
-+struct hmbird_sched_change_guard {
-+	struct task_struct		*p;
-+	struct rq			*rq;
-+	bool				queued;
-+	bool				running;
-+	bool				done;
-+};
-+
 +struct hmbird_sched_change_guard
 +hmbird_sched_change_guard_init(struct rq *rq, struct task_struct *p, int flags)
 +{
@@ -735,7 +727,7 @@ diff --git a/kernel/sched/core.c b/kernel/sched/core.c
  
  static void block_task(struct rq *rq, struct task_struct *p, int flags)
  {
-@@ -5306,6 +5360,9 @@
+@@ -5306,6 +5352,9 @@
  int sched_fork(unsigned long clone_flags, struct task_struct *p)
  {
  	int should_scx = 0;
@@ -745,7 +737,7 @@ diff --git a/kernel/sched/core.c b/kernel/sched/core.c
  
  	trace_android_rvh_sched_fork(p);
  
-@@ -5353,6 +5410,11 @@
+@@ -5353,6 +5402,11 @@
  		return -EAGAIN;
  
  	scx_pre_fork(p);
@@ -757,7 +749,7 @@ diff --git a/kernel/sched/core.c b/kernel/sched/core.c
  
  	trace_android_vh_setscheduler_class(NULL, &should_scx, p, p->policy, p->prio);
  	trace_android_vh_task_should_scx(&should_scx, p->policy, p->prio);
-@@ -5361,6 +5423,10 @@
+@@ -5361,6 +5415,10 @@
  #ifdef CONFIG_SCHED_CLASS_EXT
  	} else if (task_should_scx(p->policy) || should_scx) {
  		p->sched_class = &ext_sched_class;
@@ -768,7 +760,7 @@ diff --git a/kernel/sched/core.c b/kernel/sched/core.c
  #endif
  	} else {
  		p->sched_class = &fair_sched_class;
-@@ -5412,6 +5478,9 @@
+@@ -5412,6 +5470,9 @@
  	if (p->sched_class->task_fork)
  		p->sched_class->task_fork(p);
  	raw_spin_unlock_irqrestore(&p->pi_lock, flags);
@@ -778,7 +770,7 @@ diff --git a/kernel/sched/core.c b/kernel/sched/core.c
  
  	return scx_fork(p);
  }
-@@ -5419,12 +5488,18 @@
+@@ -5419,12 +5480,18 @@
  void sched_cancel_fork(struct task_struct *p)
  {
  	scx_cancel_fork(p);
@@ -797,7 +789,7 @@ diff --git a/kernel/sched/core.c b/kernel/sched/core.c
  }
  
  unsigned long to_ratio(u64 period, u64 runtime)
-@@ -6313,19 +6388,30 @@
+@@ -6313,19 +6380,30 @@
  	if (sched_feat(LATENCY_WARN) && resched_latency)
  		resched_latency_warn(cpu, resched_latency);
  
@@ -828,7 +820,7 @@ diff --git a/kernel/sched/core.c b/kernel/sched/core.c
  }
  
  #ifdef CONFIG_NO_HZ_FULL
-@@ -6637,6 +6723,16 @@
+@@ -6637,6 +6715,16 @@
  			start_class = &ext_sched_class;
  	}
  #endif
@@ -845,7 +837,7 @@ diff --git a/kernel/sched/core.c b/kernel/sched/core.c
  
  	/*
  	 * We must do the balancing pass before put_prev_task(), such
-@@ -6665,6 +6761,10 @@
+@@ -6665,6 +6753,10 @@
  
  	if (scx_enabled())
  		goto restart;
@@ -856,7 +848,7 @@ diff --git a/kernel/sched/core.c b/kernel/sched/core.c
  
  	/*
  	 * Optimization: we know that if all tasks are in the fair class we can
-@@ -6694,11 +6794,20 @@
+@@ -6694,11 +6786,20 @@
  	for_each_active_class(class) {
  		if (class->pick_next_task) {
  			p = class->pick_next_task(rq, prev);
@@ -878,7 +870,7 @@ diff --git a/kernel/sched/core.c b/kernel/sched/core.c
  				put_prev_set_next_task(rq, prev, p);
  				return p;
  			}
-@@ -7870,6 +7979,9 @@
+@@ -7870,6 +7971,9 @@
  					     prev->se.sched_delayed);
  
  		trace_sched_switch(preempt, prev, next, prev_state);
@@ -888,7 +880,7 @@ diff --git a/kernel/sched/core.c b/kernel/sched/core.c
  
  		if (block && (prev_state & TASK_UNINTERRUPTIBLE)
  			&& trace_sched_blocked_reason_enabled()) {
-@@ -8246,6 +8358,10 @@
+@@ -8246,6 +8350,10 @@
  #ifdef CONFIG_SCHED_CLASS_EXT
  	if (task_should_scx(policy))
  		return &ext_sched_class;
@@ -899,7 +891,7 @@ diff --git a/kernel/sched/core.c b/kernel/sched/core.c
  #endif
  
  	return &fair_sched_class;
-@@ -9780,6 +9896,9 @@
+@@ -9780,6 +9888,9 @@
  #endif
  	init_sched_fair_class();
  	init_sched_ext_class();

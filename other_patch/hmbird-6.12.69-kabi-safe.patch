@@ -899,7 +899,7 @@ new file mode 100644
 +extern unsigned long hmbird_watchdog_timeout;
 +extern unsigned long hmbird_watchdog_timestamp;
 +
-+enum scx_rq_flags {
++enum hmbird_rq_flags {
 +	HMBIRD_RQ_CAN_STOP_TICK	= 1 << 0,
 +};
 +
@@ -1083,7 +1083,7 @@ new file mode 100644
 + *   |              v                 v
 + *   \-------------------------------/
 + *
-+ * QUEUEING and DISPATCHING states can be waited upon. See wait_ops_state() call
++ * QUEUEING and DISPATCHING states can be waited upon. See hmbird_wait_ops_state() call
 + * sites for explanations on the conditions being waited upon and why they are
 + * safe. Transitions out of them into NONE or QUEUED must store_release and the
 + * waiters should load_acquire.
@@ -1799,7 +1799,7 @@ new file mode 100644
 +}
 +
 +
-+bool consume_dispatch_q(struct rq *rq, struct rq_flags *rf,
++bool hmbird_consume_dispatch_q(struct rq *rq, struct rq_flags *rf,
 +						struct hmbird_dispatch_q *dsq);
 +
 +static void set_partial_rescue(bool p_state, bool l_over, bool b_over)
@@ -1940,7 +1940,7 @@ new file mode 100644
 +	if (idx < 0 || idx >= MAX_GLOBAL_DSQS)
 +		return 0;
 +
-+	if (consume_dispatch_q(rq, rf, &gdsqs[idx])) {
++	if (hmbird_consume_dispatch_q(rq, rf, &gdsqs[idx])) {
 +		slim_stats_record(GDSQ_CNT, 1, idx, 0);
 +		return 1;
 +	}
@@ -1952,7 +1952,7 @@ new file mode 100644
 +	int i;
 +
 +	for (i = 0; i < UX_COMPATIBLE_IDX; i++) {
-+		if (consume_dispatch_q(rq, rf, &gdsqs[i])) {
++		if (hmbird_consume_dispatch_q(rq, rf, &gdsqs[i])) {
 +			slim_stats_record(GDSQ_CNT, 1, i, 0);
 +			return 1;
 +		}
@@ -1962,7 +1962,7 @@ new file mode 100644
 +
 +static int consume_ux_dsq(struct rq *rq, struct rq_flags *rf)
 +{
-+	if (consume_dispatch_q(rq, rf, &gdsqs[UX_COMPATIBLE_IDX])) {
++	if (hmbird_consume_dispatch_q(rq, rf, &gdsqs[UX_COMPATIBLE_IDX])) {
 +		slim_stats_record(GDSQ_CNT, 1, UX_COMPATIBLE_IDX, 0);
 +		return 1;
 +	}
@@ -2019,12 +2019,12 @@ new file mode 100644
 +	/*
 +	 * dsq->is_timeout may change here, let it be.
 +	 * it won't cause serious problems.
-+	 * the same for consume_dispatch_q later.
++	 * the same for hmbird_consume_dispatch_q later.
 +	 */
 +	if (!is_timeout && !any)
 +		return 0;
 +
-+	if (consume_dispatch_q(rq, rf, dsq)) {
++	if (hmbird_consume_dispatch_q(rq, rf, dsq)) {
 +		if (is_timeout) {
 +			hmbird_info_trace("dsq[%d] consume a pcp timeout task\n",
 +						dsq_id_to_internal(dsq));
@@ -2063,7 +2063,7 @@ new file mode 100644
 +{
 +	unsigned long flags;
 +
-+	if (consume_dispatch_q(rq, rf, &gdsqs[tmp])) {
++	if (hmbird_consume_dispatch_q(rq, rf, &gdsqs[tmp])) {
 +		if (tmp != cidx) {
 +			spin_lock(&sinfo.lock);
 +			sinfo.curr_idx[tidx] = tmp;
@@ -2183,11 +2183,11 @@ new file mode 100644
 +		/* gdsqs[i].is_timeout may change here, let it be... */
 +		if (is_timeout) {
 +			/*
-+			 * consume_dispatch_q will acquire dsq-lock,
++			 * hmbird_consume_dispatch_q will acquire dsq-lock,
 +			 * So cannot keep lock here, annoy enough.
 +			 * may rewrite a consume_dispatch_q_locked, TODO.
 +			 */
-+			if (consume_dispatch_q(rq, rf, &gdsqs[i])) {
++			if (hmbird_consume_dispatch_q(rq, rf, &gdsqs[i])) {
 +				hmbird_info_trace("dsq[%d] consume a timeout task\n", i);
 +				slim_stats_record(TIMEOUT_CNT, ctx.tidx, 0, 0);
 +				update_timeout_stats(rq, &gdsqs[i], HMBIRD_BPF_DSQS_DEADLINE[i]);
@@ -2543,17 +2543,17 @@ new file mode 100644
 +
 +/*******************************Initialize***********************************/
 +
-+void init_dsq(struct hmbird_dispatch_q *dsq, u64 dsq_id);
++void hmbird_init_dsq(struct hmbird_dispatch_q *dsq, u64 dsq_id);
 +static void init_dsq_at_boot(void)
 +{
 +	int i, cpu;
 +
 +	for (i = 0; i < MAX_GLOBAL_DSQS; i++) {
-+		init_dsq(&gdsqs[i], (u64)HMBIRD_DSQ_FLAG_BUILTIN |
++		hmbird_init_dsq(&gdsqs[i], (u64)HMBIRD_DSQ_FLAG_BUILTIN |
 +				(GDSQS_ID_BASE + i));
 +	}
 +	for_each_possible_cpu(cpu)
-+		init_dsq(&per_cpu(pcp_ldsq, cpu), (u64)HMBIRD_DSQ_FLAG_BUILTIN |
++		hmbird_init_dsq(&per_cpu(pcp_ldsq, cpu), (u64)HMBIRD_DSQ_FLAG_BUILTIN |
 +				(GDSQS_ID_BASE + i + cpu));
 +
 +	max_hmbird_dsq_internal_id = GDSQS_ID_BASE + i + cpu;
@@ -2800,7 +2800,7 @@ new file mode 100644
 +}
 +
 +/**
-+ * wait_ops_state - Busy-wait the specified ops state to end
++ * hmbird_wait_ops_state - Busy-wait the specified ops state to end
 + * @p: target task
 + * @opss: state to wait the end of
 + *
@@ -2809,7 +2809,7 @@ new file mode 100644
 + * has load_acquire semantics to ensure that the caller can see the updates made
 + * in the enqueueing and dispatching paths.
 + */
-+static void wait_ops_state(struct task_struct *p, u64 opss)
++static void hmbird_wait_ops_state(struct task_struct *p, u64 opss)
 +{
 +	do {
 +		cpu_relax();
@@ -2836,7 +2836,7 @@ new file mode 100644
 +	if (get_hmbird_ts(curr)->slice != HMBIRD_SLICE_INF)
 +		get_hmbird_ts(curr)->slice -= min(get_hmbird_ts(curr)->slice, delta_exec);
 +
-+	trace_sched_stat_runtime(curr, delta_exec, 0);
++	trace_sched_stat_runtime(curr, delta_exec);
 +}
 +
 +static bool hmbird_dsq_priq_less(struct rb_node *node_a,
@@ -2850,7 +2850,7 @@ new file mode 100644
 +	return time_before64(a->dsq_vtime, b->dsq_vtime);
 +}
 +
-+static void dispatch_enqueue(struct hmbird_dispatch_q *dsq, struct task_struct *p,
++static void hmbird_dispatch_enqueue(struct hmbird_dispatch_q *dsq, struct task_struct *p,
 +							u64 enq_flags)
 +{
 +	bool is_local = dsq->id == HMBIRD_DSQ_LOCAL;
@@ -2916,7 +2916,7 @@ new file mode 100644
 +	}
 +}
 +
-+static void task_unlink_from_dsq(struct task_struct *p,
++static void hmbird_task_unlink_from_dsq(struct task_struct *p,
 +				struct hmbird_dispatch_q *dsq)
 +{
 +	if (get_hmbird_ts(p)->dsq_flags & HMBIRD_TASK_DSQ_ON_PRIQ) {
@@ -2934,7 +2934,7 @@ new file mode 100644
 +		!RB_EMPTY_NODE(&get_hmbird_ts(p)->dsq_node.priq);
 +}
 +
-+static void dispatch_dequeue(struct hmbird_rq *hmbird_rq, struct task_struct *p)
++static void hmbird_dispatch_dequeue(struct hmbird_rq *hmbird_rq, struct task_struct *p)
 +{
 +	unsigned long flags;
 +	struct hmbird_dispatch_q *dsq = get_hmbird_ts(p)->dsq;
@@ -2965,7 +2965,7 @@ new file mode 100644
 +		/* @p must still be on @dsq, dequeue */
 +		hmbird_cond_deferred_err(TASK_UNLINKED,
 +						!task_linked_on_dsq(p), "task = %s\n", p->comm);
-+		task_unlink_from_dsq(p, dsq);
++		hmbird_task_unlink_from_dsq(p, dsq);
 +		dsq->nr--;
 +	} else {
 +		/*
@@ -3004,7 +3004,7 @@ new file mode 100644
 +		get_hmbird_ts(p)->slice = HMBIRD_SLICE_DFL;
 +}
 +
-+static void do_enqueue_task(struct rq *rq, struct task_struct *p, u64 enq_flags,
++static void hmbird_do_enqueue_task(struct rq *rq, struct task_struct *p, u64 enq_flags,
 +				int sticky_cpu)
 +{
 +	struct hmbird_dispatch_q *d;
@@ -3057,7 +3057,7 @@ new file mode 100644
 +	 */
 +	refill_task_slice(p);
 +local_norefill:
-+	dispatch_enqueue(&get_hmbird_rq(rq)->local_dsq, p, enq_flags);
++	hmbird_dispatch_enqueue(&get_hmbird_rq(rq)->local_dsq, p, enq_flags);
 +	slim_stats_record(PCP_ENQL_CNT, 0, 0, cpu_of(rq));
 +	return;
 +
@@ -3065,12 +3065,12 @@ new file mode 100644
 +	d = find_dsq_from_task(p);
 +	if (d) {
 +		refill_task_slice(p);
-+		dispatch_enqueue(d, p, enq_flags);
++		hmbird_dispatch_enqueue(d, p, enq_flags);
 +		return;
 +	}
 +	slim_stats_record(GLOBAL_STAT, 0, 0, 0);
 +	refill_task_slice(p);
-+	dispatch_enqueue(&hmbird_dsq_global, p, enq_flags);
++	hmbird_dispatch_enqueue(&hmbird_dsq_global, p, enq_flags);
 +}
 +
 +static bool watchdog_task_watched(const struct task_struct *p)
@@ -3123,10 +3123,10 @@ new file mode 100644
 +	get_hmbird_rq(rq)->nr_running++;
 +	add_nr_running(rq, 1);
 +
-+	do_enqueue_task(rq, p, enq_flags, sticky_cpu);
++	hmbird_do_enqueue_task(rq, p, enq_flags, sticky_cpu);
 +}
 +
-+static void ops_dequeue(struct task_struct *p, u64 deq_flags)
++static void hmbird_ops_dequeue(struct task_struct *p, u64 deq_flags)
 +{
 +	u64 opss;
 +
@@ -3164,7 +3164,7 @@ new file mode 100644
 +		 * here with NONE @opss from the above QUEUED case block.
 +		 * Explicitly wait on %HMBIRD_OPSS_DISPATCHING instead of @opss.
 +		 */
-+		wait_ops_state(p, HMBIRD_OPSS_DISPATCHING);
++		hmbird_wait_ops_state(p, HMBIRD_OPSS_DISPATCHING);
 +		hmbird_cond_deferred_err(HMBIRD_OPN,
 +			atomic64_read(&get_hmbird_ts(p)->ops_state) != HMBIRD_OPSS_NONE,
 +						"task = %s\n", p->comm);
@@ -3182,7 +3182,7 @@ new file mode 100644
 +		return;
 +	}
 +
-+	ops_dequeue(p, deq_flags);
++	hmbird_ops_dequeue(p, deq_flags);
 +
 +	if (slim_walt_ctrl) {
 +		if (task_current(rq, p))
@@ -3199,7 +3199,7 @@ new file mode 100644
 +	hmbird_cond_deferred_err(RQ_NO_RUNNING, !hmbird_rq->nr_running, "task = %s\n", p->comm);
 +	hmbird_rq->nr_running--;
 +	sub_nr_running(rq, 1);
-+	dispatch_dequeue(hmbird_rq, p);
++	hmbird_dispatch_dequeue(hmbird_rq, p);
 +
 +	return true;
 +}
@@ -3257,7 +3257,7 @@ new file mode 100644
 +	 * whether we lost to dequeue by testing whether @get_hmbird_ts(p)->holding_cpu is
 +	 * still raw_smp_processor_id().
 +	 *
-+	 * See dispatch_dequeue() for the counterpart.
++	 * See hmbird_dispatch_dequeue() for the counterpart.
 +	 */
 +	if (unlikely(get_hmbird_ts(p)->holding_cpu != raw_smp_processor_id()))
 +		return false;
@@ -3370,7 +3370,7 @@ new file mode 100644
 +	return false;
 +}
 +
-+bool consume_dispatch_q(struct rq *rq, struct rq_flags *rf,
++bool hmbird_consume_dispatch_q(struct rq *rq, struct rq_flags *rf,
 +					struct hmbird_dispatch_q *dsq)
 +{
 +	struct hmbird_rq *hmbird_rq = get_hmbird_rq(rq);
@@ -3438,7 +3438,7 @@ new file mode 100644
 +	/* @dsq is locked and @p is on this rq */
 +	hmbird_cond_deferred_err(HOLDING_CPU1, get_hmbird_ts(p)->holding_cpu >= 0,
 +					"task = %s\n", p->comm);
-+	task_unlink_from_dsq(p, dsq);
++	hmbird_task_unlink_from_dsq(p, dsq);
 +	list_add_tail(&get_hmbird_ts(p)->dsq_node.fifo, &hmbird_rq->local_dsq.fifo);
 +	dsq->nr--;
 +	hmbird_rq->local_dsq.nr++;
@@ -3462,7 +3462,7 @@ new file mode 100644
 +	 */
 +	hmbird_cond_deferred_err(HOLDING_CPU2, get_hmbird_ts(p)->holding_cpu >= 0,
 +					"task = %s\n", p->comm);
-+	task_unlink_from_dsq(p, dsq);
++	hmbird_task_unlink_from_dsq(p, dsq);
 +	dsq->nr--;
 +	get_hmbird_ts(p)->holding_cpu = raw_smp_processor_id();
 +	raw_spin_unlock_irqrestore(&dsq->lock, flags);
@@ -3484,7 +3484,7 @@ new file mode 100644
 +}
 +
 +
-+static int balance_one(struct rq *rq, struct task_struct *prev,
++static int hmbird_balance_one(struct rq *rq, struct task_struct *prev,
 +				struct rq_flags *rf, bool local)
 +{
 +	struct hmbird_rq *hmbird_rq = get_hmbird_rq(rq);
@@ -3512,7 +3512,7 @@ new file mode 100644
 +	if (hmbird_rq->local_dsq.nr)
 +		return 1;
 +
-+	if (consume_dispatch_q(rq, rf, &hmbird_dsq_global)) {
++	if (hmbird_consume_dispatch_q(rq, rf, &hmbird_dsq_global)) {
 +		slim_stats_record(GLOBAL_STAT, 1, 0, 0);
 +		return 1;
 +	}
@@ -3526,7 +3526,7 @@ new file mode 100644
 +static int balance_hmbird(struct rq *rq, struct task_struct *prev,
 +						struct rq_flags *rf)
 +{
-+	return balance_one(rq, prev, rf, true);
++	return hmbird_balance_one(rq, prev, rf, true);
 +}
 +
 +/*
@@ -3567,10 +3567,10 @@ new file mode 100644
 +	if (test_bit(ffs(HMBIRD_TASK_QUEUED), (unsigned long *)&get_hmbird_ts(p)->flags)) {
 +		/*
 +		 * Core-sched might decide to execute @p before it is
-+		 * dispatched. Call ops_dequeue() to notify the BPF scheduler.
++		 * dispatched. Call hmbird_ops_dequeue() to notify the BPF scheduler.
 +		 */
-+		ops_dequeue(p, HMBIRD_DEQ_CORE_SCHED_EXEC);
-+		dispatch_dequeue(get_hmbird_rq(rq), p);
++		hmbird_ops_dequeue(p, HMBIRD_DEQ_CORE_SCHED_EXEC);
++		hmbird_dispatch_dequeue(get_hmbird_rq(rq), p);
 +	}
 +
 +	p->se.exec_start = rq_clock_task(rq);
@@ -3618,7 +3618,7 @@ new file mode 100644
 +		watchdog_watch_task(rq, p);
 +
 +		if (is_pipeline_task(p)) {
-+			do_enqueue_task(rq, p, HMBIRD_ENQ_LOCAL, -1);
++			hmbird_do_enqueue_task(rq, p, HMBIRD_ENQ_LOCAL, -1);
 +			return;
 +		}
 +
@@ -3632,13 +3632,13 @@ new file mode 100644
 +		 * follow-up scheduling event.
 +		 */
 +		if (list_empty(&get_hmbird_rq(rq)->local_dsq.fifo))
-+			do_enqueue_task(rq, p, HMBIRD_ENQ_LAST | HMBIRD_ENQ_LOCAL, -1);
++			hmbird_do_enqueue_task(rq, p, HMBIRD_ENQ_LAST | HMBIRD_ENQ_LOCAL, -1);
 +		else
-+			do_enqueue_task(rq, p, 0, -1);
++			hmbird_do_enqueue_task(rq, p, 0, -1);
 +	}
 +}
 +
-+static struct task_struct *first_local_task(struct rq *rq)
++static struct task_struct *hmbird_first_local_task(struct rq *rq)
 +{
 +	struct rb_node *rb_node;
 +	struct hmbird_entity *entity;
@@ -3662,7 +3662,7 @@ new file mode 100644
 +{
 +	struct task_struct *p;
 +
-+	p = first_local_task(rq);
++	p = hmbird_first_local_task(rq);
 +	if (!p)
 +		return NULL;
 +
@@ -3708,7 +3708,7 @@ new file mode 100644
 +
 +#ifdef CONFIG_SMP
 +
-+static bool test_and_clear_cpu_idle(int cpu)
++static bool hmbird_test_and_clear_cpu_idle(int cpu)
 +{
 +	if (cpumask_test_and_clear_cpu(cpu, hmbird_idle_masks.cpu)) {
 +		if (cpumask_empty(hmbird_idle_masks.cpu))
@@ -3727,7 +3727,7 @@ new file mode 100644
 +		cpu = cpumask_any_and_distribute(hmbird_idle_masks.cpu, cpus_allowed);
 +		if (cpu >= nr_cpu_ids)
 +			return -EBUSY;
-+	} while (!test_and_clear_cpu_idle(cpu));
++	} while (!hmbird_test_and_clear_cpu_idle(cpu));
 +
 +	return cpu;
 +}
@@ -3899,7 +3899,7 @@ new file mode 100644
 +	}
 +
 +	/* if the previous CPU is idle, dispatch directly to it */
-+	if (test_and_clear_cpu_idle(prev_cpu) || is_valid_cpu(prev_cpu)) {
++	if (hmbird_test_and_clear_cpu_idle(prev_cpu) || is_valid_cpu(prev_cpu)) {
 +		slim_stats_record(SELECT_CPU, 0, 0, 0);
 +		return prev_cpu;
 +	}
@@ -3931,7 +3931,7 @@ new file mode 100644
 +	set_cpus_allowed_common(p, ctx);
 +}
 +
-+static void reset_idle_masks(void)
++static void hmbird_reset_idle_masks(void)
 +{
 +	cpumask_or(hmbird_idle_masks.cpu, hmbird_idle_masks.cpu, iso_masks.little);
 +	cpumask_or(hmbird_idle_masks.cpu, hmbird_idle_masks.cpu, iso_masks.big);
@@ -3973,13 +3973,13 @@ new file mode 100644
 +
 +#else /* !CONFIG_SMP */
 +
-+static bool test_and_clear_cpu_idle(int cpu) { return false; }
++static bool hmbird_test_and_clear_cpu_idle(int cpu) { return false; }
 +static s32 hmbird_pick_idle_cpu(const struct cpumask *cpus_allowed) { return -EBUSY; }
-+static void reset_idle_masks(void) {}
++static void hmbird_reset_idle_masks(void) {}
 +
 +#endif /* CONFIG_SMP */
 +
-+static bool check_rq_for_timeouts(struct rq *rq)
++static bool hmbird_check_rq_for_timeouts(struct rq *rq)
 +{
 +	struct hmbird_entity *entity;
 +	struct task_struct *p;
@@ -4019,7 +4019,7 @@ new file mode 100644
 +	hmbird_watchdog_timestamp = jiffies;
 +
 +	for_each_online_cpu(cpu) {
-+		timeout = check_rq_for_timeouts(cpu_rq(cpu));
++		timeout = hmbird_check_rq_for_timeouts(cpu_rq(cpu));
 +		if (unlikely(timeout))
 +			break;
 +
@@ -4447,7 +4447,7 @@ new file mode 100644
 +}
 +
 +
-+void init_dsq(struct hmbird_dispatch_q *dsq, u64 dsq_id)
++void hmbird_init_dsq(struct hmbird_dispatch_q *dsq, u64 dsq_id)
 +{
 +	memset(dsq, 0, sizeof(*dsq));
 +
@@ -4833,7 +4833,7 @@ new file mode 100644
 +	 */
 +	percpu_down_write(&hmbird_fork_rwsem);
 +
-+	reset_idle_masks();
++	hmbird_reset_idle_masks();
 +
 +	/*
 +	 * All cgroups should be initialized before letting in tasks. cgroup
@@ -5264,7 +5264,7 @@ new file mode 100644
 +	WRITE_ONCE(v, HMBIRD_WAKE_EXEC | HMBIRD_ENQ_WAKEUP | HMBIRD_DEQ_SLEEP |
 +			HMBIRD_KICK_PREEMPT);
 +
-+	init_dsq(&hmbird_dsq_global, HMBIRD_DSQ_GLOBAL);
++	hmbird_init_dsq(&hmbird_dsq_global, HMBIRD_DSQ_GLOBAL);
 +	init_dsq_at_boot();
 +	init_isolate_cpus();
 +	hb_timer_init();
@@ -5315,7 +5315,7 @@ new file mode 100644
 +				(u64)kzalloc(sizeof(struct hmbird_ops), GFP_KERNEL);
 +		if (!get_hmbird_ops(rq))
 +			pr_err("fatal error : alloc get_hmbird_ops(rq) failed!!!\n");
-+		init_dsq(&get_hmbird_rq(rq)->local_dsq, HMBIRD_DSQ_LOCAL);
++		hmbird_init_dsq(&get_hmbird_rq(rq)->local_dsq, HMBIRD_DSQ_LOCAL);
 +		INIT_LIST_HEAD(&get_hmbird_rq(rq)->watchdog_list);
 +
 +		WARN_ON(!zalloc_cpumask_var(&get_hmbird_rq(rq)->cpus_to_kick, GFP_KERNEL));
@@ -5556,7 +5556,7 @@ diff --git a/kernel/sched/hmbird/hmbird_sched_proc.c b/kernel/sched/hmbird/hmbir
 new file mode 100644
 --- /dev/null
 +++ b/kernel/sched/hmbird/hmbird_sched_proc.c
-@@ -0,0 +1,543 @@
+@@ -0,0 +1,541 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * Copyright (C) 2024 Oplus. All rights reserved.
@@ -5757,18 +5757,16 @@ new file mode 100644
 +			sched_ravg_window_frame_per_sec_proc_write);
 +/* sched_ravg_window_frame_per_sec ops end */
 +
-+static ssize_t show_scaling_governor(struct kobject *kobj,
-+				struct kobj_attribute *attr, char *buf)
++static ssize_t show_scaling_governor(struct cpufreq_policy *policy, char *buf)
 +{
 +	ssize_t ret = 0;
-+	char *governor = NULL;
-+	struct cpufreq_policy *policy = cpufreq_cpu_get(0);
-+	if (!policy)
++	const char *governor = NULL;
++
++	if (!policy || !policy->governor)
 +		return ret;
-+	governor = cpufreq_cpu_get_governor(policy);
++	governor = policy->governor->name;
 +	if (governor)
 +		ret = scnprintf(buf, PAGE_SIZE, "%s\n", governor);
-+	cpufreq_cpu_put(policy);
 +	return ret;
 +}
 +

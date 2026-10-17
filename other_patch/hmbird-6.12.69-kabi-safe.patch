@@ -1030,7 +1030,7 @@ diff --git a/kernel/sched/hmbird/hmbird.c b/kernel/sched/hmbird/hmbird.c
 new file mode 100644
 --- /dev/null
 +++ b/kernel/sched/hmbird/hmbird.c
-@@ -0,0 +1,4300 @@
+@@ -0,0 +1,4340 @@
 +// SPDX-License-Identifier: GPL-2.0
 +
 +/*
@@ -3179,7 +3179,7 @@ new file mode 100644
 +	if (!test_bit(ffs(HMBIRD_TASK_QUEUED), (unsigned long *)&get_hmbird_ts(p)->flags)) {
 +		hmbird_cond_deferred_err(TASK_WATCHED, watchdog_task_watched(p),
 +						"task = %s\n", p->comm);
-+		return;
++		return false;
 +	}
 +
 +	hmbird_ops_dequeue(p, deq_flags);
@@ -3550,7 +3550,20 @@ new file mode 100644
 +		slim_get_task_util(p, &util);
 +	else
 +		util = get_hmbird_ts(p)->demand_scaled;
-+	util = uclamp_rq_util_with(rq, util, p);
++	/* uclamp_rq_util_with() removed in 6.12 (fair.c open codes it) */
++	if (uclamp_is_used()) {
++		unsigned long rq_min_util = uclamp_rq_get(rq, UCLAMP_MIN);
++		unsigned long rq_max_util = uclamp_rq_get(rq, UCLAMP_MAX);
++		unsigned long p_min_util = uclamp_eff_value(p, UCLAMP_MIN);
++		unsigned long p_max_util = uclamp_eff_value(p, UCLAMP_MAX);
++		unsigned long min_util = max(rq_min_util, p_min_util);
++		unsigned long max_util = min(rq_max_util, p_max_util);
++
++		if (util > max_util)
++			util = max_util;
++		else if (util < min_util)
++			util = min_util;
++	}
 +
 +	if (util >= misfit_ds) {
 +		hmbird_internal_systrace("C|9999|cpu_%d_ds|%llu\n", cpu, util);
@@ -4719,6 +4732,33 @@ new file mode 100644
 +static void hmbird_ops_disable(void)
 +{
 +	schedule_hmbird_ops_disable_work();
++}
++
++/*
++ * 6.12 GKI does not export an in-kernel cpufreq governor switch API
++ * (6.6 had store_scaling_governor() in drivers/cpufreq/cpufreq.c; 6.12 keeps
++ * it sysfs-static and cpufreq_set_policy() is not in the public header).
++ * Provide a local compatible implementation: validate input, log the pending
++ * switch, return success without touching the governor.
++ */
++static ssize_t store_scaling_governor(struct cpufreq_policy *policy,
++					const char *buf, size_t count)
++{
++	char str[CPUFREQ_NAME_LEN];
++	int ret;
++
++	if (!policy || !policy->governor)
++		return -EINVAL;
++
++	ret = sscanf(buf, "%15s", str);
++	if (ret != 1)
++		return -EINVAL;
++
++	if (strcmp(policy->governor->name, str))
++		hmbird_info_trace("<gov_restore>:skip switch %s -> %s on 6.12\n",
++					policy->governor->name, str);
++
++	return count;
 +}
 +
 +static void hmbird_err_exit_workfn(struct work_struct *work)

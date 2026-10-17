@@ -660,19 +660,19 @@ diff --git a/kernel/sched/build_policy.c b/kernel/sched/build_policy.c
 diff --git a/kernel/sched/core.c b/kernel/sched/core.c
 --- a/kernel/sched/core.c
 +++ b/kernel/sched/core.c
-@@ -38,6 +38,12 @@
- #include <linux/sched/rseq_api.h>
- #include <linux/sched/rt.h>
+@@ -86,6 +86,12 @@
+ #undef CREATE_TRACE_POINTS
  
+ #include "sched.h"
++
 +#ifdef CONFIG_HMBIRD_SCHED
 +#include "hmbird/slim.h"
 +#include "hmbird/hmbird_shadow_tick.h"
 +#include "hmbird.h"
 +#endif
-+
- #include <linux/blkdev.h>
- #include <linux/context_tracking.h>
- #include <linux/cpuset.h>
+ #include "stats.h"
+ 
+ #include "autogroup.h"
 @@ -1415,6 +1421,10 @@
  	 */
  	if (scx_enabled() && !scx_can_stop_tick(rq))

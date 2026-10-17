@@ -7223,11 +7223,12 @@ diff --git a/kernel/sched/sched.h b/kernel/sched/sched.h
 diff --git a/kernel/time/tick-sched.c b/kernel/time/tick-sched.c
 --- a/kernel/time/tick-sched.c
 +++ b/kernel/time/tick-sched.c
-@@ -1217,6 +1217,9 @@
+@@ -1217,6 +1217,10 @@
  	ktime_t expires;
  
  	trace_android_vh_tick_nohz_idle_stop_tick(NULL);
 +#ifdef CONFIG_HMBIRD_SCHED
++	extern void android_vh_tick_nohz_idle_stop_tick_handler(void *unused, void *data);
 +	android_vh_tick_nohz_idle_stop_tick_handler(NULL, NULL);
 +#endif
  

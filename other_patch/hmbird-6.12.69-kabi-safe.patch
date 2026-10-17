@@ -1264,7 +1264,7 @@ diff --git a/kernel/sched/hmbird/hmbird.c b/kernel/sched/hmbird/hmbird.c
 new file mode 100644
 --- /dev/null
 +++ b/kernel/sched/hmbird/hmbird.c
-@@ -0,0 +1,4358 @@
+@@ -0,0 +1,4351 @@
 +// SPDX-License-Identifier: GPL-2.0
 +
 +/*
@@ -5289,13 +5289,6 @@ new file mode 100644
 + */
 +int hmbird_ctrl(bool enable)
 +{
-+	/* v26 bootloop control: compiled in but NEVER enable-able.
-+	 * If v26 boots, the v25 bootloop is caused by hmbird being
-+	 * actually enabled at early boot, not by any static
-+	 * compiled-in path. Remove this block for bring-up. */
-+	if (enable)
-+		return -EINVAL;
-+
 +	if (!atomic_read(&hmbird_module_loaded)) {
 +		hmbird_switch_log(hmbird_enabled() ? HMBIRD_ENABLED : HMBIRD_DISABLED,
 +					0, enable, "ext module unloaded\n");
@@ -5546,7 +5539,7 @@ new file mode 100644
 +	u32 v;
 +	struct hmbird_entity *init_hmbird;
 +
-+	printk(KERN_INFO "hmbird: patch v34 compiled in (proc restored, ctrl locked)\n");
++	printk(KERN_INFO "hmbird: patch v35 compiled in (ctrl unlocked, handlers gated)\n");
 +
 +	/*
 +	 * The following is to prevent the compiler from optimizing out the enum
@@ -5848,7 +5841,7 @@ diff --git a/kernel/sched/hmbird/hmbird_sched_proc.c b/kernel/sched/hmbird/hmbir
 new file mode 100644
 --- /dev/null
 +++ b/kernel/sched/hmbird/hmbird_sched_proc.c
-@@ -0,0 +1,541 @@
+@@ -0,0 +1,566 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * Copyright (C) 2024 Oplus. All rights reserved.
@@ -5865,6 +5858,7 @@ new file mode 100644
 +
 +#include "hmbird_util_track.h"
 +#include "slim.h"
++#include <linux/sched/hmbird.h>
 +
 +#define HMBIRD_SCHED_PROC_DIR "hmbird_sched"
 +#define SLIM_FREQ_GOV_DIR       "slim_freq_gov"
@@ -5958,6 +5952,10 @@ new file mode 100644
 +{
 +	int *pval = (int *)pde_data(file_inode(file));
 +
++	/* v35: gate common param writes until hmbird actually enabled */
++	if (!hmbird_enabled())
++		return -EINVAL;
++
 +	if (set_proc_buf_val(file, buf, count, pval))
 +		return -EFAULT;
 +
@@ -6038,6 +6036,10 @@ new file mode 100644
 +{
 +	int *pval = (int *)pde_data(file_inode(file));
 +
++	/* v35: gate until hmbird actually enabled */
++	if (!hmbird_enabled())
++		return -EINVAL;
++
 +	if (set_proc_buf_val(file, buf, count, pval))
 +		return -EFAULT;
 +
@@ -6068,6 +6070,10 @@ new file mode 100644
 +	int cpu;
 +	struct cpufreq_policy *policy;
 +
++	/* v35: gate until hmbird actually enabled */
++	if (!hmbird_enabled())
++		return -EINVAL;
++
 +	for_each_possible_cpu(cpu) {
 +		policy = cpufreq_cpu_get(cpu);
 +		if (!policy || (cpu != policy->cpu))
@@ -6084,6 +6090,10 @@ new file mode 100644
 +{
 +	u64 *pval = (u64 *)pde_data(file_inode(file));
 +
++	/* v35: gate until hmbird actually enabled */
++	if (!hmbird_enabled())
++		return -EINVAL;
++
 +	if (set_proc_buf_val_u64(file, buf, count, pval))
 +		return -EFAULT;
 +
@@ -6099,6 +6109,10 @@ new file mode 100644
 +{
 +	int *pval = (int *)pde_data(file_inode(file));
 +	int tmp_val;
++
++	/* v35: gate until hmbird actually enabled */
++	if (!hmbird_enabled())
++		return -EINVAL;
 +
 +	if (set_proc_buf_val(file, buf, count, &tmp_val))
 +		return -EFAULT;
@@ -6132,6 +6146,10 @@ new file mode 100644
 +	char *data;
 +	int enable_tmp, frame_per_sec_tmp, yield_headroom_tmp, cpu;
 +	unsigned long flags;
++
++	/* v35: gate until hmbird actually enabled */
++	if (!hmbird_enabled())
++		return -EINVAL;
 +
 +	data = kmalloc(count + 1, GFP_KERNEL);
 +	if (!data)

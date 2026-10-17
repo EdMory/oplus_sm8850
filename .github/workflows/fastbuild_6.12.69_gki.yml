@@ -1287,13 +1287,9 @@ jobs:
           }
           HMBIRD_PATCH=hmbird-6.12.69-kabi-safe.patch
           get_patch "$HMBIRD_PATCH" || { echo "HMBIRD 补丁下载失败: 仓库 other_patch/$HMBIRD_PATCH 缺失或不可达(见上方诊断)"; exit 1; }
-
-          # 二、ABI 基线备份: KABI 敏感头文件应用前后必须只增不减
-          cp include/linux/sched.h /tmp/hmbird_sched.h.before
-          cp kernel/sched/sched.h /tmp/hmbird_sched_sched.h.before
-
+          
           patch -p1 --no-backup-if-mismatch -F 0 < "$HMBIRD_PATCH"
-          echo "CONFIG_HMBIRD_SCHED=n" >> arch/arm64/configs/gki_defconfig
+          echo "CONFIG_HMBIRD_SCHED=y" >> arch/arm64/configs/gki_defconfig
           echo "HMBIRD 集成完成"
 
       - name: 启用Re-Kernel支持

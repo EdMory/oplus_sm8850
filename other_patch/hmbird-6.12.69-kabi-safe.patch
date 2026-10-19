@@ -1,7 +1,8 @@
 diff --git a/arch/arm64/configs/gki_defconfig b/arch/arm64/configs/gki_defconfig
+index ea9b72f..8741919 100644
 --- a/arch/arm64/configs/gki_defconfig
 +++ b/arch/arm64/configs/gki_defconfig
-@@ -10,6 +10,7 @@
+@@ -10,6 +10,7 @@ CONFIG_BPF_JIT_ALWAYS_ON=y
  CONFIG_BPF_LSM=y
  CONFIG_PREEMPT=y
  CONFIG_SCHED_CLASS_EXT=y
@@ -10,6 +11,7 @@ diff --git a/arch/arm64/configs/gki_defconfig b/arch/arm64/configs/gki_defconfig
  CONFIG_TASKSTATS=y
  CONFIG_TASK_DELAY_ACCT=y
 diff --git a/include/asm-generic/vmlinux.lds.h b/include/asm-generic/vmlinux.lds.h
+index f807980..ee923e3 100644
 --- a/include/asm-generic/vmlinux.lds.h
 +++ b/include/asm-generic/vmlinux.lds.h
 @@ -125,6 +125,7 @@
@@ -21,39 +23,52 @@ diff --git a/include/asm-generic/vmlinux.lds.h b/include/asm-generic/vmlinux.lds
  	*(__idle_sched_class)			\
  	__sched_class_lowest = .;
 diff --git a/include/linux/sched.h b/include/linux/sched.h
+index aa7d89f..c56f0f5 100644
 --- a/include/linux/sched.h
 +++ b/include/linux/sched.h
-@@ -2387,4 +2387,91 @@
+@@ -2387,4 +2387,104 @@ static __always_inline void alloc_tag_restore(struct alloc_tag *tag, struct allo
  #define alloc_tag_restore(_tag, _old)		do {} while (0)
  #endif
  
--#endif
 +#ifdef CONFIG_HMBIRD_SCHED
 +#include <linux/sched/hmbird.h>
 +
 +static inline bool task_is_top_task(struct task_struct *p)
 +{
-+	return (((struct hmbird_entity *)(p->android_oem_data1[HMBIRD_TS_IDX]))
-+		->top_task_prop & TOP_TASK_BITS_MASK);
++	struct hmbird_entity *entity = get_hmbird_ts(p);
++
++	return entity && (entity->top_task_prop & TOP_TASK_BITS_MASK);
 +}
 +
 +static inline int get_top_task_prop(struct task_struct *p)
 +{
-+	return get_hmbird_ts(p)->top_task_prop;
++	struct hmbird_entity *entity = get_hmbird_ts(p);
++
++	if (entity)
++		return entity->top_task_prop;
++	else
++		return 0;
 +}
 +
 +static inline int set_top_task_prop(struct task_struct *p, u64 set, u64 clear)
 +{
-+	if (set)
-+		get_hmbird_ts(p)->top_task_prop |= set;
-+	if (clear)
-+		get_hmbird_ts(p)->top_task_prop &= ~clear;
++	struct hmbird_entity *entity = get_hmbird_ts(p);
++
++	if (entity) {
++		if (set)
++			entity->top_task_prop |= set;
++		if (clear)
++			entity->top_task_prop &= ~clear;
++	}
 +	return 0;
 +}
 +
 +static inline void reset_top_task_prop(struct task_struct *p)
 +{
-+	get_hmbird_ts(p)->top_task_prop = 0;
++	struct hmbird_entity *entity = get_hmbird_ts(p);
++
++	if (entity)
++		entity->top_task_prop = 0;
 +}
 +
 +static inline int hmbird_set_sched_prop(struct task_struct *p, unsigned long sp)
@@ -115,9 +130,10 @@ diff --git a/include/linux/sched.h b/include/linux/sched.h
 +		return 0;
 +}
 +#endif /* CONFIG_HMBIRD_SCHED */
-+#endif
+ #endif
 diff --git a/include/linux/sched/hmbird.h b/include/linux/sched/hmbird.h
 new file mode 100644
+index 0000000..f914050
 --- /dev/null
 +++ b/include/linux/sched/hmbird.h
 @@ -0,0 +1,394 @@
@@ -515,9 +531,9 @@ new file mode 100644
 +};
 +
 +#endif	/* _LINUX_SCHED_HMBIRD_H */
-
 diff --git a/include/linux/sched/hmbird_proc_val.h b/include/linux/sched/hmbird_proc_val.h
 new file mode 100644
+index 0000000..210a0b8
 --- /dev/null
 +++ b/include/linux/sched/hmbird_proc_val.h
 @@ -0,0 +1,22 @@
@@ -543,12 +559,12 @@ new file mode 100644
 +extern int sched_ravg_window_frame_per_sec;
 +
 +#endif
-
 diff --git a/include/linux/sched/hmbird_version.h b/include/linux/sched/hmbird_version.h
 new file mode 100644
+index 0000000..3597cbd
 --- /dev/null
 +++ b/include/linux/sched/hmbird_version.h
-@@ -0,0 +1,52 @@
+@@ -0,0 +1,61 @@
 +/* SPDX-License-Identifier: GPL-2.0-only */
 +/*
 + * Copyright (C) 2024 Oplus. All rights reserved.
@@ -569,6 +585,15 @@ new file mode 100644
 +
 +static enum hmbird_version hmbird_version_type = HMBIRD_UNINIT;
 +
++/*
++ * Compile-time fallback used when the DT property is missing or unreadable.
++ * Vendors may override this macro before inclusion (e.g. via Kconfig) to
++ * default to GKI instead.
++ */
++#ifndef HMBIRD_VERSION_DEFAULT
++#define HMBIRD_VERSION_DEFAULT	HMBIRD_OGKI_VERSION
++#endif
++
 +#define HMBIRD_VERSION_TYPE_CONFIG_PATH "/soc/oplus,hmbird/version_type"
 +
 +static inline enum hmbird_version get_hmbird_version_type(void)
@@ -588,24 +613,24 @@ new file mode 100644
 +				hmbird_version_type = HMBIRD_GKI_VERSION;
 +				pr_debug("hmbird version use HMBIRD_GKI_VERSION, set by dtsi");
 +			} else {
-+				hmbird_version_type = HMBIRD_OGKI_VERSION;
-+				pr_debug("hmbird version use default HMBIRD_OGKI_VERSION, set by dtsi");
++				hmbird_version_type = HMBIRD_VERSION_DEFAULT;
++				pr_debug("hmbird version use default HMBIRD_VERSION_DEFAULT, set by dtsi");
 +			}
 +			return hmbird_version_type;
 +		}
 +	}
 +
-+	hmbird_version_type = HMBIRD_OGKI_VERSION;
-+	pr_debug("hmbird version use default HMBIRD_OGKI_VERSION");
++	hmbird_version_type = HMBIRD_VERSION_DEFAULT;
++	pr_debug("hmbird version use default HMBIRD_VERSION_DEFAULT");
 +	return hmbird_version_type;
 +}
 +
 +#endif /*_OPLUS_HMBIRD_VERSION_H_ */
-
 diff --git a/include/linux/sched/task.h b/include/linux/sched/task.h
+index 03a8b79..05191b8 100644
 --- a/include/linux/sched/task.h
 +++ b/include/linux/sched/task.h
-@@ -70,6 +70,9 @@
+@@ -70,6 +70,9 @@ extern int sched_fork(unsigned long clone_flags, struct task_struct *p);
  extern int sched_cgroup_fork(struct task_struct *p, struct kernel_clone_args *kargs);
  extern void sched_cancel_fork(struct task_struct *p);
  extern void sched_post_fork(struct task_struct *p);
@@ -616,9 +641,10 @@ diff --git a/include/linux/sched/task.h b/include/linux/sched/task.h
  
  void __noreturn do_task_dead(void);
 diff --git a/include/uapi/linux/sched.h b/include/uapi/linux/sched.h
+index 359a14c..605b258 100644
 --- a/include/uapi/linux/sched.h
 +++ b/include/uapi/linux/sched.h
-@@ -119,6 +119,7 @@
+@@ -119,6 +119,7 @@ struct clone_args {
  #define SCHED_IDLE		5
  #define SCHED_DEADLINE		6
  #define SCHED_EXT		7
@@ -627,26 +653,33 @@ diff --git a/include/uapi/linux/sched.h b/include/uapi/linux/sched.h
  /* Can be ORed in to make sure the process is reverted back to SCHED_NORMAL on fork */
  #define SCHED_RESET_ON_FORK     0x40000000
 diff --git a/kernel/Kconfig.preempt b/kernel/Kconfig.preempt
+index fe782cd..c729a28 100644
 --- a/kernel/Kconfig.preempt
 +++ b/kernel/Kconfig.preempt
-@@ -159,3 +159,13 @@
+@@ -159,3 +159,18 @@ config SCHED_CLASS_EXT
  	  For more information:
  	    Documentation/scheduler/sched-ext.rst
  	    https://github.com/sched-ext/scx
 +
 +config HMBIRD_SCHED
 +	bool "hmbird Scheduling Class(base on ext scheduler)"
++	depends on SMP && ANDROID_VENDOR_HOOKS
 +	help
 +	  This option enables the hmbird scheduling class, an Android
 +	  scheduler (based on sched_ext) that manages runnable tasks
 +	  through deadline-scaled dispatch queues with dedicated priority
 +	  levels for display/touch/multimedia cgroups and SystemUI.
 +
++	  The scheduler relies on Android vendor hooks
++	  (trace_android_rvh_*) exported by CONFIG_ANDROID_VENDOR_HOOKS,
++	  so it is only selectable on Android/GKI baselines.
++
 +	  See Documentation/scheduler/sched-ext.rst for more details.
 diff --git a/kernel/fork.c b/kernel/fork.c
+index fdc28e4..251fbdf 100644
 --- a/kernel/fork.c
 +++ b/kernel/fork.c
-@@ -969,6 +969,9 @@
+@@ -969,6 +969,9 @@ void __put_task_struct(struct task_struct *tsk)
  
  	put_dmabuf_info(tsk->dmabuf_info);
  	sched_ext_free(tsk);
@@ -657,6 +690,7 @@ diff --git a/kernel/fork.c b/kernel/fork.c
  	cgroup_free(tsk);
  	task_numa_free(tsk, true);
 diff --git a/kernel/sched/build_policy.c b/kernel/sched/build_policy.c
+index fae1f5c..fdea0f7 100644
 --- a/kernel/sched/build_policy.c
 +++ b/kernel/sched/build_policy.c
 @@ -63,4 +63,13 @@
@@ -674,6 +708,7 @@ diff --git a/kernel/sched/build_policy.c b/kernel/sched/build_policy.c
 +
  #include "syscalls.c"
 diff --git a/kernel/sched/core.c b/kernel/sched/core.c
+index 3caa543..c93d288 100644
 --- a/kernel/sched/core.c
 +++ b/kernel/sched/core.c
 @@ -86,6 +86,12 @@
@@ -689,7 +724,7 @@ diff --git a/kernel/sched/core.c b/kernel/sched/core.c
  #include "stats.h"
  
  #include "autogroup.h"
-@@ -269,6 +275,11 @@
+@@ -269,6 +275,11 @@ static inline int __task_prio(const struct task_struct *p)
  	if (task_on_scx(p))
  		return MAX_RT_PRIO + MAX_NICE + 1; /* 120, squash ext */
  
@@ -701,19 +736,19 @@ diff --git a/kernel/sched/core.c b/kernel/sched/core.c
  	return MAX_RT_PRIO + MAX_NICE; /* 119, squash fair */
  }
  
-@@ -313,6 +324,11 @@
- 
+@@ -314,6 +325,11 @@ static inline bool prio_less(const struct task_struct *a,
  	if (pa == MAX_RT_PRIO + MAX_NICE)	/* fair */
  		return cfs_prio_less(a, b, in_fi);
-+
+ 
 +#ifdef CONFIG_HMBIRD_SCHED
 +	if (task_on_hmbird(a) && task_on_hmbird(b))
 +		return hmbird_prio_less(a, b);
 +#endif
- 
++
  #ifdef CONFIG_SCHED_CLASS_EXT
  	if (pa == MAX_RT_PRIO + MAX_NICE + 1)	/* ext */
-@@ -1415,6 +1431,10 @@
+ 		return scx_prio_less(a, b, in_fi);
+@@ -1415,6 +1431,10 @@ bool sched_can_stop_tick(struct rq *rq)
  	 */
  	if (scx_enabled() && !scx_can_stop_tick(rq))
  		return false;
@@ -724,11 +759,10 @@ diff --git a/kernel/sched/core.c b/kernel/sched/core.c
  
  	if (rq->cfs.h_nr_queued > 1)
  		return false;
-@@ -2274,6 +2294,42 @@
- 	dequeue_task(rq, p, flags);
+@@ -2275,6 +2295,42 @@ void deactivate_task(struct rq *rq, struct task_struct *p, int flags)
  }
  EXPORT_SYMBOL_GPL(deactivate_task);
-+
+ 
 +#ifdef CONFIG_HMBIRD_SCHED
 +struct hmbird_sched_change_guard
 +hmbird_sched_change_guard_init(struct rq *rq, struct task_struct *p, int flags)
@@ -764,10 +798,11 @@ diff --git a/kernel/sched/core.c b/kernel/sched/core.c
 +	cg->done = true;
 +}
 +#endif
- 
++
  static void block_task(struct rq *rq, struct task_struct *p, int flags)
  {
-@@ -5306,6 +5362,9 @@
+ 	if (dequeue_task(rq, p, DEQUEUE_SLEEP | flags))
+@@ -5306,6 +5362,9 @@ late_initcall(sched_core_sysctl_init);
  int sched_fork(unsigned long clone_flags, struct task_struct *p)
  {
  	int should_scx = 0;
@@ -777,19 +812,19 @@ diff --git a/kernel/sched/core.c b/kernel/sched/core.c
  
  	trace_android_rvh_sched_fork(p);
  
-@@ -5353,6 +5412,11 @@
+@@ -5353,6 +5412,11 @@ int sched_fork(unsigned long clone_flags, struct task_struct *p)
  		return -EAGAIN;
  
  	scx_pre_fork(p);
 +#ifdef CONFIG_HMBIRD_SCHED
-+	ret = hmbird_enabled() ? hmbird_pre_fork(p) : 0;
++	ret = hmbird_pre_fork(p);
 +	if (ret)
-+		return -EAGAIN;
++		goto out_cancel;
 +#endif
  
  	trace_android_vh_setscheduler_class(NULL, &should_scx, p, p->policy, p->prio);
  	trace_android_vh_task_should_scx(&should_scx, p->policy, p->prio);
-@@ -5361,6 +5425,10 @@
+@@ -5361,6 +5425,10 @@ int sched_fork(unsigned long clone_flags, struct task_struct *p)
  #ifdef CONFIG_SCHED_CLASS_EXT
  	} else if (task_should_scx(p->policy) || should_scx) {
  		p->sched_class = &ext_sched_class;
@@ -800,7 +835,20 @@ diff --git a/kernel/sched/core.c b/kernel/sched/core.c
  #endif
  	} else {
  		p->sched_class = &fair_sched_class;
-@@ -5412,6 +5480,9 @@
+@@ -5383,6 +5451,12 @@ int sched_fork(unsigned long clone_flags, struct task_struct *p)
+ 	RB_CLEAR_NODE(&p->pushable_dl_tasks);
+ #endif
+ 	return 0;
++#ifdef CONFIG_HMBIRD_SCHED
++out_cancel:
++	scx_cancel_fork(p);
++	hmbird_cancel_fork(p);
++	return ret;
++#endif
+ }
+ 
+ int sched_cgroup_fork(struct task_struct *p, struct kernel_clone_args *kargs)
+@@ -5412,6 +5486,9 @@ int sched_cgroup_fork(struct task_struct *p, struct kernel_clone_args *kargs)
  	if (p->sched_class->task_fork)
  		p->sched_class->task_fork(p);
  	raw_spin_unlock_irqrestore(&p->pi_lock, flags);
@@ -810,7 +858,7 @@ diff --git a/kernel/sched/core.c b/kernel/sched/core.c
  
  	return scx_fork(p);
  }
-@@ -5419,12 +5490,18 @@
+@@ -5419,12 +5496,18 @@ int sched_cgroup_fork(struct task_struct *p, struct kernel_clone_args *kargs)
  void sched_cancel_fork(struct task_struct *p)
  {
  	scx_cancel_fork(p);
@@ -829,7 +877,7 @@ diff --git a/kernel/sched/core.c b/kernel/sched/core.c
  }
  
  unsigned long to_ratio(u64 period, u64 runtime)
-@@ -6313,19 +6390,30 @@
+@@ -6313,19 +6396,30 @@ void sched_tick(void)
  	if (sched_feat(LATENCY_WARN) && resched_latency)
  		resched_latency_warn(cpu, resched_latency);
  
@@ -860,7 +908,7 @@ diff --git a/kernel/sched/core.c b/kernel/sched/core.c
  }
  
  #ifdef CONFIG_NO_HZ_FULL
-@@ -6637,6 +6725,16 @@
+@@ -6637,6 +6731,16 @@ static void prev_balance(struct rq *rq, struct task_struct *prev,
  			start_class = &ext_sched_class;
  	}
  #endif
@@ -877,7 +925,7 @@ diff --git a/kernel/sched/core.c b/kernel/sched/core.c
  
  	/*
  	 * We must do the balancing pass before put_prev_task(), such
-@@ -6665,6 +6763,10 @@
+@@ -6665,6 +6769,10 @@ __pick_next_task(struct rq *rq, struct task_struct *prev, struct rq_flags *rf)
  
  	if (scx_enabled())
  		goto restart;
@@ -888,7 +936,7 @@ diff --git a/kernel/sched/core.c b/kernel/sched/core.c
  
  	/*
  	 * Optimization: we know that if all tasks are in the fair class we can
-@@ -6694,11 +6796,20 @@
+@@ -6694,11 +6802,20 @@ restart:
  	for_each_active_class(class) {
  		if (class->pick_next_task) {
  			p = class->pick_next_task(rq, prev);
@@ -910,7 +958,7 @@ diff --git a/kernel/sched/core.c b/kernel/sched/core.c
  				put_prev_set_next_task(rq, prev, p);
  				return p;
  			}
-@@ -7870,6 +7981,9 @@
+@@ -7870,6 +7987,9 @@ keep_resched:
  					     prev->se.sched_delayed);
  
  		trace_sched_switch(preempt, prev, next, prev_state);
@@ -920,7 +968,7 @@ diff --git a/kernel/sched/core.c b/kernel/sched/core.c
  
  		if (block && (prev_state & TASK_UNINTERRUPTIBLE)
  			&& trace_sched_blocked_reason_enabled()) {
-@@ -8234,6 +8348,10 @@
+@@ -8234,6 +8354,10 @@ const struct sched_class *__setscheduler_class(int policy, int prio)
  	if (dl_prio(prio))
  		return &dl_sched_class;
  
@@ -931,7 +979,7 @@ diff --git a/kernel/sched/core.c b/kernel/sched/core.c
  #ifdef CONFIG_SCHED_CLASS_EXT
  	trace_android_vh_task_should_scx(&should_scx, policy, prio);
  	if (should_scx)
-@@ -9780,6 +9898,9 @@
+@@ -9780,6 +9904,9 @@ void __init sched_init(void)
  #endif
  	init_sched_fair_class();
  	init_sched_ext_class();
@@ -941,15 +989,15 @@ diff --git a/kernel/sched/core.c b/kernel/sched/core.c
  
  	psi_init();
  
-@@ -10226,5 +10347,6 @@
+@@ -10225,6 +10352,7 @@ static int cpu_cgroup_css_online(struct cgroup_subsys_state *css)
+ 	struct task_group *parent = css_tg(css->parent);
  	int ret;
  
--	ret = scx_tg_online(tg);
 +	hmbird_tg_online(tg);
-+	ret = scx_tg_online(tg);
+ 	ret = scx_tg_online(tg);
  	if (ret)
  		return ret;
-@@ -10269,6 +10390,68 @@
+@@ -10269,6 +10397,81 @@ static void cpu_cgroup_css_free(struct cgroup_subsys_state *css)
  	trace_android_vh_cpu_cgroup_css_free(css);
  }
  
@@ -957,7 +1005,7 @@ diff --git a/kernel/sched/core.c b/kernel/sched/core.c
 +static inline void update_cgroup_ids_table(int ids, u8 hmbird_cgroup_deadline_idx)
 +{
 +	if (ids < 0 || ids >= NUMS_CGROUP_KINDS) {
-+		pr_err("update_cgroup_ids_tab idx err!");
++		pr_err("hmbird: update_cgroup_ids_tab idx err!\n");
 +		return;
 +	}
 +	cgroup_ids_table[ids] = hmbird_cgroup_deadline_idx;
@@ -984,13 +1032,26 @@ diff --git a/kernel/sched/core.c b/kernel/sched/core.c
 +static u64 cgroup_read_hmbird_deadline(struct cgroup_subsys_state *css,
 +					struct cftype *cft)
 +{
-+	u8 i;
++	u64 kn_id;
++	int i;
 +
 +	if (!css || !css->cgroup || !css->cgroup->kn)
 +		return (u64)HMBIRD_BPF_DSQS_DEADLINE[DEFAULT_CGROUP_DL_IDX];
-+	i = min_t(u8, cgroup_ids_table[css->cgroup->kn->id], MAX_GLOBAL_DSQS - 1);
++
++	/*
++	 * kn->id is a global kernfs id, not a dense small index; guard the
++	 * array access before using it as a subscript.
++	 */
++	kn_id = css->cgroup->kn->id;
++	if (kn_id >= NUMS_CGROUP_KINDS) {
++		pr_warn_once("hmbird: cgroup kn->id %llu out of range, using default deadline\n",
++			     kn_id);
++		return (u64)HMBIRD_BPF_DSQS_DEADLINE[DEFAULT_CGROUP_DL_IDX];
++	}
++
++	i = min_t(int, cgroup_ids_table[kn_id], MAX_GLOBAL_DSQS - 1);
 +	if (i < 0) {
-+		pr_err("<sched_ext> <%s> i is %d, less than 0, name is %s",
++		pr_err("hmbird: <%s> i is %d, less than 0, name is %s\n",
 +			__func__, i, css->cgroup->kn->name);
 +		i = DEFAULT_CGROUP_DL_IDX;
 +	}
@@ -1018,7 +1079,7 @@ diff --git a/kernel/sched/core.c b/kernel/sched/core.c
  static int cpu_cgroup_can_attach(struct cgroup_taskset *tset)
  {
  #ifdef CONFIG_RT_GROUP_SCHED
-@@ -10288,8 +10471,12 @@
+@@ -10288,8 +10491,12 @@ static void cpu_cgroup_attach(struct cgroup_taskset *tset)
  	struct task_struct *task;
  	struct cgroup_subsys_state *css;
  
@@ -1032,35 +1093,36 @@ diff --git a/kernel/sched/core.c b/kernel/sched/core.c
  
  	trace_android_rvh_cpu_cgroup_attach(tset);
  
-@@ -10987,6 +11174,13 @@
+@@ -10986,6 +11193,13 @@ static struct cftype cpu_legacy_files[] = {
+ 		.read_u64 = cpu_uclamp_ls_read_u64,
  		.write_u64 = cpu_uclamp_ls_write_u64,
  	},
- #endif
++#endif
 +#ifdef CONFIG_HMBIRD_SCHED
 +	{
 +		.name = "hmbird.deadline",
 +		.read_u64 = cgroup_read_hmbird_deadline,
 +		.write_u64 = cgroup_write_hmbird_deadline,
 +	},
-+#endif
+ #endif
  	{ }	/* Terminate */
  };
- 
 diff --git a/kernel/sched/debug.c b/kernel/sched/debug.c
+index 131188c..37d9974 100644
 --- a/kernel/sched/debug.c
 +++ b/kernel/sched/debug.c
-@@ -6,6 +6,10 @@
-  *
+@@ -7,6 +7,10 @@
   * Copyright(C) 2007, Red Hat, Inc., Ingo Molnar
   */
-+
+ 
 +#ifdef CONFIG_HMBIRD_SCHED
 +#include "hmbird.h"
 +#endif
- 
++
  /*
   * This allows printing both to /sys/kernel/debug/sched/debug and
-@@ -530,6 +534,9 @@
+  * to the console
+@@ -530,6 +534,9 @@ static __init int sched_init_debug(void)
  #endif
  
  	debugfs_create_file("debug", 0444, debugfs_sched, NULL, &sched_debug_fops);
@@ -1070,7 +1132,7 @@ diff --git a/kernel/sched/debug.c b/kernel/sched/debug.c
  
  	debugfs_fair_server_init();
  
-@@ -1243,6 +1250,13 @@
+@@ -1243,6 +1250,13 @@ void proc_sched_show_task(struct task_struct *p, struct pid_namespace *ns,
  	}
  
  	__P(nr_switches);
@@ -1086,9 +1148,10 @@ diff --git a/kernel/sched/debug.c b/kernel/sched/debug.c
  
 diff --git a/kernel/sched/hmbird.h b/kernel/sched/hmbird.h
 new file mode 100644
+index 0000000..73c3f6f
 --- /dev/null
 +++ b/kernel/sched/hmbird.h
-@@ -0,0 +1,324 @@
+@@ -0,0 +1,330 @@
 +/* SPDX-License-Identifier: GPL-2.0 */
 +/*
 + * HMBIRD scheduler class
@@ -1338,7 +1401,13 @@ new file mode 100644
 +
 +static inline bool hmbird_prio_less(struct task_struct *a, struct task_struct *b)
 +{
-+	return get_hmbird_ts(a)->slice < get_hmbird_ts(b)->slice;
++	struct hmbird_entity *ea = get_hmbird_ts(a);
++	struct hmbird_entity *eb = get_hmbird_ts(b);
++
++	/* Tasks without an hmbird entity are never considered more urgent. */
++	if (!ea || !eb)
++		return false;
++	return ea->slice < eb->slice;
 +}
 +bool hmbird_can_stop_tick(struct rq *rq);
 +void init_sched_hmbird_class(void);
@@ -1413,12 +1482,12 @@ new file mode 100644
 +bool get_non_hmbird_task(void);
 +void set_cpu_cluster(u64 cpu_cluster);
 +#endif /*_EXT_H_*/
-
 diff --git a/kernel/sched/hmbird/hmbird.c b/kernel/sched/hmbird/hmbird.c
 new file mode 100644
+index 0000000..bd135c2
 --- /dev/null
 +++ b/kernel/sched/hmbird/hmbird.c
-@@ -0,0 +1,4370 @@
+@@ -0,0 +1,4413 @@
 +// SPDX-License-Identifier: GPL-2.0
 +
 +/*
@@ -1428,6 +1497,19 @@ new file mode 100644
 + * Copyright (c) 2024 Dao Huang
 + * Copyright (c) 2024 Yuxing Wang
 + * Copyright (c) 2024 Taiyu Li
++ *
++ * Design notes (6.12 port):
++ *  - HMBIRD is a kernel-built-in scheduling class that reuses the
++ *    sched_ext (SCX) dispatch-queue infrastructure. The scheduling
++ *    policy itself lives in this directory (kernel/sched/hmbird/) and
++ *    is NOT a BPF program, although comments inherited from sched_ext
++ *    still refer to "the BPF scheduler" for the SCX-side paths.
++ *  - CONFIG_HMBIRD_SCHED and CONFIG_SCHED_CLASS_EXT coexist in the
++ *    tree, but production builds must enable exactly one of them:
++ *    they share the same DSQ/ops plumbing and must not be selected
++ *    together on a shipping device. Keep EXT off when HMBIRD is on.
++ *  - Requires Android vendor hooks (CONFIG_ANDROID_VENDOR_HOOKS);
++ *    see kernel/Kconfig.preempt.
 + */
 +
 +#include <linux/notifier.h>
@@ -1444,7 +1526,7 @@ new file mode 100644
 +atomic_t non_hmbird_task;
 +atomic_t hmbird_module_loaded = ATOMIC_INIT(0);
 +int cgroup_ids_table[NUMS_CGROUP_KINDS];
-+int scx_systemui_pid = -1;
++pid_t scx_systemui_pid = -1;
 +static int sched_prop_to_preempt_prio[HMBIRD_TASK_PROP_MAX] = {0};
 +
 +enum hmbird_internal_consts {
@@ -2957,7 +3039,7 @@ new file mode 100644
 +static inline void update_cgroup_ids_table(u64 ids, int hmbird_cgroup_deadline_idx)
 +{
 +	if (ids < 0 || ids >= NUMS_CGROUP_KINDS) {
-+		pr_err("update_cgroup_ids_tab idx err!\n");
++		pr_err("hmbird: update_cgroup_ids_tab idx err!\n");
 +		return;
 +	}
 +	cgroup_ids_table[ids] = hmbird_cgroup_deadline_idx;
@@ -4066,7 +4148,24 @@ new file mode 100644
 +
 +static struct task_struct *pick_task_hmbird(struct rq *rq)
 +{
-+	return hmbird_first_local_task(rq);
++	struct task_struct *p;
++
++	p = hmbird_first_local_task(rq);
++	if (!p)
++		return NULL;
++
++	/*
++	 * A zero-slice task would be re-picked forever without making
++	 * progress; refill it up-front, same as pick_next_task_hmbird().
++	 */
++	if (unlikely(!get_hmbird_ts(p)->slice)) {
++		if (!hmbird_ops_disabling() && !hmbird_warned_zero_slice)
++			hmbird_warned_zero_slice = true;
++
++		refill_task_slice(p);
++	}
++
++	return p;
 +}
 +
 +static struct task_struct *pick_next_task_hmbird(struct rq *rq,
@@ -4648,10 +4747,11 @@ new file mode 100644
 +		refresh_hmbird_weight(p);
 +		task_rq_unlock(rq, p, &rf);
 +
-+		spin_lock_irq(&hmbird_tasks_lock);
-+		list_add_tail(&get_hmbird_ts(p)->tasks_node, &hmbird_tasks);
-+		spin_unlock_irq(&hmbird_tasks_lock);
 +	}
++
++	spin_lock_irq(&hmbird_tasks_lock);
++	list_add_tail(&get_hmbird_ts(p)->tasks_node, &hmbird_tasks);
++	spin_unlock_irq(&hmbird_tasks_lock);
 +
 +	percpu_up_read(&hmbird_fork_rwsem);
 +}
@@ -4681,7 +4781,7 @@ new file mode 100644
 +{
 +	unsigned long flags;
 +
-+	if (!hmbird_enabled())
++	if (!get_hmbird_ts(p))
 +		return;
 +
 +	spin_lock_irqsave(&hmbird_tasks_lock, flags);
@@ -5154,8 +5254,10 @@ new file mode 100644
 + * 6.12 GKI does not export an in-kernel cpufreq governor switch API
 + * (6.6 had store_scaling_governor() in drivers/cpufreq/cpufreq.c; 6.12 keeps
 + * it sysfs-static and cpufreq_set_policy() is not in the public header).
-+ * Provide a local compatible implementation: validate input, log the pending
-+ * switch, return success without touching the governor.
++ * Provide a local compatible implementation: validate input, report whether
++ * the requested switch differs from the current governor and, if so, return
++ * -ENOSYS so callers can tell "switch unsupported on 6.12" from real errors
++ * instead of assuming a fake success.
 + */
 +static ssize_t store_scaling_governor(struct cpufreq_policy *policy,
 +					const char *buf, size_t count)
@@ -5171,8 +5273,7 @@ new file mode 100644
 +		return -EINVAL;
 +
 +	if (strcmp(policy->governor->name, str))
-+		hmbird_info_trace("<gov_restore>:skip switch %s -> %s on 6.12\n",
-+					policy->governor->name, str);
++		return -ENOSYS;	/* 6.12 GKI: real governor switch unsupported */
 +
 +	return count;
 +}
@@ -5180,6 +5281,7 @@ new file mode 100644
 +static void hmbird_err_exit_workfn(struct work_struct *work)
 +{
 +	int cpu;
++	ssize_t ret;
 +	struct cpufreq_policy *policy;
 +
 +	hmbird_ctrl(false);
@@ -5191,8 +5293,18 @@ new file mode 100644
 +		if (cpu != policy->cpu)
 +			goto put;
 +		down_write(&policy->rwsem);
-+		WARN_ON(store_scaling_governor(policy,
-+				saved_gov[cpu], strlen(saved_gov[cpu])) <= 0);
++		ret = store_scaling_governor(policy,
++				saved_gov[cpu], strlen(saved_gov[cpu]));
++		if (ret == -ENOSYS) {
++			static bool skip_logged;
++
++			if (!skip_logged) {
++				pr_warn("hmbird: gov restore unsupported on 6.12, skip\n");
++				skip_logged = true;
++			}
++		} else if (ret < 0) {
++			pr_warn("hmbird: gov restore failed ret=%zd\n", ret);
++		}
 +		up_write(&policy->rwsem);
 +		hmbird_info_trace("<heartbeat>:restore origin gov : %s\n", saved_gov[cpu]);
 +put:
@@ -5712,7 +5824,7 @@ new file mode 100644
 +	u32 v;
 +	struct hmbird_entity *init_hmbird;
 +
-+	printk(KERN_INFO "hmbird: patch v37 compiled in (ops_running gate)\n");
++	pr_debug("hmbird: patch v37 compiled in (ops_running gate)\n");
 +
 +	/*
 +	 * The following is to prevent the compiler from optimizing out the enum
@@ -5789,9 +5901,9 @@ new file mode 100644
 +
 +	panic_blk_init();
 +}
-
 diff --git a/kernel/sched/hmbird/hmbird_misc.c b/kernel/sched/hmbird/hmbird_misc.c
 new file mode 100644
+index 0000000..b97f371
 --- /dev/null
 +++ b/kernel/sched/hmbird/hmbird_misc.c
 @@ -0,0 +1,123 @@
@@ -5918,12 +6030,12 @@ new file mode 100644
 +
 +	set_hmbird_module_loaded(1);
 +}
-
 diff --git a/kernel/sched/hmbird/hmbird_sched.h b/kernel/sched/hmbird/hmbird_sched.h
 new file mode 100644
+index 0000000..c7fa979
 --- /dev/null
 +++ b/kernel/sched/hmbird/hmbird_sched.h
-@@ -0,0 +1,85 @@
+@@ -0,0 +1,97 @@
 +/* SPDX-License-Identifier: GPL-2.0-only */
 +/*
 + * Copyright (C) 2024 Oplus. All rights reserved.
@@ -5963,7 +6075,7 @@ new file mode 100644
 +do {								\
 +	ret = register_trace_##vendor_hook(handler, data);				\
 +	if (ret) {						\
-+		pr_err("sched_ext:failed to register_trace_"#vendor_hook", ret=%d\n", ret);	\
++		pr_err("hmbird:failed to register_trace_"#vendor_hook", ret=%d\n", ret);	\
 +		goto err;					\
 +	}							\
 +} while (0)
@@ -5984,7 +6096,19 @@ new file mode 100644
 +extern spinlock_t new_sched_ravg_window_lock;
 +extern int cluster_separate;
 +
-+#define HMBIRD_CPUFREQ_WINDOW_ROLLOVER	BIT(31)
++/*
++ * Custom cpufreq_update_util() flag bits.
++ *
++ * The low bits of @flags are owned by the generic cpufreq/schedutil
++ * interface (SCHED_CPUFREQ_RT/DL/IOWAIT/MIGRATION/...). HMBIRD must not
++ * reuse them: HMBIRD_TICK_HIT_BOOST used to alias SCHED_CPUFREQ_DL (1<<1),
++ * which made schedutil treat every shadow-tick hit as a DL task event.
++ * Keep HMBIRD-specific bits in the high region instead; schedutil ignores
++ * unknown bits, and any real frequency boost must be requested through
++ * regular util/iowait paths.
++ */
++#define HMBIRD_TICK_HIT_BOOST		(1U << 30)
++#define HMBIRD_CPUFREQ_WINDOW_ROLLOVER	(1U << 31)
 +#define MAX_YIELD_SLEEP		(2000000ULL)
 +#define MIN_YIELD_SLEEP		(200000ULL)
 +#define YIELD_DURATION		(5000ULL)
@@ -6009,9 +6133,9 @@ new file mode 100644
 +
 +void hmbird_ops_init(struct hmbird_ops *hmbird_ops);
 +#endif /*__HMBIRD_SCHED__*/
-
 diff --git a/kernel/sched/hmbird/hmbird_sched_proc.c b/kernel/sched/hmbird/hmbird_sched_proc.c
 new file mode 100644
+index 0000000..ff8b295
 --- /dev/null
 +++ b/kernel/sched/hmbird/hmbird_sched_proc.c
 @@ -0,0 +1,566 @@
@@ -6581,9 +6705,9 @@ new file mode 100644
 +}
 +
 +device_initcall(hmbird_proc_init);
-
 diff --git a/kernel/sched/hmbird/hmbird_sched_proc.h b/kernel/sched/hmbird/hmbird_sched_proc.h
 new file mode 100644
+index 0000000..e22bc75
 --- /dev/null
 +++ b/kernel/sched/hmbird/hmbird_sched_proc.h
 @@ -0,0 +1,39 @@
@@ -6626,12 +6750,12 @@ new file mode 100644
 +static int hmbird_common_open(struct inode *inode, struct file *file);
 +
 +#endif
-
 diff --git a/kernel/sched/hmbird/hmbird_shadow_tick.c b/kernel/sched/hmbird/hmbird_shadow_tick.c
 new file mode 100644
+index 0000000..86c1697
 --- /dev/null
 +++ b/kernel/sched/hmbird/hmbird_shadow_tick.c
-@@ -0,0 +1,199 @@
+@@ -0,0 +1,206 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * Copyright (C) 2024 Oplus. All rights reserved.
@@ -6670,7 +6794,14 @@ new file mode 100644
 +#define STOP_IDLE_TRIGGER     (1)
 +#define PERIODIC_TICK_TRIGGER (2)
 +#define TICK_INTVAL	(1000000ULL)
-+#define HMBIRD_TICK_HIT_BOOST	(1 << 1)
++/*
++ * Custom flag passed to cpufreq_update_util() on a shadow-tick hit.
++ * Must NOT alias the generic SCHED_CPUFREQ_* low bits (1<<1 is
++ * SCHED_CPUFREQ_DL); keep it in the high region, see hmbird_sched.h.
++ */
++#ifndef HMBIRD_TICK_HIT_BOOST
++#define HMBIRD_TICK_HIT_BOOST	(1U << 30)
++#endif
 +/*
 + * restart hrtimer while resume from idle. scheduler tick may resume after 4ms,
 + * so we can't restart hrtimer in scheduler tick.
@@ -6831,9 +6962,9 @@ new file mode 100644
 +}
 +
 +device_initcall(hmbird_shadow_tick_init);
-
 diff --git a/kernel/sched/hmbird/hmbird_shadow_tick.h b/kernel/sched/hmbird/hmbird_shadow_tick.h
 new file mode 100644
+index 0000000..0c26fd9
 --- /dev/null
 +++ b/kernel/sched/hmbird/hmbird_shadow_tick.h
 @@ -0,0 +1,11 @@
@@ -6848,9 +6979,9 @@ new file mode 100644
 +void sched_switch_handler(void *data, bool preempt, struct task_struct *prev,
 +		struct task_struct *next, unsigned int prev_state);
 +#endif
-
 diff --git a/kernel/sched/hmbird/hmbird_trace.h b/kernel/sched/hmbird/hmbird_trace.h
 new file mode 100644
+index 0000000..8468b40
 --- /dev/null
 +++ b/kernel/sched/hmbird/hmbird_trace.h
 @@ -0,0 +1,92 @@
@@ -6946,9 +7077,9 @@ new file mode 100644
 +#define TRACE_INCLUDE_FILE hmbird_trace
 +/* This part must be outside protection */
 +#include <trace/define_trace.h>
-
 diff --git a/kernel/sched/hmbird/hmbird_util_track.c b/kernel/sched/hmbird/hmbird_util_track.c
 new file mode 100644
+index 0000000..d520a84
 --- /dev/null
 +++ b/kernel/sched/hmbird/hmbird_util_track.c
 @@ -0,0 +1,626 @@
@@ -7578,9 +7709,9 @@ new file mode 100644
 +	new_hmbird_sched_ravg_window = NSEC_PER_SEC / frame_per_sec;
 +	spin_unlock_irqrestore(&new_sched_ravg_window_lock, flags);
 +}
-
 diff --git a/kernel/sched/hmbird/hmbird_util_track.h b/kernel/sched/hmbird/hmbird_util_track.h
 new file mode 100644
+index 0000000..17b85df
 --- /dev/null
 +++ b/kernel/sched/hmbird/hmbird_util_track.h
 @@ -0,0 +1,33 @@
@@ -7617,9 +7748,9 @@ new file mode 100644
 +extern DEFINE_PER_CPU(struct hmbird_sched_rq_stats, hmbird_sched_rq_stats);
 +
 +#endif /* __HMBIRD_UTIL_TRACK_H__ */
-
 diff --git a/kernel/sched/hmbird/slim.h b/kernel/sched/hmbird/slim.h
 new file mode 100644
+index 0000000..38a986a
 --- /dev/null
 +++ b/kernel/sched/hmbird/slim.h
 @@ -0,0 +1,48 @@
@@ -7648,7 +7779,7 @@ new file mode 100644
 +void stats_print(char *buf, int len);
 +void hmbird_skip_yield(long *skip);
 +extern spinlock_t hmbird_tasks_lock;
-+extern int scx_systemui_pid;
++extern pid_t scx_systemui_pid;
 +
 +struct yield_opt_params {
 +	int enable;
@@ -7671,22 +7802,22 @@ new file mode 100644
 +extern char saved_gov[NR_CPUS][MAX_GOV_LEN];
 +
 +#endif
-
 diff --git a/kernel/sched/idle.c b/kernel/sched/idle.c
+index 624ef80..0dcf554 100644
 --- a/kernel/sched/idle.c
 +++ b/kernel/sched/idle.c
-@@ -9,6 +9,10 @@
- 
+@@ -10,6 +10,10 @@
  /* Linker adds these: start and end of __cpuidle functions */
  extern char __cpuidle_text_start[], __cpuidle_text_end[];
-+
+ 
 +#ifdef CONFIG_HMBIRD_SCHED
 +#include "hmbird.h"
 +#endif
- 
++
  /**
   * sched_idle_set_state - Record idle state for the current CPU.
-@@ -454,12 +458,20 @@
+  * @idle_state: State to record.
+@@ -454,12 +458,20 @@ static void put_prev_task_idle(struct rq *rq, struct task_struct *prev, struct t
  {
  	dl_server_update_idle_time(rq, prev);
  	scx_update_idle(rq, false, true);
@@ -7708,9 +7839,10 @@ diff --git a/kernel/sched/idle.c b/kernel/sched/idle.c
  	next->se.exec_start = rq_clock_task(rq);
  
 diff --git a/kernel/sched/sched.h b/kernel/sched/sched.h
+index 69dc772..8038b00 100644
 --- a/kernel/sched/sched.h
 +++ b/kernel/sched/sched.h
-@@ -2644,6 +2644,10 @@
+@@ -2644,6 +2644,10 @@ extern const struct sched_class dl_sched_class;
  extern const struct sched_class rt_sched_class;
  extern const struct sched_class fair_sched_class;
  extern const struct sched_class idle_sched_class;
@@ -7721,46 +7853,73 @@ diff --git a/kernel/sched/sched.h b/kernel/sched/sched.h
  
  #ifdef CONFIG_SCHED_CLASS_EXT
  extern const struct sched_class ext_sched_class;
-@@ -2670,6 +2674,23 @@
- 		class++;
- 	if (!scx_enabled() && class == &ext_sched_class)
- 		class++;
-+#endif
+@@ -2661,16 +2665,45 @@ DECLARE_STATIC_KEY_FALSE(__scx_switched_all);	/* all fair class tasks on SCX */
+ /*
+  * Iterate only active classes. SCX can take over all fair tasks or be
+  * completely disabled. If the former, skip fair. If the latter, skip SCX.
++ *
++ * Class layout (high -> low): stop, dl, rt, fair, hmbird, ext, idle.
++ * A class is skipped when it is not currently active:
++ *   - fair   : skipped if HMBIRD ops are running (fair tasks moved to HMBIRD)
++ *              or SCX switched all fair tasks to itself;
++ *   - hmbird : skipped if HMBIRD ops are not running;
++ *   - ext    : skipped if SCX is not enabled.
++ * The loop walks down until the first active class; idle is always active,
++ * so it is guaranteed to terminate (idle itself is never skipped).
+  */
+ static inline const struct sched_class *next_active_class(const struct sched_class *class)
+ {
+ 	class++;
++
++	while (class < &idle_sched_class) {
++		if (class == &fair_sched_class) {
 +#ifdef CONFIG_HMBIRD_SCHED
-+	if (hmbird_ops_running() && class == &fair_sched_class)
-+		class++;
-+	if (!hmbird_ops_running() && class == &hmbird_sched_class)
-+		class++;
-+#ifdef CONFIG_SCHED_CLASS_EXT
-+	/*
-+	 * v30 fix: the !hmbird_enabled() skip above may have
-+	 * advanced @class to ext; re-check the SCX-disabled
-+	 * skip so balance_scx()/pick_task_scx() are never
-+	 * reached before scx_ops_init() (global_dsqs == NULL
-+	 * until ext.c scx_ops_init allocates it).
-+	 */
-+	if (!scx_enabled() && class == &ext_sched_class)
-+		class++;
++			if (hmbird_ops_running())
++				goto next;
 +#endif
+ #ifdef CONFIG_SCHED_CLASS_EXT
+-	if (scx_switched_all() && class == &fair_sched_class)
+-		class++;
+-	if (!scx_enabled() && class == &ext_sched_class)
+-		class++;
++			if (scx_switched_all())
++				goto next;
++#endif
++			break;
++		}
++#ifdef CONFIG_HMBIRD_SCHED
++		if (class == &hmbird_sched_class && !hmbird_ops_running())
++			goto next;
++#endif
++#ifdef CONFIG_SCHED_CLASS_EXT
++		if (class == &ext_sched_class && !scx_enabled())
++			goto next;
  #endif
++		break;
++next:
++		class++;
++	}
++
  	return class;
  }
+ 
 diff --git a/kernel/sched/syscalls.c b/kernel/sched/syscalls.c
+index 7887aa0..e3ef29c 100644
 --- a/kernel/sched/syscalls.c
 +++ b/kernel/sched/syscalls.c
-@@ -15,6 +15,11 @@
- 
+@@ -16,6 +16,11 @@
  #include "sched.h"
  #include "autogroup.h"
-+
+ 
 +#ifdef CONFIG_HMBIRD_SCHED
 +#include "hmbird.h"
 +#include "hmbird/slim.h"
 +#endif
- 
++
  #include <trace/hooks/sched.h>
  #undef TRACE_INCLUDE_PATH
-@@ -561,6 +566,9 @@
+ 
+@@ -561,6 +566,9 @@ int __sched_setscheduler(struct task_struct *p,
  	int queue_flags = DEQUEUE_SAVE | DEQUEUE_MOVE | DEQUEUE_NOCLOCK;
  	struct rq *rq;
  	bool cpuset_locked = false;
@@ -7770,7 +7929,7 @@ diff --git a/kernel/sched/syscalls.c b/kernel/sched/syscalls.c
  
  	/* The pi code expects interrupts enabled */
  	BUG_ON(pi && in_interrupt());
-@@ -626,6 +634,9 @@
+@@ -626,6 +634,9 @@ recheck:
  	 * To be able to change p->policy safely, the appropriate
  	 * runqueue lock must be held.
  	 */
@@ -7780,7 +7939,7 @@ diff --git a/kernel/sched/syscalls.c b/kernel/sched/syscalls.c
  	rq = task_rq_lock(p, &rf);
  	update_rq_clock(rq);
  
-@@ -637,7 +648,11 @@
+@@ -637,7 +648,11 @@ recheck:
  		goto unlock;
  	}
  
@@ -7792,7 +7951,7 @@ diff --git a/kernel/sched/syscalls.c b/kernel/sched/syscalls.c
  	if (retval)
  		goto unlock;
  
-@@ -699,6 +714,9 @@
+@@ -699,6 +714,9 @@ change:
  	if (unlikely(oldpolicy != -1 && oldpolicy != p->policy)) {
  		policy = oldpolicy = -1;
  		task_rq_unlock(rq, p, &rf);
@@ -7802,7 +7961,7 @@ diff --git a/kernel/sched/syscalls.c b/kernel/sched/syscalls.c
  		if (cpuset_locked)
  			cpuset_unlock();
  		goto recheck;
-@@ -774,6 +792,9 @@
+@@ -774,6 +792,9 @@ change:
  	preempt_disable();
  	head = splice_balance_callbacks(rq);
  	task_rq_unlock(rq, p, &rf);
@@ -7812,7 +7971,7 @@ diff --git a/kernel/sched/syscalls.c b/kernel/sched/syscalls.c
  
  	if (pi) {
  		if (cpuset_locked)
-@@ -789,6 +810,9 @@
+@@ -789,6 +810,9 @@ change:
  
  unlock:
  	task_rq_unlock(rq, p, &rf);
@@ -7822,7 +7981,7 @@ diff --git a/kernel/sched/syscalls.c b/kernel/sched/syscalls.c
  	if (cpuset_locked)
  		cpuset_unlock();
  	return retval;
-@@ -1433,6 +1457,9 @@
+@@ -1433,6 +1457,9 @@ static void do_sched_yield(void)
  	long skip = 0;
  
  	trace_android_rvh_before_do_sched_yield(&skip);
@@ -7832,7 +7991,7 @@ diff --git a/kernel/sched/syscalls.c b/kernel/sched/syscalls.c
  	if (skip)
  		return;
  
-@@ -1584,6 +1611,11 @@
+@@ -1584,6 +1611,11 @@ SYSCALL_DEFINE1(sched_get_priority_max, int, policy)
  	case SCHED_EXT:
  		ret = 0;
  		break;
@@ -7844,7 +8003,7 @@ diff --git a/kernel/sched/syscalls.c b/kernel/sched/syscalls.c
  	}
  	return ret;
  }
-@@ -1611,6 +1643,12 @@
+@@ -1611,6 +1643,12 @@ SYSCALL_DEFINE1(sched_get_priority_min, int, policy)
  	case SCHED_IDLE:
  	case SCHED_EXT:
  		ret = 0;
@@ -7858,9 +8017,11 @@ diff --git a/kernel/sched/syscalls.c b/kernel/sched/syscalls.c
  	return ret;
  }
 diff --git a/kernel/time/tick-sched.c b/kernel/time/tick-sched.c
+index ed59a40..470b26d 100644
 --- a/kernel/time/tick-sched.c
 +++ b/kernel/time/tick-sched.c
-@@ -36,6 +42,10 @@
+@@ -35,6 +35,10 @@
+ 
  #include <trace/events/timer.h>
  
 +#ifdef CONFIG_HMBIRD_SCHED
@@ -7870,10 +8031,9 @@ diff --git a/kernel/time/tick-sched.c b/kernel/time/tick-sched.c
  /*
   * Per-CPU nohz control structure
   */
- static DEFINE_PER_CPU(struct tick_sched, tick_cpu_sched);
-@@ -1219,5 +1223,9 @@
--	trace_android_vh_tick_nohz_idle_stop_tick(NULL);
-+	trace_android_vh_tick_nohz_idle_stop_tick(NULL);
+@@ -1218,6 +1222,10 @@ void tick_nohz_idle_stop_tick(void)
+ 
+ 	trace_android_vh_tick_nohz_idle_stop_tick(NULL);
  
 +#ifdef CONFIG_HMBIRD_SCHED
 +	android_vh_tick_nohz_idle_stop_tick_handler(NULL,NULL);

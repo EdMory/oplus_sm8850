@@ -920,17 +920,17 @@ diff --git a/kernel/sched/core.c b/kernel/sched/core.c
  
  		if (block && (prev_state & TASK_UNINTERRUPTIBLE)
  			&& trace_sched_blocked_reason_enabled()) {
-@@ -8246,6 +8360,10 @@
- #ifdef CONFIG_SCHED_CLASS_EXT
- 	if (task_should_scx(policy))
- 		return &ext_sched_class;
-+#endif
-+#ifdef CONFIG_HMBIRD_SCHED
-+	if (policy == SCHED_HMBIRD && hmbird_ops_running())
-+		return &hmbird_sched_class;
- #endif
+@@ -8234,6 +8348,10 @@
+ 	if (dl_prio(prio))
+ 		return &dl_sched_class;
  
- 	return &fair_sched_class;
++#ifdef CONFIG_HMBIRD_SCHED
++	if (hmbird_enabled())
++		return &hmbird_sched_class;
++#endif
+ #ifdef CONFIG_SCHED_CLASS_EXT
+ 	trace_android_vh_task_should_scx(&should_scx, policy, prio);
+ 	if (should_scx)
 @@ -9780,6 +9898,9 @@
  #endif
  	init_sched_fair_class();
@@ -941,6 +941,14 @@ diff --git a/kernel/sched/core.c b/kernel/sched/core.c
  
  	psi_init();
  
+@@ -10226,5 +10347,6 @@
+ 	int ret;
+ 
+-	ret = scx_tg_online(tg);
++	hmbird_tg_online(tg);
++	ret = scx_tg_online(tg);
+ 	if (ret)
+ 		return ret;
 @@ -10269,6 +10390,68 @@
  	trace_android_vh_cpu_cgroup_css_free(css);
  }
@@ -7849,3 +7857,28 @@ diff --git a/kernel/sched/syscalls.c b/kernel/sched/syscalls.c
  	}
  	return ret;
  }
+diff --git a/kernel/time/tick-sched.c b/kernel/time/tick-sched.c
+--- a/kernel/time/tick-sched.c
++++ b/kernel/time/tick-sched.c
+@@ -36,6 +42,10 @@
+ #include <trace/events/timer.h>
+ 
++#ifdef CONFIG_HMBIRD_SCHED
++extern void android_vh_tick_nohz_idle_stop_tick_handler(void *unused, void *data);
++#endif
++
+ /*
+  * Per-CPU nohz control structure
+  */
+ static DEFINE_PER_CPU(struct tick_sched, tick_cpu_sched);
+@@ -1219,5 +1223,9 @@
+-	trace_android_vh_tick_nohz_idle_stop_tick(NULL);
++	trace_android_vh_tick_nohz_idle_stop_tick(NULL);
+ 
++#ifdef CONFIG_HMBIRD_SCHED
++	android_vh_tick_nohz_idle_stop_tick_handler(NULL,NULL);
++#endif
++
+ 	/*
+ 	 * If tick_nohz_get_sleep_length() ran tick_nohz_next_event(), the
+ 	 * tick timer expiration time is known already.

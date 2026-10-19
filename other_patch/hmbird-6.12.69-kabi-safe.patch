@@ -1,14 +1,13 @@
 diff --git a/arch/arm64/configs/gki_defconfig b/arch/arm64/configs/gki_defconfig
-index ea9b72f..3146eb9 100644
+index ea9b72f..d468f8e 100644
 --- a/arch/arm64/configs/gki_defconfig
 +++ b/arch/arm64/configs/gki_defconfig
 @@ -9,7 +9,9 @@ CONFIG_BPF_JIT_ALWAYS_ON=y
  # CONFIG_BPF_UNPRIV_DEFAULT_OFF is not set
  CONFIG_BPF_LSM=y
  CONFIG_PREEMPT=y
--CONFIG_SCHED_CLASS_EXT=y
-+# SM8850: sched_ext off, hmbird on (only one custom class active)
-+CONFIG_SCHED_CLASS_EXT=n
++# SM8850: sched_ext on, hmbird on (coexist)
+ CONFIG_SCHED_CLASS_EXT=y
 +CONFIG_HMBIRD_SCHED=y
  CONFIG_IRQ_TIME_ACCOUNTING=y
  CONFIG_TASKSTATS=y

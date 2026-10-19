@@ -1,11 +1,14 @@
 diff --git a/arch/arm64/configs/gki_defconfig b/arch/arm64/configs/gki_defconfig
-index ea9b72f..8741919 100644
+index ea9b72f..3146eb9 100644
 --- a/arch/arm64/configs/gki_defconfig
 +++ b/arch/arm64/configs/gki_defconfig
-@@ -10,6 +10,7 @@ CONFIG_BPF_JIT_ALWAYS_ON=y
+@@ -9,7 +9,9 @@ CONFIG_BPF_JIT_ALWAYS_ON=y
+ # CONFIG_BPF_UNPRIV_DEFAULT_OFF is not set
  CONFIG_BPF_LSM=y
  CONFIG_PREEMPT=y
- CONFIG_SCHED_CLASS_EXT=y
+-CONFIG_SCHED_CLASS_EXT=y
++# SM8850: sched_ext off, hmbird on (only one custom class active)
++CONFIG_SCHED_CLASS_EXT=n
 +CONFIG_HMBIRD_SCHED=y
  CONFIG_IRQ_TIME_ACCOUNTING=y
  CONFIG_TASKSTATS=y
@@ -1484,10 +1487,10 @@ index 0000000..73c3f6f
 +#endif /*_EXT_H_*/
 diff --git a/kernel/sched/hmbird/hmbird.c b/kernel/sched/hmbird/hmbird.c
 new file mode 100644
-index 0000000..bd135c2
+index 0000000..aa169e2
 --- /dev/null
 +++ b/kernel/sched/hmbird/hmbird.c
-@@ -0,0 +1,4413 @@
+@@ -0,0 +1,4445 @@
 +// SPDX-License-Identifier: GPL-2.0
 +
 +/*
@@ -2121,14 +2124,16 @@ index 0000000..bd135c2
 +	WARN_ON(!alloc_cpumask_var(&iso_masks.exclusive, GFP_KERNEL));
 +	WARN_ON(!alloc_cpumask_var(&iso_masks.big, GFP_KERNEL));
 +	WARN_ON(!alloc_cpumask_var(&iso_masks.little, GFP_KERNEL));
++	/* SM8850: 2+6 topology -- 2 prime = big, 6 performance = little.
++	 * Keep partial/ex_free/exclusive empty by default. */
 +	cpumask_set_cpu(0, iso_masks.big);
 +	cpumask_set_cpu(1, iso_masks.big);
-+	cpumask_set_cpu(2, iso_masks.big);
-+	cpumask_set_cpu(3, iso_masks.big);
-+	cpumask_set_cpu(4, iso_masks.big);
-+	cpumask_set_cpu(5, iso_masks.ex_free);
-+	cpumask_set_cpu(6, iso_masks.partial);
-+	cpumask_set_cpu(7, iso_masks.ex_free);
++	cpumask_set_cpu(2, iso_masks.little);
++	cpumask_set_cpu(3, iso_masks.little);
++	cpumask_set_cpu(4, iso_masks.little);
++	cpumask_set_cpu(5, iso_masks.little);
++	cpumask_set_cpu(6, iso_masks.little);
++	cpumask_set_cpu(7, iso_masks.little);
 +}
 +
 +extern spinlock_t css_set_lock;
@@ -3053,18 +3058,25 @@ index 0000000..bd135c2
 +		return -1;
 +
 +	if (!strcmp(cgrp->kn->name, "display")
-+			|| !strcmp(cgrp->kn->name, "multimedia"))
++			|| !strcmp(cgrp->kn->name, "multimedia")
++			|| !strcmp(cgrp->kn->name, "audio")
++			|| !strcmp(cgrp->kn->name, "camera")
++			|| !strcmp(cgrp->kn->name, "camera-daemon"))
 +		idx = 5; /* 8ms */
 +	else if (!strcmp(cgrp->kn->name, "top-app")
 +			|| !strcmp(cgrp->kn->name, "ss-top"))
 +		idx = 6; /* 16ms */
 +	else if (!strcmp(cgrp->kn->name, "ssfg")
-+			|| !strcmp(cgrp->kn->name, "foreground"))
++			|| !strcmp(cgrp->kn->name, "foreground")
++			|| !strcmp(cgrp->kn->name, "nnapi-hal"))
 +		idx = 7; /* 32ms */
 +	else if (!strcmp(cgrp->kn->name, "bg")
 +			|| !strcmp(cgrp->kn->name, "log")
 +			|| !strcmp(cgrp->kn->name, "dex2oat")
-+			|| !strcmp(cgrp->kn->name, "background"))
++			|| !strcmp(cgrp->kn->name, "background")
++			|| !strcmp(cgrp->kn->name, "system-background")
++			|| !strcmp(cgrp->kn->name, "restricted")
++			|| !strcmp(cgrp->kn->name, "rt"))
 +		idx = 9; /* 128ms */
 +	else
 +		idx = DEFAULT_CGROUP_DL_IDX; /* 64ms */
@@ -3765,6 +3777,10 @@ index 0000000..bd135c2
 +{
 +	int fitable = 1;
 +
++	/* SM8850: never place/consume a task on a cpu outside its affinity. */
++	if (!cpumask_test_cpu(cpu, p->cpus_ptr))
++		fitable = 0;
++
 +	return fitable;
 +}
 +
@@ -4274,6 +4290,11 @@ index 0000000..bd135c2
 +	else
 +		cpumask_copy(&tmp, iso_masks.big);
 +
++	/* SM8850: keep within task affinity. */
++	cpumask_and(&tmp, &tmp, p->cpus_ptr);
++	if (cpumask_empty(&tmp))
++		return -EFAULT;
++
 +	cpu = hmbird_pick_idle_cpu(&tmp);
 +	if (cpu >= 0)
 +		return cpu;
@@ -4321,11 +4342,17 @@ index 0000000..bd135c2
 +					struct cpumask *mask, int *prev_mask)
 +{
 +	int cpu;
++	struct cpumask tmp = {.bits = {0}};
 +
-+	cpu = hmbird_pick_idle_cpu(mask);
++	/* SM8850: intersect with p->cpus_ptr so affinity is always honored. */
++	cpumask_and(&tmp, mask, p->cpus_ptr);
++	if (cpumask_empty(&tmp))
++		return -1;
++
++	cpu = hmbird_pick_idle_cpu(&tmp);
 +	if (cpu >= 0)
 +		return cpu;
-+	return cpumask_distribute_next(mask, prev_mask);
++	return cpumask_distribute_next(&tmp, prev_mask);
 +}
 +
 +static bool task_only_blongs_to_cluster(struct task_struct *p, enum cpu_type type)
@@ -4409,14 +4436,16 @@ index 0000000..bd135c2
 +		return cpu;
 +	}
 +
-+	/* if the previous CPU is idle, dispatch directly to it */
-+	if (hmbird_test_and_clear_cpu_idle(prev_cpu) || is_valid_cpu(prev_cpu)) {
++	/* SM8850: fix dead branch -- only reuse prev_cpu when it is actually
++	 * idle AND within the task's affinity; otherwise keep searching. */
++	if (hmbird_test_and_clear_cpu_idle(prev_cpu) &&
++	    cpumask_test_cpu(prev_cpu, p->cpus_ptr)) {
 +		slim_stats_record(SELECT_CPU, 0, 0, 0);
 +		return prev_cpu;
 +	}
 +
-+	cpu = hmbird_pick_idle_cpu(cpu_possible_mask);
-+	if (is_valid_cpu(prev_cpu)) {
++	cpu = hmbird_pick_idle_cpu(p->cpus_ptr);
++	if (is_valid_cpu(cpu)) {
 +		slim_stats_record(SELECT_CPU, 0, 0, 0);
 +		return cpu;
 +	}
@@ -4424,12 +4453,15 @@ index 0000000..bd135c2
 +	if (prev_cpu_misfit(prev_cpu)) {
 +		slim_stats_record(SELECT_CPU, 0, 0, 0);
 +		cpu = repick_fallback_cpu();
-+		if (is_valid_cpu(cpu))
++		if (is_valid_cpu(cpu) && cpumask_test_cpu(cpu, p->cpus_ptr))
 +			return cpu;
 +	}
 +
++	/* last resort: never violate cpus_allowed. */
 +	slim_stats_record(SELECT_CPU, 0, 0, 0);
-+	return prev_cpu;
++	if (is_valid_cpu(prev_cpu) && cpumask_test_cpu(prev_cpu, p->cpus_ptr))
++		return prev_cpu;
++	return cpumask_any(p->cpus_ptr);
 +}
 +
 +static int select_task_rq_hmbird(struct task_struct *p, int prev_cpu, int wake_flags)
@@ -5010,8 +5042,7 @@ index 0000000..bd135c2
 +		return;
 +	} else if (dl_prio(prio))
 +		p->sched_class = &dl_sched_class;
-+	else if (on_hmbird && rt_prio(prio))
-+		p->sched_class = &hmbird_sched_class;
++	/* SM8850 RT policy: keep native RT class, never fold RT into hmbird. */
 +	else if (rt_prio(prio))
 +		p->sched_class = &rt_sched_class;
 +	else if (on_hmbird)
@@ -5054,6 +5085,10 @@ index 0000000..bd135c2
 +
 +static void hb_timer_start(void)
 +{
++	/* SM8850: heartbeat disabled -> keep the watchdog timer off. */
++	if (!heartbeat_enable)
++		return;
++
 +	mod_timer(&hb_timer, jiffies + HEARTBEAT_CHECK_INTERVAL);
 +}
 +
@@ -6135,10 +6170,10 @@ index 0000000..c7fa979
 +#endif /*__HMBIRD_SCHED__*/
 diff --git a/kernel/sched/hmbird/hmbird_sched_proc.c b/kernel/sched/hmbird/hmbird_sched_proc.c
 new file mode 100644
-index 0000000..ff8b295
+index 0000000..00c9852
 --- /dev/null
 +++ b/kernel/sched/hmbird/hmbird_sched_proc.c
-@@ -0,0 +1,566 @@
+@@ -0,0 +1,572 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * Copyright (C) 2024 Oplus. All rights reserved.
@@ -6162,38 +6197,38 @@ index 0000000..ff8b295
 +#define LOAD_TRACK_DIR          "slim_walt"
 +#define HMBIRD_PROC_PERMISSION  0666
 +
-+int scx_enable;
-+int partial_enable;
++int scx_enable = 1;
++int partial_enable = 1;
 +int cpuctrl_high_ratio = 55;
 +int cpuctrl_low_ratio = 40;
 +int slim_stats;
 +int hmbirdcore_debug;
 +int slim_for_app;
-+int misfit_ds = 90;
-+unsigned int highres_tick_ctrl;
++int misfit_ds = 95;
++unsigned int highres_tick_ctrl = 1;
 +unsigned int highres_tick_ctrl_dbg;
 +int cpu7_tl = 70;
-+int slim_walt_ctrl;
++int slim_walt_ctrl = 1;
 +int slim_walt_dump;
 +int slim_walt_policy;
 +int slim_gov_debug;
 +int scx_gov_ctrl = 1;
-+int sched_ravg_window_frame_per_sec = 125;
-+int parctrl_high_ratio = 55;
-+int parctrl_low_ratio = 40;
-+int parctrl_high_ratio_l = 65;
-+int parctrl_low_ratio_l = 50;
-+int isoctrl_high_ratio = 75;
-+int isoctrl_low_ratio = 60;
++int sched_ravg_window_frame_per_sec = 120;
++int parctrl_high_ratio = 60;
++int parctrl_low_ratio = 45;
++int parctrl_high_ratio_l = 70;
++int parctrl_low_ratio_l = 55;
++int isoctrl_high_ratio = 80;
++int isoctrl_low_ratio = 65;
 +int isolate_ctrl;
 +int iso_free_rescue;
 +int heartbeat;
-+int heartbeat_enable = 1;
++int heartbeat_enable = 0;
 +int watchdog_enable;
 +int save_gov;
-+u64 cpu_cluster_masks;
++u64 cpu_cluster_masks = 0xFC3000000ULL; /* 2+6: big=CPU0-1, little=CPU2-7 (SM8850) */
 +int hmbird_preempt_policy;
-+int cluster_separate;
++int cluster_separate = 1;
 +
 +char saved_gov[NR_CPUS][MAX_GOV_LEN];
 +
@@ -6387,15 +6422,12 @@ index 0000000..ff8b295
 +{
 +	u64 *pval = (u64 *)pde_data(file_inode(file));
 +
-+	/* v35: gate until hmbird actually enabled */
-+	if (!hmbird_enabled())
-+		return -EINVAL;
-+
++	/* SM8850: drop the v35 gating contradiction; allow write in any state
++	 * and apply the cluster remap unconditionally (boot default is 2+6). */
 +	if (set_proc_buf_val_u64(file, buf, count, pval))
 +		return -EFAULT;
 +
-+	if (scx_enable == 0)
-+		set_cpu_cluster(*pval);
++	set_cpu_cluster(*pval);
 +
 +	return count;
 +}
@@ -6700,6 +6732,15 @@ index 0000000..ff8b295
 +					hmbird_dir,
 +					&hmbird_common_proc_ops,
 +					&cluster_separate);
++
++	/* SM8850: scx_enable defaults to 1 -> auto-enable hmbird at boot. */
++	if (scx_enable) {
++		slim_walt_enable(true);
++		WRITE_ONCE(sw_type, HMBIRD_SWITCH_PREP);
++		if (hmbird_ctrl(true))
++			pr_warn("<hmbird_sched>: boot auto-enable failed, check dmesg
++");
++	}
 +
 +	return 0;
 +}

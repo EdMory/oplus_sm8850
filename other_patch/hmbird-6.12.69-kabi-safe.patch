@@ -1041,7 +1041,18 @@ diff --git a/kernel/sched/core.c b/kernel/sched/core.c
 diff --git a/kernel/sched/debug.c b/kernel/sched/debug.c
 --- a/kernel/sched/debug.c
 +++ b/kernel/sched/debug.c
-@@ -530,6 +530,9 @@
+@@ -6,6 +6,10 @@
+  *
+  * Copyright(C) 2007, Red Hat, Inc., Ingo Molnar
+  */
++
++#ifdef CONFIG_HMBIRD_SCHED
++#include "hmbird.h"
++#endif
+ 
+ /*
+  * This allows printing both to /sys/kernel/debug/sched/debug and
+@@ -530,6 +534,9 @@
  #endif
  
  	debugfs_create_file("debug", 0444, debugfs_sched, NULL, &sched_debug_fops);
@@ -1051,7 +1062,7 @@ diff --git a/kernel/sched/debug.c b/kernel/sched/debug.c
  
  	debugfs_fair_server_init();
  
-@@ -1243,6 +1246,13 @@
+@@ -1243,6 +1250,13 @@
  	}
  
  	__P(nr_switches);
@@ -7825,13 +7836,14 @@ diff --git a/kernel/sched/syscalls.c b/kernel/sched/syscalls.c
  	}
  	return ret;
  }
-@@ -1611,6 +1643,10 @@
+@@ -1611,6 +1643,11 @@
  	case SCHED_IDLE:
  	case SCHED_EXT:
  		ret = 0;
 +#ifdef CONFIG_HMBIRD_SCHED
 +	case SCHED_HMBIRD:
 +		ret = 0;
++		break;
 +#endif
  	}
  	return ret;

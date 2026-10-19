@@ -6172,10 +6172,10 @@ index 0000000..c7fa979
 +#endif /*__HMBIRD_SCHED__*/
 diff --git a/kernel/sched/hmbird/hmbird_sched_proc.c b/kernel/sched/hmbird/hmbird_sched_proc.c
 new file mode 100644
-index 0000000..e5d5506
+index 0000000..23041fa
 --- /dev/null
 +++ b/kernel/sched/hmbird/hmbird_sched_proc.c
-@@ -0,0 +1,571 @@
+@@ -0,0 +1,563 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * Copyright (C) 2024 Oplus. All rights reserved.
@@ -6734,14 +6734,6 @@ index 0000000..e5d5506
 +					hmbird_dir,
 +					&hmbird_common_proc_ops,
 +					&cluster_separate);
-+
-+	/* SM8850: scx_enable defaults to 1 -> auto-enable hmbird at boot. */
-+	if (scx_enable) {
-+		slim_walt_enable(true);
-+		WRITE_ONCE(sw_type, HMBIRD_SWITCH_PROC);
-+		if (hmbird_ctrl(true))
-+			pr_warn("<hmbird_sched>: boot auto-enable failed, check dmesg\n");
-+	}
 +
 +	return 0;
 +}

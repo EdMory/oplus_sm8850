@@ -7836,10 +7836,11 @@ diff --git a/kernel/sched/syscalls.c b/kernel/sched/syscalls.c
  	}
  	return ret;
  }
-@@ -1611,6 +1643,11 @@
+@@ -1611,6 +1643,12 @@
  	case SCHED_IDLE:
  	case SCHED_EXT:
  		ret = 0;
++		break;
 +#ifdef CONFIG_HMBIRD_SCHED
 +	case SCHED_HMBIRD:
 +		ret = 0;

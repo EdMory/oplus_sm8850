@@ -711,7 +711,7 @@ index fae1f5c..fdea0f7 100644
 +
  #include "syscalls.c"
 diff --git a/kernel/sched/core.c b/kernel/sched/core.c
-index 3caa543..c93d288 100644
+index 3caa543..ac967db 100644
 --- a/kernel/sched/core.c
 +++ b/kernel/sched/core.c
 @@ -86,6 +86,12 @@
@@ -751,10 +751,14 @@ index 3caa543..c93d288 100644
  #ifdef CONFIG_SCHED_CLASS_EXT
  	if (pa == MAX_RT_PRIO + MAX_NICE + 1)	/* ext */
  		return scx_prio_less(a, b, in_fi);
-@@ -1415,6 +1431,10 @@ bool sched_can_stop_tick(struct rq *rq)
+@@ -1413,8 +1429,14 @@ bool sched_can_stop_tick(struct rq *rq)
+ 	 * left. For CFS, if there's more than one we need the tick for
+ 	 * involuntary preemption. For SCX, ask.
  	 */
++#ifdef CONFIG_SCHED_CLASS_EXT
  	if (scx_enabled() && !scx_can_stop_tick(rq))
  		return false;
++#endif
 +#ifdef CONFIG_HMBIRD_SCHED
 +	if (hmbird_ops_running() && !hmbird_can_stop_tick(rq))
 +		return false;
@@ -762,7 +766,7 @@ index 3caa543..c93d288 100644
  
  	if (rq->cfs.h_nr_queued > 1)
  		return false;
-@@ -2275,6 +2295,42 @@ void deactivate_task(struct rq *rq, struct task_struct *p, int flags)
+@@ -2275,6 +2297,42 @@ void deactivate_task(struct rq *rq, struct task_struct *p, int flags)
  }
  EXPORT_SYMBOL_GPL(deactivate_task);
  
@@ -805,7 +809,7 @@ index 3caa543..c93d288 100644
  static void block_task(struct rq *rq, struct task_struct *p, int flags)
  {
  	if (dequeue_task(rq, p, DEQUEUE_SLEEP | flags))
-@@ -5306,6 +5362,9 @@ late_initcall(sched_core_sysctl_init);
+@@ -5306,6 +5364,9 @@ late_initcall(sched_core_sysctl_init);
  int sched_fork(unsigned long clone_flags, struct task_struct *p)
  {
  	int should_scx = 0;
@@ -815,7 +819,7 @@ index 3caa543..c93d288 100644
  
  	trace_android_rvh_sched_fork(p);
  
-@@ -5353,6 +5412,11 @@ int sched_fork(unsigned long clone_flags, struct task_struct *p)
+@@ -5353,6 +5414,11 @@ int sched_fork(unsigned long clone_flags, struct task_struct *p)
  		return -EAGAIN;
  
  	scx_pre_fork(p);
@@ -827,7 +831,7 @@ index 3caa543..c93d288 100644
  
  	trace_android_vh_setscheduler_class(NULL, &should_scx, p, p->policy, p->prio);
  	trace_android_vh_task_should_scx(&should_scx, p->policy, p->prio);
-@@ -5361,6 +5425,10 @@ int sched_fork(unsigned long clone_flags, struct task_struct *p)
+@@ -5361,6 +5427,10 @@ int sched_fork(unsigned long clone_flags, struct task_struct *p)
  #ifdef CONFIG_SCHED_CLASS_EXT
  	} else if (task_should_scx(p->policy) || should_scx) {
  		p->sched_class = &ext_sched_class;
@@ -838,7 +842,7 @@ index 3caa543..c93d288 100644
  #endif
  	} else {
  		p->sched_class = &fair_sched_class;
-@@ -5383,6 +5451,12 @@ int sched_fork(unsigned long clone_flags, struct task_struct *p)
+@@ -5383,6 +5453,12 @@ int sched_fork(unsigned long clone_flags, struct task_struct *p)
  	RB_CLEAR_NODE(&p->pushable_dl_tasks);
  #endif
  	return 0;
@@ -851,7 +855,7 @@ index 3caa543..c93d288 100644
  }
  
  int sched_cgroup_fork(struct task_struct *p, struct kernel_clone_args *kargs)
-@@ -5412,6 +5486,9 @@ int sched_cgroup_fork(struct task_struct *p, struct kernel_clone_args *kargs)
+@@ -5412,6 +5488,9 @@ int sched_cgroup_fork(struct task_struct *p, struct kernel_clone_args *kargs)
  	if (p->sched_class->task_fork)
  		p->sched_class->task_fork(p);
  	raw_spin_unlock_irqrestore(&p->pi_lock, flags);
@@ -861,7 +865,7 @@ index 3caa543..c93d288 100644
  
  	return scx_fork(p);
  }
-@@ -5419,12 +5496,18 @@ int sched_cgroup_fork(struct task_struct *p, struct kernel_clone_args *kargs)
+@@ -5419,12 +5498,18 @@ int sched_cgroup_fork(struct task_struct *p, struct kernel_clone_args *kargs)
  void sched_cancel_fork(struct task_struct *p)
  {
  	scx_cancel_fork(p);
@@ -880,7 +884,7 @@ index 3caa543..c93d288 100644
  }
  
  unsigned long to_ratio(u64 period, u64 runtime)
-@@ -6313,19 +6396,30 @@ void sched_tick(void)
+@@ -6313,19 +6398,30 @@ void sched_tick(void)
  	if (sched_feat(LATENCY_WARN) && resched_latency)
  		resched_latency_warn(cpu, resched_latency);
  
@@ -911,7 +915,7 @@ index 3caa543..c93d288 100644
  }
  
  #ifdef CONFIG_NO_HZ_FULL
-@@ -6637,6 +6731,16 @@ static void prev_balance(struct rq *rq, struct task_struct *prev,
+@@ -6637,6 +6733,16 @@ static void prev_balance(struct rq *rq, struct task_struct *prev,
  			start_class = &ext_sched_class;
  	}
  #endif
@@ -928,7 +932,7 @@ index 3caa543..c93d288 100644
  
  	/*
  	 * We must do the balancing pass before put_prev_task(), such
-@@ -6665,6 +6769,10 @@ __pick_next_task(struct rq *rq, struct task_struct *prev, struct rq_flags *rf)
+@@ -6665,6 +6771,10 @@ __pick_next_task(struct rq *rq, struct task_struct *prev, struct rq_flags *rf)
  
  	if (scx_enabled())
  		goto restart;
@@ -939,7 +943,7 @@ index 3caa543..c93d288 100644
  
  	/*
  	 * Optimization: we know that if all tasks are in the fair class we can
-@@ -6694,11 +6802,20 @@ restart:
+@@ -6694,11 +6804,20 @@ restart:
  	for_each_active_class(class) {
  		if (class->pick_next_task) {
  			p = class->pick_next_task(rq, prev);
@@ -961,7 +965,7 @@ index 3caa543..c93d288 100644
  				put_prev_set_next_task(rq, prev, p);
  				return p;
  			}
-@@ -7870,6 +7987,9 @@ keep_resched:
+@@ -7870,6 +7989,9 @@ keep_resched:
  					     prev->se.sched_delayed);
  
  		trace_sched_switch(preempt, prev, next, prev_state);
@@ -971,7 +975,7 @@ index 3caa543..c93d288 100644
  
  		if (block && (prev_state & TASK_UNINTERRUPTIBLE)
  			&& trace_sched_blocked_reason_enabled()) {
-@@ -8234,6 +8354,10 @@ const struct sched_class *__setscheduler_class(int policy, int prio)
+@@ -8234,6 +8356,10 @@ const struct sched_class *__setscheduler_class(int policy, int prio)
  	if (dl_prio(prio))
  		return &dl_sched_class;
  
@@ -982,7 +986,7 @@ index 3caa543..c93d288 100644
  #ifdef CONFIG_SCHED_CLASS_EXT
  	trace_android_vh_task_should_scx(&should_scx, policy, prio);
  	if (should_scx)
-@@ -9780,6 +9904,9 @@ void __init sched_init(void)
+@@ -9780,6 +9906,9 @@ void __init sched_init(void)
  #endif
  	init_sched_fair_class();
  	init_sched_ext_class();
@@ -992,7 +996,7 @@ index 3caa543..c93d288 100644
  
  	psi_init();
  
-@@ -10225,6 +10352,7 @@ static int cpu_cgroup_css_online(struct cgroup_subsys_state *css)
+@@ -10225,6 +10354,7 @@ static int cpu_cgroup_css_online(struct cgroup_subsys_state *css)
  	struct task_group *parent = css_tg(css->parent);
  	int ret;
  
@@ -1000,7 +1004,7 @@ index 3caa543..c93d288 100644
  	ret = scx_tg_online(tg);
  	if (ret)
  		return ret;
-@@ -10269,6 +10397,81 @@ static void cpu_cgroup_css_free(struct cgroup_subsys_state *css)
+@@ -10269,6 +10399,81 @@ static void cpu_cgroup_css_free(struct cgroup_subsys_state *css)
  	trace_android_vh_cpu_cgroup_css_free(css);
  }
  
@@ -1082,7 +1086,7 @@ index 3caa543..c93d288 100644
  static int cpu_cgroup_can_attach(struct cgroup_taskset *tset)
  {
  #ifdef CONFIG_RT_GROUP_SCHED
-@@ -10288,8 +10491,12 @@ static void cpu_cgroup_attach(struct cgroup_taskset *tset)
+@@ -10288,8 +10493,12 @@ static void cpu_cgroup_attach(struct cgroup_taskset *tset)
  	struct task_struct *task;
  	struct cgroup_subsys_state *css;
  
@@ -1096,7 +1100,7 @@ index 3caa543..c93d288 100644
  
  	trace_android_rvh_cpu_cgroup_attach(tset);
  
-@@ -10986,6 +11193,13 @@ static struct cftype cpu_legacy_files[] = {
+@@ -10986,6 +11195,13 @@ static struct cftype cpu_legacy_files[] = {
  		.read_u64 = cpu_uclamp_ls_read_u64,
  		.write_u64 = cpu_uclamp_ls_write_u64,
  	},
@@ -1487,10 +1491,10 @@ index 0000000..73c3f6f
 +#endif /*_EXT_H_*/
 diff --git a/kernel/sched/hmbird/hmbird.c b/kernel/sched/hmbird/hmbird.c
 new file mode 100644
-index 0000000..aa169e2
+index 0000000..1a494a4
 --- /dev/null
 +++ b/kernel/sched/hmbird/hmbird.c
-@@ -0,0 +1,4445 @@
+@@ -0,0 +1,4443 @@
 +// SPDX-License-Identifier: GPL-2.0
 +
 +/*
@@ -5859,8 +5863,6 @@ index 0000000..aa169e2
 +	u32 v;
 +	struct hmbird_entity *init_hmbird;
 +
-+	pr_debug("hmbird: patch v37 compiled in (ops_running gate)\n");
-+
 +	/*
 +	 * The following is to prevent the compiler from optimizing out the enum
 +	 * definitions so that BPF scheduler implementations can use them
@@ -6170,10 +6172,10 @@ index 0000000..c7fa979
 +#endif /*__HMBIRD_SCHED__*/
 diff --git a/kernel/sched/hmbird/hmbird_sched_proc.c b/kernel/sched/hmbird/hmbird_sched_proc.c
 new file mode 100644
-index 0000000..00c9852
+index 0000000..e5d5506
 --- /dev/null
 +++ b/kernel/sched/hmbird/hmbird_sched_proc.c
-@@ -0,0 +1,572 @@
+@@ -0,0 +1,571 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * Copyright (C) 2024 Oplus. All rights reserved.
@@ -6736,10 +6738,9 @@ index 0000000..00c9852
 +	/* SM8850: scx_enable defaults to 1 -> auto-enable hmbird at boot. */
 +	if (scx_enable) {
 +		slim_walt_enable(true);
-+		WRITE_ONCE(sw_type, HMBIRD_SWITCH_PREP);
++		WRITE_ONCE(sw_type, HMBIRD_SWITCH_PROC);
 +		if (hmbird_ctrl(true))
-+			pr_warn("<hmbird_sched>: boot auto-enable failed, check dmesg
-+");
++			pr_warn("<hmbird_sched>: boot auto-enable failed, check dmesg\n");
 +	}
 +
 +	return 0;

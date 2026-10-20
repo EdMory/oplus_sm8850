@@ -692,10 +692,10 @@ index fdc28e4..251fbdf 100644
  	cgroup_free(tsk);
  	task_numa_free(tsk, true);
 diff --git a/kernel/sched/build_policy.c b/kernel/sched/build_policy.c
-index fae1f5c..fdea0f7 100644
+index fae1f5c..5ea9e48 100644
 --- a/kernel/sched/build_policy.c
 +++ b/kernel/sched/build_policy.c
-@@ -63,4 +63,13 @@
+@@ -63,4 +63,14 @@
  # include "ext.c"
  #endif
  
@@ -706,6 +706,7 @@ index fae1f5c..fdea0f7 100644
 +# include "hmbird/hmbird_shadow_tick.c"
 +# include "hmbird/hmbird.c"
 +# include "hmbird/hmbird_misc.c"
++# include "hmbird/hmbird_gov.c"
 +#endif
 +
  #include "syscalls.c"
@@ -5937,6 +5938,243 @@ index 0000000..c030183
 +
 +	panic_blk_init();
 +}
+diff --git a/kernel/sched/hmbird/hmbird_gov.c b/kernel/sched/hmbird/hmbird_gov.c
+new file mode 100644
+index 0000000..838bf7c
+--- /dev/null
++++ b/kernel/sched/hmbird/hmbird_gov.c
+@@ -0,0 +1,231 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * HMBIRD cpufreq governor
++ *
++ * Registers hmbird as a real cpufreq governor so that the cpufreq core
++ * (cpufreq_register_governor() / struct cpufreq_governor call chain) can
++ * invoke it as a standalone scheduler: every policy switched to "hmbird"
++ * is driven directly from the hmbird WALT stats instead of schedutil.
++ *
++ * Frequency updates are triggered from the hmbird WALT window rollover
++ * (slim_walt_irq_work -> hmbird_gov_update_all()), i.e. the governor
++ * operates as an independent frequency scheduler rather than a passive
++ * util-data provider.
++ *
++ * Copyright (C) 2024 Oplus. All rights reserved.
++ */
++#include "hmbird_sched.h"
++#include "hmbird_util_track.h"
++
++struct hmbird_gov_policy {
++	struct cpufreq_policy	*policy;
++	unsigned int		min_freq;
++	unsigned int		max_freq;
++	unsigned int		cur_freq;
++	bool			started;
++	struct list_head	node;
++};
++
++static LIST_HEAD(hmbird_gov_policy_list);
++static DEFINE_SPINLOCK(hmbird_gov_lock);
++
++/*
++ * Aggregate WALT utilization of all CPUs sharing @policy. The returned
++ * value is normalized to ~[0, 1024] by slim_walt_cpu_util().
++ */
++static u16 hmbird_gov_policy_util(struct cpufreq_policy *policy)
++{
++	u16 util = 0, u;
++	int cpu;
++
++	for_each_cpu(cpu, policy->cpus)
++		util = max(util, slim_walt_cpu_util(cpu));
++
++	return util;
++}
++
++static unsigned int hmbird_gov_compute_target(struct hmbird_gov_policy *hg)
++{
++	struct cpufreq_policy *policy = hg->policy;
++	unsigned int min = hg->min_freq;
++	unsigned int max = hg->max_freq;
++	unsigned int target;
++	u16 util;
++
++	if (max <= min)
++		return max;
++
++	util = hmbird_gov_policy_util(policy);
++
++	target = min + (unsigned int)((unsigned long)(max - min) * util >> 10);
++	return clamp(target, min, max);
++}
++
++/*
++ * Called with all rq locks held from slim_walt_irq_work() on every WALT
++ * window rollover. Keeps the same lock nesting (rq -> gov -> cpufreq) as
++ * the regular schedutil hook.
++ */
++void hmbird_gov_update_all(void)
++{
++	struct hmbird_gov_policy *hg;
++	unsigned int target;
++	unsigned long flags;
++
++	spin_lock_irqsave(&hmbird_gov_lock, flags);
++	list_for_each_entry(hg, &hmbird_gov_policy_list, node) {
++		if (!hg->started)
++			continue;
++		target = hmbird_gov_compute_target(hg);
++		if (target == hg->cur_freq)
++			continue;
++		hg->cur_freq = target;
++		__cpufreq_driver_target(hg->policy, target, CPUFREQ_RELATION_L);
++	}
++	spin_unlock_irqrestore(&hmbird_gov_lock, flags);
++}
++
++static int hmbird_gov_init(struct cpufreq_policy *policy)
++{
++	struct hmbird_gov_policy *hg;
++	unsigned long flags;
++
++	if (!policy || policy->governor_data)
++		return -EINVAL;
++
++	hg = kzalloc(sizeof(*hg), GFP_KERNEL);
++	if (!hg)
++		return -ENOMEM;
++
++	hg->policy = policy;
++	hg->min_freq = policy->cpuinfo.min_freq;
++	hg->max_freq = policy->cpuinfo.max_freq;
++	hg->cur_freq = 0;
++	hg->started = false;
++	INIT_LIST_HEAD(&hg->node);
++
++	spin_lock_irqsave(&hmbird_gov_lock, flags);
++	list_add(&hg->node, &hmbird_gov_policy_list);
++	spin_unlock_irqrestore(&hmbird_gov_lock, flags);
++
++	policy->governor_data = hg;
++	return 0;
++}
++
++static void hmbird_gov_exit(struct cpufreq_policy *policy)
++{
++	struct hmbird_gov_policy *hg = policy->governor_data;
++	unsigned long flags;
++
++	if (!hg)
++		return;
++
++	spin_lock_irqsave(&hmbird_gov_lock, flags);
++	list_del(&hg->node);
++	spin_unlock_irqrestore(&hmbird_gov_lock, flags);
++
++	policy->governor_data = NULL;
++	kfree(hg);
++}
++
++static int hmbird_gov_start(struct cpufreq_policy *policy)
++{
++	struct hmbird_gov_policy *hg = policy->governor_data;
++	unsigned long flags;
++	unsigned int target;
++
++	if (!hg)
++		return -EINVAL;
++
++	spin_lock_irqsave(&hmbird_gov_lock, flags);
++	hg->min_freq = policy->min;
++	hg->max_freq = policy->max;
++	hg->started = true;
++	target = hmbird_gov_compute_target(hg);
++	hg->cur_freq = target;
++	spin_unlock_irqrestore(&hmbird_gov_lock, flags);
++
++	hmbird_info_systrace("<gov>:start hmbird governor cpu%u target %u kHz\n",
++			     policy->cpu, target);
++	return __cpufreq_driver_target(policy, target, CPUFREQ_RELATION_L);
++}
++
++static void hmbird_gov_stop(struct cpufreq_policy *policy)
++{
++	struct hmbird_gov_policy *hg = policy->governor_data;
++	unsigned long flags;
++
++	if (!hg)
++		return;
++
++	spin_lock_irqsave(&hmbird_gov_lock, flags);
++	hg->started = false;
++	spin_unlock_irqrestore(&hmbird_gov_lock, flags);
++}
++
++static void hmbird_gov_limits(struct cpufreq_policy *policy)
++{
++	struct hmbird_gov_policy *hg = policy->governor_data;
++	unsigned long flags;
++	unsigned int target;
++
++	if (!hg)
++		return;
++
++	spin_lock_irqsave(&hmbird_gov_lock, flags);
++	hg->min_freq = policy->min;
++	hg->max_freq = policy->max;
++
++	if (hg->started && hg->cur_freq > policy->max) {
++		target = policy->max;
++		hg->cur_freq = target;
++		__cpufreq_driver_target(policy, target, CPUFREQ_RELATION_HE);
++	} else if (hg->started && hg->cur_freq < policy->min) {
++		target = policy->min;
++		hg->cur_freq = target;
++		__cpufreq_driver_target(policy, target, CPUFREQ_RELATION_LE);
++	}
++	spin_unlock_irqrestore(&hmbird_gov_lock, flags);
++}
++
++static ssize_t hmbird_gov_show_setspeed(struct cpufreq_policy *policy,
++					char *buf)
++{
++	struct hmbird_gov_policy *hg = policy->governor_data;
++
++	if (!hg)
++		return -EINVAL;
++
++	return scnprintf(buf, PAGE_SIZE, "%u\n", hg->cur_freq);
++}
++
++static int hmbird_gov_store_setspeed(struct cpufreq_policy *policy,
++				     unsigned int freq)
++{
++	struct hmbird_gov_policy *hg = policy->governor_data;
++	unsigned long flags;
++
++	if (!hg || !hg->started)
++		return -EINVAL;
++
++	spin_lock_irqsave(&hmbird_gov_lock, flags);
++	hg->cur_freq = clamp(freq, hg->min_freq, hg->max_freq);
++	spin_unlock_irqrestore(&hmbird_gov_lock, flags);
++
++	return __cpufreq_driver_target(policy, hg->cur_freq, CPUFREQ_RELATION_L);
++}
++
++static struct cpufreq_governor hmbird_cpufreq_gov = {
++	.name			= "hmbird",
++	.init			= hmbird_gov_init,
++	.exit			= hmbird_gov_exit,
++	.start			= hmbird_gov_start,
++	.stop			= hmbird_gov_stop,
++	.limits			= hmbird_gov_limits,
++	.show_setspeed		= hmbird_gov_show_setspeed,
++	.store_setspeed		= hmbird_gov_store_setspeed,
++	.flags			= CPUFREQ_GOV_DYNAMIC_SWITCHING,
++	.owner			= THIS_MODULE,
++};
++
++cpufreq_governor_init(hmbird_cpufreq_gov);
 diff --git a/kernel/sched/hmbird/hmbird_misc.c b/kernel/sched/hmbird/hmbird_misc.c
 new file mode 100644
 index 0000000..b97f371
@@ -6068,10 +6306,10 @@ index 0000000..b97f371
 +}
 diff --git a/kernel/sched/hmbird/hmbird_sched.h b/kernel/sched/hmbird/hmbird_sched.h
 new file mode 100644
-index 0000000..c7fa979
+index 0000000..8b19cb2
 --- /dev/null
 +++ b/kernel/sched/hmbird/hmbird_sched.h
-@@ -0,0 +1,97 @@
+@@ -0,0 +1,101 @@
 +/* SPDX-License-Identifier: GPL-2.0-only */
 +/*
 + * Copyright (C) 2024 Oplus. All rights reserved.
@@ -6168,6 +6406,10 @@ index 0000000..c7fa979
 +void hmbird_misc_init(void);
 +
 +void hmbird_ops_init(struct hmbird_ops *hmbird_ops);
++
++/* hmbird cpufreq governor (hmbird_gov.c) */
++extern struct cpufreq_governor hmbird_cpufreq_gov;
++void hmbird_gov_update_all(void);
 +#endif /*__HMBIRD_SCHED__*/
 diff --git a/kernel/sched/hmbird/hmbird_sched_proc.c b/kernel/sched/hmbird/hmbird_sched_proc.c
 new file mode 100644
@@ -7112,10 +7354,10 @@ index 0000000..8468b40
 +#include <trace/define_trace.h>
 diff --git a/kernel/sched/hmbird/hmbird_util_track.c b/kernel/sched/hmbird/hmbird_util_track.c
 new file mode 100644
-index 0000000..d520a84
+index 0000000..3386594
 --- /dev/null
 +++ b/kernel/sched/hmbird/hmbird_util_track.c
-@@ -0,0 +1,626 @@
+@@ -0,0 +1,628 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * Copyright (C) 2024 Oplus. All rights reserved.
@@ -7637,6 +7879,8 @@ index 0000000..d520a84
 +	}
 +
 +	cpufreq_update_util(cpu_rq(0), HMBIRD_CPUFREQ_WINDOW_ROLLOVER);
++	/* Drive the standalone "hmbird" cpufreq governor if it owns any policy. */
++	hmbird_gov_update_all();
 +	spin_lock_irqsave(&new_sched_ravg_window_lock, flags);
 +	if (unlikely(new_hmbird_sched_ravg_window != hmbird_sched_ravg_window)) {
 +		srq = &per_cpu(hmbird_sched_rq_stats, smp_processor_id());
@@ -7744,10 +7988,10 @@ index 0000000..d520a84
 +}
 diff --git a/kernel/sched/hmbird/hmbird_util_track.h b/kernel/sched/hmbird/hmbird_util_track.h
 new file mode 100644
-index 0000000..17b85df
+index 0000000..075dc7f
 --- /dev/null
 +++ b/kernel/sched/hmbird/hmbird_util_track.h
-@@ -0,0 +1,33 @@
+@@ -0,0 +1,34 @@
 +/* SPDX-License-Identifier: GPL-2.0 */
 +/*
 + * HMBIRD scheduler class
@@ -7764,6 +8008,7 @@ index 0000000..17b85df
 +				struct rq *rq, int event, u64 wallclock);
 +void hmbird_sched_init_task(struct task_struct *p);
 +void slim_walt_enable(int enable);
++u16 slim_walt_cpu_util(int cpu);
 +void slim_get_cpu_util(int cpu, u64 *util);
 +void slim_get_task_util(struct task_struct *p, u64 *util);
 +

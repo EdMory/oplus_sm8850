@@ -1490,7 +1490,7 @@ index 0000000..73c3f6f
 +#endif /*_EXT_H_*/
 diff --git a/kernel/sched/hmbird/hmbird.c b/kernel/sched/hmbird/hmbird.c
 new file mode 100644
-index 0000000..1a494a4
+index 0000000..c030183
 --- /dev/null
 +++ b/kernel/sched/hmbird/hmbird.c
 @@ -0,0 +1,4443 @@
@@ -2127,16 +2127,16 @@ index 0000000..1a494a4
 +	WARN_ON(!alloc_cpumask_var(&iso_masks.exclusive, GFP_KERNEL));
 +	WARN_ON(!alloc_cpumask_var(&iso_masks.big, GFP_KERNEL));
 +	WARN_ON(!alloc_cpumask_var(&iso_masks.little, GFP_KERNEL));
-+	/* SM8850: 2+6 topology -- 2 prime = big, 6 performance = little.
++	/* SM8850: 6+2 topology -- 6 performance = little (0-5), 2 prime = big (6-7).
 +	 * Keep partial/ex_free/exclusive empty by default. */
-+	cpumask_set_cpu(0, iso_masks.big);
-+	cpumask_set_cpu(1, iso_masks.big);
++	cpumask_set_cpu(0, iso_masks.little);
++	cpumask_set_cpu(1, iso_masks.little);
 +	cpumask_set_cpu(2, iso_masks.little);
 +	cpumask_set_cpu(3, iso_masks.little);
 +	cpumask_set_cpu(4, iso_masks.little);
 +	cpumask_set_cpu(5, iso_masks.little);
-+	cpumask_set_cpu(6, iso_masks.little);
-+	cpumask_set_cpu(7, iso_masks.little);
++	cpumask_set_cpu(6, iso_masks.big);
++	cpumask_set_cpu(7, iso_masks.big);
 +}
 +
 +extern spinlock_t css_set_lock;
@@ -6171,7 +6171,7 @@ index 0000000..c7fa979
 +#endif /*__HMBIRD_SCHED__*/
 diff --git a/kernel/sched/hmbird/hmbird_sched_proc.c b/kernel/sched/hmbird/hmbird_sched_proc.c
 new file mode 100644
-index 0000000..23041fa
+index 0000000..d99b31a
 --- /dev/null
 +++ b/kernel/sched/hmbird/hmbird_sched_proc.c
 @@ -0,0 +1,563 @@
@@ -6227,7 +6227,7 @@ index 0000000..23041fa
 +int heartbeat_enable = 0;
 +int watchdog_enable;
 +int save_gov;
-+u64 cpu_cluster_masks = 0xFC3000000ULL; /* 2+6: big=CPU0-1, little=CPU2-7 (SM8850) */
++u64 cpu_cluster_masks = 0x3FC0000000ULL; /* 6+2: little=CPU0-5, big=CPU6-7 (SM8850) */
 +int hmbird_preempt_policy;
 +int cluster_separate = 1;
 +
@@ -6424,7 +6424,7 @@ index 0000000..23041fa
 +	u64 *pval = (u64 *)pde_data(file_inode(file));
 +
 +	/* SM8850: drop the v35 gating contradiction; allow write in any state
-+	 * and apply the cluster remap unconditionally (boot default is 2+6). */
++	 * and apply the cluster remap unconditionally (boot default is 6+2). */
 +	if (set_proc_buf_val_u64(file, buf, count, pval))
 +		return -EFAULT;
 +

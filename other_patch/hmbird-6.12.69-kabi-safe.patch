@@ -5943,7 +5943,7 @@ new file mode 100644
 index 0000000..06e6364
 --- /dev/null
 +++ b/kernel/sched/hmbird/hmbird_gov.c
-@@ -0,0 +1,231 @@
+@@ -0,0 +1,299 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * HMBIRD cpufreq governor
@@ -5958,8 +5958,20 @@ index 0000000..06e6364
 + * operates as an independent frequency scheduler rather than a passive
 + * util-data provider.
 + *
++ * IMPORTANT (v2, crash fix):
++ * __cpufreq_driver_target() must never run from atomic context: it walks
++ * the cpufreq transition notifier chain and calls into the platform
++ * driver's target_index() which may sleep / take policy locks. The first
++ * version invoked it directly from slim_walt_irq_work() while holding
++ * ALL runqueue locks plus the hmbird gov spinlock, which deadlocked or
++ * panicked the device as soon as "hmbird" was selected via sysfs.
++ * All __cpufreq_driver_target() calls are therefore deferred to a
++ * per-policy system workqueue (process context, no rq locks held).
++ *
 + * Copyright (C) 2024 Oplus. All rights reserved.
 + */
++#include <linux/workqueue.h>
++
 +#include "hmbird_sched.h"
 +#include "hmbird_util_track.h"
 +
@@ -5968,7 +5980,10 @@ index 0000000..06e6364
 +	unsigned int		min_freq;
 +	unsigned int		max_freq;
 +	unsigned int		cur_freq;
++	unsigned int		next_freq;
 +	bool			started;
++	bool			work_scheduled;
++	struct work_struct	freq_work;
 +	struct list_head	node;
 +};
 +
@@ -6008,9 +6023,47 @@ index 0000000..06e6364
 +}
 +
 +/*
++ * Process-context worker: the only place that talks to the cpufreq core.
++ * Never runs with rq locks or hmbird_gov_lock held (see header comment).
++ */
++static void hmbird_gov_freq_work(struct work_struct *work)
++{
++	struct hmbird_gov_policy *hg =
++		container_of(work, struct hmbird_gov_policy, freq_work);
++	unsigned long flags;
++	unsigned int target;
++
++	spin_lock_irqsave(&hmbird_gov_lock, flags);
++	if (!hg->started) {
++		hg->work_scheduled = false;
++		spin_unlock_irqrestore(&hmbird_gov_lock, flags);
++		return;
++	}
++	target = hg->next_freq;
++	hg->work_scheduled = false;
++	spin_unlock_irqrestore(&hmbird_gov_lock, flags);
++
++	if (__cpufreq_driver_target(hg->policy, target, CPUFREQ_RELATION_L) == 0) {
++		spin_lock_irqsave(&hmbird_gov_lock, flags);
++		hg->cur_freq = target;
++		spin_unlock_irqrestore(&hmbird_gov_lock, flags);
++	}
++}
++
++/* Must be called with hmbird_gov_lock held. */
++static void hmbird_gov_queue_work(struct hmbird_gov_policy *hg)
++{
++	if (hg->work_scheduled)
++		return;
++	hg->work_scheduled = true;
++	schedule_work(&hg->freq_work);
++}
++
++/*
 + * Called with all rq locks held from slim_walt_irq_work() on every WALT
-+ * window rollover. Keeps the same lock nesting (rq -> gov -> cpufreq) as
-+ * the regular schedutil hook.
++ * window rollover. Only computes the new target and defers the actual
++ * frequency change to hmbird_gov_freq_work() (process context) so the
++ * irq-work / all-rq-lock context never enters the cpufreq core.
 + */
 +void hmbird_gov_update_all(void)
 +{
@@ -6023,10 +6076,10 @@ index 0000000..06e6364
 +		if (!hg->started)
 +			continue;
 +		target = hmbird_gov_compute_target(hg);
-+		if (target == hg->cur_freq)
++		if (target == hg->cur_freq || target == hg->next_freq)
 +			continue;
-+		hg->cur_freq = target;
-+		__cpufreq_driver_target(hg->policy, target, CPUFREQ_RELATION_L);
++		hg->next_freq = target;
++		hmbird_gov_queue_work(hg);
 +	}
 +	spin_unlock_irqrestore(&hmbird_gov_lock, flags);
 +}
@@ -6047,7 +6100,10 @@ index 0000000..06e6364
 +	hg->min_freq = policy->cpuinfo.min_freq;
 +	hg->max_freq = policy->cpuinfo.max_freq;
 +	hg->cur_freq = 0;
++	hg->next_freq = 0;
 +	hg->started = false;
++	hg->work_scheduled = false;
++	INIT_WORK(&hg->freq_work, hmbird_gov_freq_work);
 +	INIT_LIST_HEAD(&hg->node);
 +
 +	spin_lock_irqsave(&hmbird_gov_lock, flags);
@@ -6065,6 +6121,8 @@ index 0000000..06e6364
 +
 +	if (!hg)
 +		return;
++
++	cancel_work_sync(&hg->freq_work);
 +
 +	spin_lock_irqsave(&hmbird_gov_lock, flags);
 +	list_del(&hg->node);
@@ -6089,10 +6147,16 @@ index 0000000..06e6364
 +	hg->started = true;
 +	target = hmbird_gov_compute_target(hg);
 +	hg->cur_freq = target;
++	hg->next_freq = target;
 +	spin_unlock_irqrestore(&hmbird_gov_lock, flags);
 +
 +	hmbird_info_systrace("<gov>:start hmbird governor cpu%u target %u kHz\n",
 +			     policy->cpu, target);
++	/*
++	 * store_scaling_governor() runs in process context, so a direct
++	 * __cpufreq_driver_target() here is safe and gives synchronous
++	 * ramp-up at switch time.
++	 */
 +	return __cpufreq_driver_target(policy, target, CPUFREQ_RELATION_L);
 +}
 +
@@ -6113,7 +6177,7 @@ index 0000000..06e6364
 +{
 +	struct hmbird_gov_policy *hg = policy->governor_data;
 +	unsigned long flags;
-+	unsigned int target;
++	unsigned int target = 0;
 +
 +	if (!hg)
 +		return;
@@ -6124,12 +6188,15 @@ index 0000000..06e6364
 +
 +	if (hg->started && hg->cur_freq > policy->max) {
 +		target = policy->max;
-+		hg->cur_freq = target;
-+		__cpufreq_driver_target(policy, target, CPUFREQ_RELATION_HE);
 +	} else if (hg->started && hg->cur_freq < policy->min) {
 +		target = policy->min;
-+		hg->cur_freq = target;
-+		__cpufreq_driver_target(policy, target, CPUFREQ_RELATION_LE);
++	}
++
++	if (target) {
++		/* Defer to worker: never call __cpufreq_driver_target()
++		 * while holding the hmbird_gov_lock spinlock. */
++		hg->next_freq = target;
++		hmbird_gov_queue_work(hg);
 +	}
 +	spin_unlock_irqrestore(&hmbird_gov_lock, flags);
 +}
@@ -6155,10 +6222,11 @@ index 0000000..06e6364
 +		return -EINVAL;
 +
 +	spin_lock_irqsave(&hmbird_gov_lock, flags);
-+	hg->cur_freq = clamp(freq, hg->min_freq, hg->max_freq);
++	hg->next_freq = clamp(freq, hg->min_freq, hg->max_freq);
 +	spin_unlock_irqrestore(&hmbird_gov_lock, flags);
 +
-+	return __cpufreq_driver_target(policy, hg->cur_freq, CPUFREQ_RELATION_L);
++	/* Process context (sysfs write); direct call is safe. */
++	return __cpufreq_driver_target(policy, hg->next_freq, CPUFREQ_RELATION_L);
 +}
 +
 +struct cpufreq_governor hmbird_cpufreq_gov = {

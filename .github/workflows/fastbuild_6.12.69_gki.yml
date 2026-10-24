@@ -1314,6 +1314,13 @@ jobs:
           echo "CONFIG_HMBIRD_SCHED=y" >> arch/arm64/configs/gki_defconfig
           echo "HMBIRD 集成完成"
 
+      - name: 集成 hmbird DT 伪装补丁
+        if: inputs.hmbird_enable
+        run: |
+          cd kernel_workspace/common
+          wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/hmbird_patch.c -O drivers/hmbird_patch.c
+          grep -q 'hmbird_patch.o' drivers/Makefile || echo 'obj-y += hmbird_patch.o' >> drivers/Makefile
+
       - name: 启用Re-Kernel支持
         if: inputs.rekernel_enable
         run: |

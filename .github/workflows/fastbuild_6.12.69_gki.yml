@@ -47,11 +47,6 @@ on:
         required: true
         type: boolean
         default: 'true'
-      lz4k_oplus_enable:
-        description: '是否安装 LZ4K_OPLUS 补丁（需同时启用 LZ4KD）'
-        required: true
-        type: boolean
-        default: 'true'
       lz4kdr_enable:
         description: '是否安装 LZ4KDR 补丁'
         required: true
@@ -510,23 +505,7 @@ jobs:
             || echo "CONFIG_ZRAM_BACKEND_LZ4KDR=y" >> arch/arm64/configs/gki_defconfig
           echo "提示: LZ4KDR 与 LZ4KD 同为 zram 可选后端, 运行时通过 /sys/block/zram0/compressor 选择具体算法"
           echo "LZ4KDR 集成完成"
-
-      - name: 应用 LZ4K_OPLUS 补丁
-        if: inputs.lz4k_oplus_enable
-        run: |
-          cd kernel_workspace/common
-          # 前置检查：lz4kd 补丁必须先应用
-          grep -q 'config ZRAM_BACKEND_LZ4KD' drivers/block/zram/Kconfig || { echo "ERROR: lz4kd patch not applied"; exit 1; }
-          wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/lz4k_oplus-6.12.69.patch
-          patch -p1 --no-backup-if-mismatch < lz4k_oplus-6.12.69.patch
-          # 集成校验
-          grep -q 'CONFIG_ZRAM_BACKEND_LZ4K_OPLUS=y' arch/arm64/configs/gki_defconfig \
-            || echo "CONFIG_ZRAM_BACKEND_LZ4K_OPLUS=y" >> arch/arm64/configs/gki_defconfig
-          grep -q 'CONFIG_LZ4K_OPLUS_COMPRESS=y' arch/arm64/configs/gki_defconfig \
-            || echo "CONFIG_LZ4K_OPLUS_COMPRESS=y" >> arch/arm64/configs/gki_defconfig
-          grep -q 'CONFIG_LZ4K_OPLUS_DECOMPRESS=y' arch/arm64/configs/gki_defconfig \
-            || echo "CONFIG_LZ4K_OPLUS_DECOMPRESS=y" >> arch/arm64/configs/gki_defconfig
-
+          
       - name: 应用 PMICWD 修复补丁
         run: |
           echo "正在应用PMICWD修复补丁(移除 ktime_get() 内 WARN_ON(timekeeping_suspended), 消除 suspend 期 PMICWD 刷屏 WARN)…"

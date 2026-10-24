@@ -1,9 +1,8 @@
 diff --git a/drivers/block/zram/Kconfig b/drivers/block/zram/Kconfig
+index 0f69949..14876ed 100644
 --- a/drivers/block/zram/Kconfig
 +++ b/drivers/block/zram/Kconfig
-@@ -36,8 +36,18 @@
- 	bool "lz4kd compression support"
- 	depends on ZRAM
+@@ -38,6 +38,16 @@ config ZRAM_BACKEND_LZ4KD
  	select LZ4_COMPRESS
  	select LZ4_DECOMPRESS
  
@@ -20,10 +19,8 @@ diff --git a/drivers/block/zram/Kconfig b/drivers/block/zram/Kconfig
  config ZRAM_BACKEND_ZSTD
  	bool "zstd compression support"
  	depends on ZRAM
-diff --git a/drivers/block/zram/Kconfig b/drivers/block/zram/Kconfig
---- a/drivers/block/zram/Kconfig
-+++ b/drivers/block/zram/Kconfig
-@@ -62,5 +62,6 @@
+@@ -60,7 +70,8 @@ config ZRAM_BACKEND_FORCE_LZO
+ 	depends on ZRAM
  	def_bool !ZRAM_BACKEND_LZ4 && !ZRAM_BACKEND_LZ4HC && \
  		!ZRAM_BACKEND_ZSTD && !ZRAM_BACKEND_DEFLATE && \
 -		!ZRAM_BACKEND_842 && !ZRAM_BACKEND_LZ4K && !ZRAM_BACKEND_LZ4KD
@@ -31,11 +28,8 @@ diff --git a/drivers/block/zram/Kconfig b/drivers/block/zram/Kconfig
 +		!ZRAM_BACKEND_LZ4K_OPLUS
  
  config ZRAM_BACKEND_LZO
-diff --git a/drivers/block/zram/Kconfig b/drivers/block/zram/Kconfig
---- a/drivers/block/zram/Kconfig
-+++ b/drivers/block/zram/Kconfig
-@@ -100,4 +100,8 @@
- config ZRAM_DEF_COMP_LZ4KD
+ 	bool "lzo and lzo-rle compression support" if !ZRAM_BACKEND_FORCE_LZO
+@@ -98,6 +109,10 @@ config ZRAM_DEF_COMP_LZ4KD
  	bool "lz4kd"
  	depends on CRYPTO_LZ4KD
  
@@ -43,29 +37,32 @@ diff --git a/drivers/block/zram/Kconfig b/drivers/block/zram/Kconfig
 +	bool "lz4k_oplus"
 +	depends on ZRAM_BACKEND_LZ4K_OPLUS
 +
-diff --git a/drivers/block/zram/Kconfig b/drivers/block/zram/Kconfig
---- a/drivers/block/zram/Kconfig
-+++ b/drivers/block/zram/Kconfig
-@@ -116,5 +116,6 @@
- 	default "lzo" if ZRAM_DEF_COMP_LZO
- 	default "lz4" if ZRAM_DEF_COMP_LZ4
+ config ZRAM_DEF_COMP_ZSTD
+ 	bool "zstd"
+ 	depends on ZRAM_BACKEND_ZSTD
+@@ -121,6 +136,7 @@ config ZRAM_DEF_COMP
  	default "lz4hc" if ZRAM_DEF_COMP_LZ4HC
  	default "lz4k" if ZRAM_DEF_COMP_LZ4K
  	default "lz4kd" if ZRAM_DEF_COMP_LZ4KD
 +	default "lz4k_oplus" if ZRAM_DEF_COMP_LZ4K_OPLUS
  	default "zstd" if ZRAM_DEF_COMP_ZSTD
  	default "deflate" if ZRAM_DEF_COMP_DEFLATE
+ 	default "842" if ZRAM_DEF_COMP_842
 diff --git a/drivers/block/zram/Makefile b/drivers/block/zram/Makefile
+index 3811ee8..411cdf4 100644
 --- a/drivers/block/zram/Makefile
 +++ b/drivers/block/zram/Makefile
-@@ -8,4 +8,5 @@
+@@ -8,6 +8,7 @@ zram-$(CONFIG_ZRAM_BACKEND_LZ4HC)	+= backend_lz4hc.o
  ifneq ($(CONFIG_ZRAM_BACKEND_LZ4K)$(CONFIG_ZRAM_BACKEND_LZ4KD),)
  	zram-y += backend_lz4kd.o
  endif
 +zram-$(CONFIG_ZRAM_BACKEND_LZ4K_OPLUS)	+= backend_lz4k_oplus.o
  zram-$(CONFIG_ZRAM_BACKEND_ZSTD)	+= backend_zstd.o
+ zram-$(CONFIG_ZRAM_BACKEND_DEFLATE)	+= backend_deflate.o
+ zram-$(CONFIG_ZRAM_BACKEND_842)		+= backend_842.o
 diff --git a/drivers/block/zram/backend_lz4k_oplus.c b/drivers/block/zram/backend_lz4k_oplus.c
 new file mode 100644
+index 0000000..920f400
 --- /dev/null
 +++ b/drivers/block/zram/backend_lz4k_oplus.c
 @@ -0,0 +1,108 @@
@@ -179,6 +176,7 @@ new file mode 100644
 +};
 diff --git a/drivers/block/zram/backend_lz4k_oplus.h b/drivers/block/zram/backend_lz4k_oplus.h
 new file mode 100644
+index 0000000..99ab15b
 --- /dev/null
 +++ b/drivers/block/zram/backend_lz4k_oplus.h
 @@ -0,0 +1,10 @@
@@ -193,18 +191,18 @@ new file mode 100644
 +
 +#endif /* __BACKEND_LZ4K_OPLUS_H__ */
 diff --git a/drivers/block/zram/zcomp.c b/drivers/block/zram/zcomp.c
+index 6ab808d..09c8f02 100644
 --- a/drivers/block/zram/zcomp.c
 +++ b/drivers/block/zram/zcomp.c
-@@ -19,4 +19,5 @@
+@@ -17,6 +17,7 @@
  #include "backend_lz4.h"
  #include "backend_lz4hc.h"
  #include "backend_lz4kd.h"
 +#include "backend_lz4k_oplus.h"
  #include "backend_zstd.h"
-diff --git a/drivers/block/zram/zcomp.c b/drivers/block/zram/zcomp.c
---- a/drivers/block/zram/zcomp.c
-+++ b/drivers/block/zram/zcomp.c
-@@ -36,6 +36,9 @@
+ #include "backend_deflate.h"
+ #include "backend_842.h"
+@@ -32,6 +33,9 @@ static const struct zcomp_ops *backends[] = {
  #if IS_ENABLED(CONFIG_ZRAM_BACKEND_LZ4HC)
  	&backend_lz4hc,
  #endif
@@ -216,6 +214,7 @@ diff --git a/drivers/block/zram/zcomp.c b/drivers/block/zram/zcomp.c
  #endif
 diff --git a/include/linux/lz4k_oplus.h b/include/linux/lz4k_oplus.h
 new file mode 100644
+index 0000000..2088331
 --- /dev/null
 +++ b/include/linux/lz4k_oplus.h
 @@ -0,0 +1,72 @@
@@ -292,33 +291,37 @@ new file mode 100644
 +
 +#endif /* _LZ4K_OPLUS_H */
 diff --git a/lib/Kconfig b/lib/Kconfig
+index 9716df2..cc86218 100644
 --- a/lib/Kconfig
 +++ b/lib/Kconfig
-@@ -336,5 +336,11 @@
- config LZ4HC_COMPRESS
- 	tristate
+@@ -353,6 +353,11 @@ config LZ4KD_DECOMPRESS
  
+ config ZSTD_COMMON
+ 	select XXHASH
 +config LZ4K_OPLUS_COMPRESS
 +	tristate
 +
 +config LZ4K_OPLUS_DECOMPRESS
 +	tristate
-+
- config LZ4_DECOMPRESS
  	tristate
+ 
+ config ZSTD_COMPRESS
 diff --git a/lib/Makefile b/lib/Makefile
+index 70ae9d6..e32e7f5 100644
 --- a/lib/Makefile
 +++ b/lib/Makefile
-@@ -184,5 +184,7 @@
- obj-$(CONFIG_LZ4K_COMPRESS) += lz4k/
+@@ -185,6 +185,8 @@ obj-$(CONFIG_LZ4K_COMPRESS) += lz4k/
  obj-$(CONFIG_LZ4K_DECOMPRESS) += lz4k/
  obj-$(CONFIG_LZ4KD_COMPRESS) += lz4kd/
  obj-$(CONFIG_LZ4KD_DECOMPRESS) += lz4kd/
 +obj-$(CONFIG_LZ4K_OPLUS_COMPRESS) += lz4k_oplus/
 +obj-$(CONFIG_LZ4K_OPLUS_DECOMPRESS) += lz4k_oplus/
  obj-$(CONFIG_ZSTD_COMPRESS) += zstd/
+ obj-$(CONFIG_ZSTD_DECOMPRESS) += zstd/
+ obj-$(CONFIG_XZ_DEC) += xz/
 diff --git a/lib/lz4k_oplus/Makefile b/lib/lz4k_oplus/Makefile
 new file mode 100644
+index 0000000..d024412
 --- /dev/null
 +++ b/lib/lz4k_oplus/Makefile
 @@ -0,0 +1,3 @@
@@ -327,6 +330,7 @@ new file mode 100644
 +obj-$(CONFIG_LZ4K_OPLUS_DECOMPRESS) += lz4k_oplus_decompress.o
 diff --git a/lib/lz4k_oplus/lz4k_oplus_compress.c b/lib/lz4k_oplus/lz4k_oplus_compress.c
 new file mode 100644
+index 0000000..da0177c
 --- /dev/null
 +++ b/lib/lz4k_oplus/lz4k_oplus_compress.c
 @@ -0,0 +1,294 @@
@@ -626,9 +630,10 @@ new file mode 100644
 +MODULE_DESCRIPTION("LZ4K_OPLUS compressor");
 diff --git a/lib/lz4k_oplus/lz4k_oplus_decompress.c b/lib/lz4k_oplus/lz4k_oplus_decompress.c
 new file mode 100644
+index 0000000..6327459
 --- /dev/null
 +++ b/lib/lz4k_oplus/lz4k_oplus_decompress.c
-@@ -0,0 +1,262 @@
+@@ -0,0 +1,263 @@
 +// SPDX-License-Identifier: Dual BSD/GPL
 +/*
 + * LZ4K_OPLUS decoder, safe against malformed input and buffer
@@ -894,6 +899,7 @@ new file mode 100644
 +MODULE_DESCRIPTION("LZ4K_OPLUS decompressor");
 diff --git a/lib/lz4k_oplus/lz4k_oplus_private.h b/lib/lz4k_oplus/lz4k_oplus_private.h
 new file mode 100644
+index 0000000..5396783
 --- /dev/null
 +++ b/lib/lz4k_oplus/lz4k_oplus_private.h
 @@ -0,0 +1,104 @@

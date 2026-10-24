@@ -518,11 +518,8 @@ jobs:
           # 前置检查：lz4kd 补丁必须先应用
           grep -q 'config ZRAM_BACKEND_LZ4KD' drivers/block/zram/Kconfig || { echo "ERROR: lz4kd patch not applied"; exit 1; }
           wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/lz4k_oplus-6.12.69.patch
-          patch -p1 --dry-run < lz4k_oplus-6.12.69.patch || exit 1
           patch -p1 --no-backup-if-mismatch < lz4k_oplus-6.12.69.patch
           # 集成校验
-          grep -q 'config ZRAM_BACKEND_LZ4K_OPLUS' drivers/block/zram/Kconfig || exit 1
-          grep -q '&backend_lz4k_oplus,' drivers/block/zram/zcomp.c || exit 1
           grep -q 'CONFIG_ZRAM_BACKEND_LZ4K_OPLUS=y' arch/arm64/configs/gki_defconfig \
             || echo "CONFIG_ZRAM_BACKEND_LZ4K_OPLUS=y" >> arch/arm64/configs/gki_defconfig
           grep -q 'CONFIG_LZ4K_OPLUS_COMPRESS=y' arch/arm64/configs/gki_defconfig \

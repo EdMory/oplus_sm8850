@@ -13,7 +13,7 @@ surface; the returned value (frozen clock) is unchanged.
 diff --git a/kernel/time/timekeeping.c b/kernel/time/timekeeping.c
 --- a/kernel/time/timekeeping.c
 +++ b/kernel/time/timekeeping.c
-@@ -754,19 +754,18 @@ EXPORT_SYMBOL(ktime_get_real_ts64);
+@@ -754,19 +754,17 @@ EXPORT_SYMBOL(ktime_get_real_ts64);
  ktime_t ktime_get(void)
  {
  	struct timekeeper *tk = &tk_core.timekeeper;

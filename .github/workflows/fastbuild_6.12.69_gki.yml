@@ -369,6 +369,28 @@ jobs:
           cat /tmp/zstd_dryrun.log
           patch -p1 --no-backup-if-mismatch -F 0 < 002-zstd.patch
 
+      - name: 应用 LZ4 NEON 加速挂钩
+        if: inputs.lz4_enable
+        run: |
+          echo "正在应用 LZ4 NEON 加速挂钩(将 zram/f2fs/incfs 的 LZ4 解压路由到 ARM64 NEON 汇编实现)…"
+          cd kernel_workspace/common
+          # 下载挂钩脚本(已随仓库 other_patch/ 分发, 与补丁同分支同版本)
+          wget -O apply_lz4_neon.sh https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/apply_lz4_neon.sh
+          
+          # 前置断言: 001-lz4.patch 必须已带入 NEON 实现(lz4armv8), 缺符号时在此fail-fast而非编译期
+          grep -rq "LZ4_arm64_decompress_safe" lib/ include/ \
+            || { echo "::error::前置检查失败: 内核树中不存在 LZ4_arm64_decompress_safe 符号(请确认 lz4_enable 开启且 001-lz4.patch 包含 lz4armv8 NEON 实现)"; exit 1; }
+          
+          # 幂等应用: 已修补自动跳过; 脚本内置失败计数, 任一文件失败即非零退出
+          bash apply_lz4_neon.sh
+          
+          # 结果双保险校验(防止正则未命中被误判通过)
+          grep -q "LZ4_arm64_decompress_safe" crypto/lz4.c || { echo "::error::crypto/lz4.c NEON 挂钩失败"; exit 1; }
+          grep -q "LZ4_arm64_decompress_safe" crypto/lz4hc.c || { echo "::error::crypto/lz4hc.c NEON 挂钩失败"; exit 1; }
+          grep -q "LZ4_arm64_decompress_safe" fs/f2fs/compress.c || { echo "::error::fs/f2fs/compress.c NEON 挂钩失败"; exit 1; }
+          [ ! -f fs/incfs/data_mgmt.c ] || grep -q "LZ4_arm64_decompress_safe" fs/incfs/data_mgmt.c || { echo "::error::incfs NEON 挂钩失败"; exit 1; }
+          echo "LZ4 NEON 加速挂钩完成"
+
       - name: 应用 LZ4KD 补丁
         if: inputs.lz4kd_enable
         run: |

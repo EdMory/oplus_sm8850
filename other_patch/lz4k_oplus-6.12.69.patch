@@ -1,10 +1,10 @@
 diff --git a/drivers/block/zram/Kconfig b/drivers/block/zram/Kconfig
-index 0f69949..14876ed 100644
+index 754b3ea..7a2febf 100644
 --- a/drivers/block/zram/Kconfig
 +++ b/drivers/block/zram/Kconfig
-@@ -38,6 +38,16 @@ config ZRAM_BACKEND_LZ4KD
- 	select LZ4_COMPRESS
- 	select LZ4_DECOMPRESS
+@@ -50,6 +50,16 @@ config ZRAM_BACKEND_LZ4KDR
+ 	  LZ4KD encoding but with a reworked encoder search loop. See
+ 	  include/linux/lz4kdr.h for the attribution and what changed.
  
 +config ZRAM_BACKEND_LZ4K_OPLUS
 +	bool "lz4k_oplus compression support"
@@ -19,19 +19,17 @@ index 0f69949..14876ed 100644
  config ZRAM_BACKEND_ZSTD
  	bool "zstd compression support"
  	depends on ZRAM
-@@ -60,7 +70,8 @@ config ZRAM_BACKEND_FORCE_LZO
+@@ -72,6 +82,7 @@ config ZRAM_BACKEND_FORCE_LZO
  	depends on ZRAM
  	def_bool !ZRAM_BACKEND_LZ4 && !ZRAM_BACKEND_LZ4HC && \
+ 		!ZRAM_BACKEND_LZ4KDR && \
++		!ZRAM_BACKEND_LZ4K_OPLUS && \
  		!ZRAM_BACKEND_ZSTD && !ZRAM_BACKEND_DEFLATE && \
--		!ZRAM_BACKEND_842 && !ZRAM_BACKEND_LZ4K && !ZRAM_BACKEND_LZ4KD
-+		!ZRAM_BACKEND_842 && !ZRAM_BACKEND_LZ4K && !ZRAM_BACKEND_LZ4KD && \
-+		!ZRAM_BACKEND_LZ4K_OPLUS
+ 		!ZRAM_BACKEND_842 && !ZRAM_BACKEND_LZ4K && !ZRAM_BACKEND_LZ4KD
  
- config ZRAM_BACKEND_LZO
- 	bool "lzo and lzo-rle compression support" if !ZRAM_BACKEND_FORCE_LZO
-@@ -98,6 +109,10 @@ config ZRAM_DEF_COMP_LZ4KD
- 	bool "lz4kd"
- 	depends on CRYPTO_LZ4KD
+@@ -115,6 +126,10 @@ config ZRAM_DEF_COMP_LZ4KDR
+ 	bool "lz4kdr"
+ 	depends on ZRAM_BACKEND_LZ4KDR
  
 +config ZRAM_DEF_COMP_LZ4K_OPLUS
 +	bool "lz4k_oplus"
@@ -40,26 +38,26 @@ index 0f69949..14876ed 100644
  config ZRAM_DEF_COMP_ZSTD
  	bool "zstd"
  	depends on ZRAM_BACKEND_ZSTD
-@@ -121,6 +136,7 @@ config ZRAM_DEF_COMP
- 	default "lz4hc" if ZRAM_DEF_COMP_LZ4HC
+@@ -139,6 +154,7 @@ config ZRAM_DEF_COMP
  	default "lz4k" if ZRAM_DEF_COMP_LZ4K
  	default "lz4kd" if ZRAM_DEF_COMP_LZ4KD
+ 	default "lz4kdr" if ZRAM_DEF_COMP_LZ4KDR
 +	default "lz4k_oplus" if ZRAM_DEF_COMP_LZ4K_OPLUS
  	default "zstd" if ZRAM_DEF_COMP_ZSTD
  	default "deflate" if ZRAM_DEF_COMP_DEFLATE
  	default "842" if ZRAM_DEF_COMP_842
 diff --git a/drivers/block/zram/Makefile b/drivers/block/zram/Makefile
-index 3811ee8..411cdf4 100644
+index d174236..dd618f6 100644
 --- a/drivers/block/zram/Makefile
 +++ b/drivers/block/zram/Makefile
-@@ -8,6 +8,7 @@ zram-$(CONFIG_ZRAM_BACKEND_LZ4HC)	+= backend_lz4hc.o
+@@ -6,6 +6,7 @@ zram-$(CONFIG_ZRAM_BACKEND_LZO)		+= backend_lzorle.o backend_lzo.o
+ zram-$(CONFIG_ZRAM_BACKEND_LZ4)		+= backend_lz4.o
+ zram-$(CONFIG_ZRAM_BACKEND_LZ4HC)	+= backend_lz4hc.o
+ zram-$(CONFIG_ZRAM_BACKEND_LZ4KDR)	+= backend_lz4kdr.o
++zram-$(CONFIG_ZRAM_BACKEND_LZ4K_OPLUS)	+= backend_lz4k_oplus.o
  ifneq ($(CONFIG_ZRAM_BACKEND_LZ4K)$(CONFIG_ZRAM_BACKEND_LZ4KD),)
  	zram-y += backend_lz4kd.o
  endif
-+zram-$(CONFIG_ZRAM_BACKEND_LZ4K_OPLUS)	+= backend_lz4k_oplus.o
- zram-$(CONFIG_ZRAM_BACKEND_ZSTD)	+= backend_zstd.o
- zram-$(CONFIG_ZRAM_BACKEND_DEFLATE)	+= backend_deflate.o
- zram-$(CONFIG_ZRAM_BACKEND_842)		+= backend_842.o
 diff --git a/drivers/block/zram/backend_lz4k_oplus.c b/drivers/block/zram/backend_lz4k_oplus.c
 new file mode 100644
 index 0000000..920f400
@@ -191,20 +189,20 @@ index 0000000..99ab15b
 +
 +#endif /* __BACKEND_LZ4K_OPLUS_H__ */
 diff --git a/drivers/block/zram/zcomp.c b/drivers/block/zram/zcomp.c
-index 6ab808d..09c8f02 100644
+index 8b52b2e..9510179 100644
 --- a/drivers/block/zram/zcomp.c
 +++ b/drivers/block/zram/zcomp.c
 @@ -17,6 +17,7 @@
  #include "backend_lz4.h"
  #include "backend_lz4hc.h"
- #include "backend_lz4kd.h"
+ #include "backend_lz4kdr.h"
 +#include "backend_lz4k_oplus.h"
+ #include "backend_lz4kd.h"
  #include "backend_zstd.h"
  #include "backend_deflate.h"
- #include "backend_842.h"
-@@ -32,6 +33,9 @@ static const struct zcomp_ops *backends[] = {
- #if IS_ENABLED(CONFIG_ZRAM_BACKEND_LZ4HC)
- 	&backend_lz4hc,
+@@ -36,6 +37,9 @@ static const struct zcomp_ops *backends[] = {
+ #if IS_ENABLED(CONFIG_ZRAM_BACKEND_LZ4KDR)
+ 	&backend_lz4kdr,
  #endif
 +#if IS_ENABLED(CONFIG_ZRAM_BACKEND_LZ4K_OPLUS)
 +	&backend_lz4k_oplus,
@@ -291,34 +289,35 @@ index 0000000..2088331
 +
 +#endif /* _LZ4K_OPLUS_H */
 diff --git a/lib/Kconfig b/lib/Kconfig
-index 9716df2..cc86218 100644
+index 73f2b6c..0d64e9c 100644
 --- a/lib/Kconfig
 +++ b/lib/Kconfig
-@@ -353,6 +353,11 @@ config LZ4KD_DECOMPRESS
+@@ -342,6 +342,12 @@ config LZ4KDR_COMPRESS
+ config LZ4KDR_DECOMPRESS
+ 	tristate
  
- config ZSTD_COMMON
- 	select XXHASH
 +config LZ4K_OPLUS_COMPRESS
 +	tristate
 +
 +config LZ4K_OPLUS_DECOMPRESS
 +	tristate
++
+ config LZ4_DECOMPRESS
  	tristate
- 
- config ZSTD_COMPRESS
+ 	
 diff --git a/lib/Makefile b/lib/Makefile
-index 70ae9d6..e32e7f5 100644
+index d633275..050ad13 100644
 --- a/lib/Makefile
 +++ b/lib/Makefile
-@@ -185,6 +185,8 @@ obj-$(CONFIG_LZ4K_COMPRESS) += lz4k/
- obj-$(CONFIG_LZ4K_DECOMPRESS) += lz4k/
- obj-$(CONFIG_LZ4KD_COMPRESS) += lz4kd/
- obj-$(CONFIG_LZ4KD_DECOMPRESS) += lz4kd/
+@@ -183,6 +183,8 @@ obj-$(CONFIG_LZ4HC_COMPRESS) += lz4/
+ obj-$(CONFIG_LZ4_DECOMPRESS) += lz4/
+ obj-$(CONFIG_LZ4KDR_COMPRESS) += lz4kdr/
+ obj-$(CONFIG_LZ4KDR_DECOMPRESS) += lz4kdr/
 +obj-$(CONFIG_LZ4K_OPLUS_COMPRESS) += lz4k_oplus/
 +obj-$(CONFIG_LZ4K_OPLUS_DECOMPRESS) += lz4k_oplus/
- obj-$(CONFIG_ZSTD_COMPRESS) += zstd/
- obj-$(CONFIG_ZSTD_DECOMPRESS) += zstd/
- obj-$(CONFIG_XZ_DEC) += xz/
+ obj-$(CONFIG_LZ4K_COMPRESS) += lz4k/
+ obj-$(CONFIG_LZ4K_DECOMPRESS) += lz4k/
+ obj-$(CONFIG_LZ4KD_COMPRESS) += lz4kd/
 diff --git a/lib/lz4k_oplus/Makefile b/lib/lz4k_oplus/Makefile
 new file mode 100644
 index 0000000..d024412

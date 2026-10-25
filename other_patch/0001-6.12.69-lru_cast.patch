@@ -306,7 +306,7 @@ index 0000000..87f2f88
 +#endif /* _LINUX_LRU_CAST_H */
 +
 diff --git a/include/linux/mm_inline.h b/include/linux/mm_inline.h
-index 35b50f0..976964b 100644
+index 35b50f0..720ba8a 100644
 --- a/include/linux/mm_inline.h
 +++ b/include/linux/mm_inline.h
 @@ -9,6 +9,7 @@
@@ -317,33 +317,21 @@ index 35b50f0..976964b 100644
  
  #undef CREATE_TRACE_POINTS
  #include <trace/hooks/mm.h>
-@@ -352,10 +353,13 @@ static inline void folio_migrate_refs(struct folio *new, struct folio *old)
- static __always_inline
- void lruvec_add_folio(struct lruvec *lruvec, struct folio *folio)
- {
--	enum lru_list lru = folio_lru_list(folio);
-+	enum lru_list lru;
+@@ -356,6 +357,8 @@ void lruvec_add_folio(struct lruvec *lruvec, struct folio *folio)
  	bool skip = false;
  
  	trace_android_vh_lruvec_add_folio(lruvec, folio, lru, false, &skip);
 +	if (lru_cast_add_folio(lruvec, folio, false))
 +		return;
-+	lru = folio_lru_list(folio);
  	if (skip)
  		return;
  
-@@ -371,10 +375,13 @@ void lruvec_add_folio(struct lruvec *lruvec, struct folio *folio)
- static __always_inline
- void lruvec_add_folio_tail(struct lruvec *lruvec, struct folio *folio)
- {
--	enum lru_list lru = folio_lru_list(folio);
-+	enum lru_list lru;
+@@ -375,6 +378,8 @@ void lruvec_add_folio_tail(struct lruvec *lruvec, struct folio *folio)
  	bool skip = false;
  
  	trace_android_vh_lruvec_add_folio(lruvec, folio, lru, true, &skip);
 +	if (lru_cast_add_folio(lruvec, folio, true))
 +		return;
-+	lru = folio_lru_list(folio);
  	if (skip)
  		return;
  
@@ -8437,7 +8425,7 @@ index ad2f121..d2039f4 100644
  /* linux/mm/swap_state.c */
  /* One swap address space for each 64M swap space */
 diff --git a/mm/vmscan.c b/mm/vmscan.c
-index 33275e0..2170fbc 100644
+index 33275e0..3c9c82a 100644
 --- a/mm/vmscan.c
 +++ b/mm/vmscan.c
 @@ -159,6 +159,9 @@ struct scan_control {
@@ -8503,7 +8491,7 @@ index 33275e0..2170fbc 100644
  		if (res < 0)
  			handle_write_error(mapping, folio, res);
  		if (res == AOP_WRITEPAGE_ACTIVATE) {
-@@ -943,6 +971,39 @@ static enum folio_references folio_check_references(struct folio *folio,
+@@ -943,6 +971,40 @@ static enum folio_references folio_check_references(struct folio *folio,
  	if (referenced_ptes == -1)
  		return FOLIOREF_KEEP;
  
@@ -8528,6 +8516,7 @@ index 33275e0..2170fbc 100644
 +	 * counted.
 +	 */
 +	if (lru_cast_enabled() && lru_cast_folio_on(folio)) {
++		referenced_folio = folio_test_clear_referenced(folio);
 +		if (referenced_ptes) {
 +			if ((vm_flags & VM_EXEC) && folio_is_file_lru(folio)) {
 +				lru_cast_access_kept(folio);
@@ -8543,7 +8532,7 @@ index 33275e0..2170fbc 100644
  	if (lru_gen_enabled()) {
  		if (!referenced_ptes)
  			return FOLIOREF_RECLAIM;
-@@ -1475,6 +1536,15 @@ retry:
+@@ -1475,6 +1537,15 @@ retry:
  					nr_pages = 1;
  				}
  				goto activate_locked;
@@ -8559,7 +8548,7 @@ index 33275e0..2170fbc 100644
  			case PAGE_SUCCESS:
  				if (nr_pages > 1 && !folio_test_large(folio)) {
  					sc->nr_scanned -= (nr_pages - 1);
-@@ -1883,6 +1953,53 @@ move:
+@@ -1883,6 +1954,53 @@ move:
  	return nr_taken;
  }
  
@@ -8613,7 +8602,7 @@ index 33275e0..2170fbc 100644
  /**
   * folio_isolate_lru() - Try to isolate a folio from its LRU list.
   * @folio: Folio to isolate from its LRU list.
-@@ -2088,8 +2205,12 @@ static unsigned long shrink_inactive_list(unsigned long nr_to_scan,
+@@ -2088,8 +2206,12 @@ static unsigned long shrink_inactive_list(unsigned long nr_to_scan,
  
  	spin_lock_irq(&lruvec->lru_lock);
  
@@ -8628,7 +8617,7 @@ index 33275e0..2170fbc 100644
  
  	__mod_node_page_state(pgdat, NR_ISOLATED_ANON + file, nr_taken);
  	item = PGSCAN_KSWAPD + reclaimer_offset();
-@@ -2356,6 +2477,33 @@ unsigned long __reclaim_pages(struct list_head *folio_list, void *private)
+@@ -2356,6 +2478,33 @@ unsigned long __reclaim_pages(struct list_head *folio_list, void *private)
  	return nr_reclaimed;
  }
  
@@ -8662,7 +8651,7 @@ index 33275e0..2170fbc 100644
  unsigned long reclaim_pages(struct list_head *folio_list)
  {
  	return __reclaim_pages(folio_list, NULL);
-@@ -2365,6 +2513,11 @@ EXPORT_SYMBOL_GPL(reclaim_pages);
+@@ -2365,6 +2514,11 @@ EXPORT_SYMBOL_GPL(reclaim_pages);
  static unsigned long shrink_list(enum lru_list lru, unsigned long nr_to_scan,
  				 struct lruvec *lruvec, struct scan_control *sc)
  {
@@ -8674,7 +8663,7 @@ index 33275e0..2170fbc 100644
  	if (is_active_lru(lru)) {
  		if (sc->may_deactivate & (1 << is_file_lru(lru)))
  			shrink_active_list(nr_to_scan, lruvec, sc, lru);
-@@ -2551,6 +2704,13 @@ static void prepare_scan_control(pg_data_t *pgdat, struct scan_control *sc)
+@@ -2551,6 +2705,13 @@ static void prepare_scan_control(pg_data_t *pgdat, struct scan_control *sc)
  			anon >> sc->priority;
  	}
  
@@ -8688,7 +8677,7 @@ index 33275e0..2170fbc 100644
  	customize_sc_file_is_tiny(sc);
  }
  
-@@ -2575,6 +2735,35 @@ static void get_scan_count(struct lruvec *lruvec, struct scan_control *sc,
+@@ -2575,6 +2736,35 @@ static void get_scan_count(struct lruvec *lruvec, struct scan_control *sc,
  	enum lru_list lru;
  	bool balance_anon_file_reclaim = false;
  
@@ -8724,7 +8713,7 @@ index 33275e0..2170fbc 100644
  	/* If we have no swap space, do not bother scanning anon folios. */
  	if (!sc->may_swap || !can_reclaim_anon_pages(memcg, pgdat->node_id, sc)) {
  		scan_balance = SCAN_FILE;
-@@ -2734,6 +2923,11 @@ out:
+@@ -2734,6 +2924,11 @@ out:
  		if (!scan && !mem_cgroup_online(memcg))
  			scan = min(lruvec_size, SWAP_CLUSTER_MAX);
  
@@ -8736,7 +8725,7 @@ index 33275e0..2170fbc 100644
  		switch (scan_balance) {
  		case SCAN_EQUAL:
  			/* Scan lists relative to size */
-@@ -5945,13 +6139,19 @@ static void shrink_lruvec(struct lruvec *lruvec, struct scan_control *sc)
+@@ -5945,13 +6140,19 @@ static void shrink_lruvec(struct lruvec *lruvec, struct scan_control *sc)
  				sc->priority == DEF_PRIORITY);
  
  	blk_start_plug(&plug);
@@ -8757,7 +8746,7 @@ index 33275e0..2170fbc 100644
  		unsigned long nr_anon, nr_file, percentage;
  		unsigned long nr_scanned;
  
-@@ -6029,9 +6229,10 @@ out:
+@@ -6029,9 +6230,10 @@ out:
  
  	/*
  	 * Even if we did not try to evict anon pages at all, we want to
@@ -8770,7 +8759,7 @@ index 33275e0..2170fbc 100644
  	    inactive_is_low(lruvec, LRU_INACTIVE_ANON))
  		shrink_active_list(SWAP_CLUSTER_MAX, lruvec,
  				   sc, LRU_ACTIVE_ANON);
-@@ -6922,6 +7123,10 @@ static void kswapd_age_node(struct pglist_data *pgdat, struct scan_control *sc)
+@@ -6922,6 +7124,10 @@ static void kswapd_age_node(struct pglist_data *pgdat, struct scan_control *sc)
  		return;
  	}
  
@@ -8781,7 +8770,7 @@ index 33275e0..2170fbc 100644
  	if (!can_age_anon_pages(pgdat, sc))
  		return;
  
-@@ -7671,6 +7876,9 @@ unsigned long shrink_all_memory(unsigned long nr_to_reclaim)
+@@ -7671,6 +7877,9 @@ unsigned long shrink_all_memory(unsigned long nr_to_reclaim)
  void __meminit kswapd_run(int nid)
  {
  	pg_data_t *pgdat = NODE_DATA(nid);
@@ -8791,7 +8780,7 @@ index 33275e0..2170fbc 100644
  
  	pgdat_kswapd_lock(pgdat);
  	if (!pgdat->kswapd) {
-@@ -7682,7 +7890,32 @@ void __meminit kswapd_run(int nid)
+@@ -7682,7 +7891,32 @@ void __meminit kswapd_run(int nid)
  			BUG_ON(system_state < SYSTEM_RUNNING);
  			pgdat->kswapd = NULL;
  		}
@@ -8824,7 +8813,7 @@ index 33275e0..2170fbc 100644
  	pgdat_kswapd_unlock(pgdat);
  }
  
-@@ -7701,6 +7934,13 @@ void __meminit kswapd_stop(int nid)
+@@ -7701,6 +7935,13 @@ void __meminit kswapd_stop(int nid)
  		kthread_stop(kswapd);
  		pgdat->kswapd = NULL;
  	}

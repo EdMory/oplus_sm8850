@@ -1221,7 +1221,7 @@ index 0000000..9c8b747
 +DEFINE_STATIC_KEY_FALSE(lru_cast_enabled_key);
 +
 +/* what a new lruvec starts with */
-+static bool lru_cast_active __read_mostly = true;
++static bool lru_cast_active __read_mostly = false;
 +static DEFINE_MUTEX(lru_cast_switch_lock);
 +
 +#define LRU_CAST_BATCH	1024

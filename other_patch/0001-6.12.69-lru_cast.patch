@@ -163,7 +163,7 @@ index 0000000..05bc48d
 + * legacy's (mm/workingset.c), whose fields sit above it. Across a switch
 + * each side takes the other's as no history.
 + */
-+#define LRU_CAST_SHADOW_KIND	1
++#define LRU_CAST_SHADOW_KIND	0
 +
 +static inline bool lru_cast_shadow(void *shadow)
 +{
@@ -369,13 +369,26 @@ diff --git a/include/linux/mm_types.h b/include/linux/mm_types.h
 index 21a3ec0..67cdfe9 100644
 --- a/include/linux/mm_types.h
 +++ b/include/linux/mm_types.h
-@@ -1164,6 +1164,16 @@
+@@ -1075,6 +1075,10 @@
+ 		} lru_gen;
+ #endif /* CONFIG_LRU_GEN_WALKS_MMU */
+ 
++#ifdef CONFIG_LRU_CAST
++		unsigned long lru_cast_used;
++#endif
++
+ 		ANDROID_KABI_USE(1, struct task_dma_buf_info *dmabuf_info);
+ 	} __randomize_layout;
+ 
+@@ -1164,6 +1168,18 @@
  
  #endif /* CONFIG_LRU_GEN_WALKS_MMU */
  
 +#ifdef CONFIG_LRU_CAST
 +static inline void lru_cast_use_mm(struct mm_struct *mm)
 +{
++	if (mm && !READ_ONCE(mm->lru_cast_used))
++		WRITE_ONCE(mm->lru_cast_used, 1);
 +}
 +#else
 +static inline void lru_cast_use_mm(struct mm_struct *mm)
@@ -583,6 +596,27 @@ index 57959ee..f203b32 100644
  
  #define show_page_flags(flags)						\
  	(flags) ? __print_flags(flags, "|",				\
+diff --git a/kernel/sched/core.c b/kernel/sched/core.c
+index 3caa543..4b3a340 100644
+--- a/kernel/sched/core.c
++++ b/kernel/sched/core.c
+@@ -6001,6 +6001,7 @@
+ 		 */
+ 		switch_mm_irqs_off(prev->active_mm, next->mm, next);
+ 		lru_gen_use_mm(next->mm);
++		lru_cast_use_mm(next->mm);
+ 
+ 		if (!prev->mm) {                        // from kernel
+ 			/* will mmdrop_lazy_tlb() in finish_task_switch(). */
+@@ -6295,6 +6296,8 @@
+ 	donor = rq->donor;
+ 
+ 	psi_account_irqtime(rq, donor, NULL);
++	/* a task that runs on without switching still sets young bits */
++	lru_cast_use_mm(donor->mm);
+ 
+ 	update_rq_clock(rq);
+ 	trace_android_rvh_tick_entry(rq);
 diff --git a/mm/Kconfig b/mm/Kconfig
 index 88d7aba..9ca6a51 100644
 --- a/mm/Kconfig
@@ -8942,107 +8976,3 @@ index 33275e0..6532b51 100644
  	pgdat_kswapd_unlock(pgdat);
  }
  
-diff --git a/mm/workingset.c b/mm/workingset.c
-index 2613579..7fb3de6 100644
---- a/mm/workingset.c
-+++ b/mm/workingset.c
-@@ -6,6 +6,7 @@
-  */
- 
- #include <linux/memcontrol.h>
-+#include <linux/lru_cast.h>
- #include <linux/mm_inline.h>
- #include <linux/writeback.h>
- #include <linux/shmem_fs.h>
-@@ -183,6 +184,7 @@
- 
- #define WORKINGSET_SHIFT 1
- #define EVICTION_SHIFT	((BITS_PER_LONG - BITS_PER_XA_VALUE) +	\
-+			 LRU_CAST_SHADOW_KIND + \
- 			 WORKINGSET_SHIFT + NODES_SHIFT + \
- 			 MEM_CGROUP_ID_SHIFT)
- #define EVICTION_MASK	(~0UL >> EVICTION_SHIFT)
-@@ -204,6 +206,7 @@
- 	eviction = (eviction << MEM_CGROUP_ID_SHIFT) | memcgid;
- 	eviction = (eviction << NODES_SHIFT) | pgdat->node_id;
- 	eviction = (eviction << WORKINGSET_SHIFT) | workingset;
-+	eviction <<= LRU_CAST_SHADOW_KIND;	/* clear: not CAST's */
- 
- 	return xa_mk_value(eviction);
- }
-@@ -215,6 +218,7 @@
- 	int memcgid, nid;
- 	bool workingset;
- 
-+	entry >>= LRU_CAST_SHADOW_KIND;
- 	workingset = entry & ((1UL << WORKINGSET_SHIFT) - 1);
- 	entry >>= WORKINGSET_SHIFT;
- 	nid = entry & ((1UL << NODES_SHIFT) - 1);
-@@ -294,6 +298,12 @@
- 
- 	rcu_read_lock();
- 
-+	/* left by CAST before it was switched off: a refault, of no history here */
-+	if (lru_cast_shadow(shadow)) {
-+		mod_lruvec_state(folio_lruvec(folio), WORKINGSET_REFAULT_BASE + type, delta);
-+		goto unlock;
-+	}
-+
- 	recent = lru_gen_test_recent(shadow, &lruvec, &token, &workingset);
- 	if (lruvec != folio_lruvec(folio))
- 		goto unlock;
-@@ -394,6 +404,9 @@
- 	if (lru_gen_enabled())
- 		return lru_gen_eviction(folio);
- 
-+	if (lru_cast_enabled())
-+		return lru_cast_eviction(folio);
-+
- 	lruvec = mem_cgroup_lruvec(target_memcg, pgdat);
- 	/* XXX: target_memcg can be NULL, go through lruvec */
- 	memcgid = mem_cgroup_id(lruvec_memcg(lruvec));
-@@ -428,16 +441,28 @@
- 	struct pglist_data *pgdat;
- 	unsigned long eviction;
- 
-+	rcu_read_lock();
-+
-+	if (lru_cast_enabled()) {
-+		rcu_read_unlock();
-+		return lru_cast_test_recent(shadow, file, workingset);
-+	}
-+
-+	/* left by CAST before it was switched off: no history here */
-+	if (lru_cast_shadow(shadow)) {
-+		rcu_read_unlock();
-+		*workingset = false;
-+		return false;
-+	}
-+
- 	if (lru_gen_enabled()) {
--		bool recent;
-+		bool recent = lru_gen_test_recent(shadow, &eviction_lruvec, &eviction, workingset);
- 
--		rcu_read_lock();
--		recent = lru_gen_test_recent(shadow, &eviction_lruvec, &eviction, workingset);
- 		rcu_read_unlock();
- 		return recent;
- 	}
- 
--	rcu_read_lock();
-+
- 	unpack_shadow(shadow, &memcgid, &pgdat, &eviction, workingset);
- 	eviction <<= bucket_order;
- 
-@@ -547,6 +572,11 @@
- 		lru_gen_refault(folio, shadow);
- 		return;
- 	}
-+	if (lru_cast_enabled()) {
-+		lru_cast_refault(folio, shadow);
-+		return;
-+	}
-+
- 
- 	/*
- 	 * The activation decision for this folio is made at the level

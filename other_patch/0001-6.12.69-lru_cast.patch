@@ -1218,10 +1218,10 @@ index 0000000..9c8b747
 +#include "tune/tune.h"
 +#include "version.h"
 +
-+DEFINE_STATIC_KEY_TRUE(lru_cast_enabled_key);
++DEFINE_STATIC_KEY_FALSE(lru_cast_enabled_key);
 +
 +/* what a new lruvec starts with */
-+static bool lru_cast_active __read_mostly = true;
++static bool lru_cast_active __read_mostly = false;
 +static DEFINE_MUTEX(lru_cast_switch_lock);
 +
 +#define LRU_CAST_BATCH	1024
@@ -3201,7 +3201,7 @@ new file mode 100644
 index 0000000..7636925
 --- /dev/null
 +++ b/mm/lru_cast/policy/ring.c
-@@ -0,0 +1,705 @@
+@@ -0,0 +1,725 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * CAST -- keys, and M's lowest found by a sweep.
@@ -3817,9 +3817,29 @@ index 0000000..7636925
 +	struct lru_cast *k = &lruvec->lru_cast[type];
 +	struct list_head *m = lru_cast_m(lruvec, type);
 +	struct folio *folio;
++	bool swept = false;
 +
 +	if (list_empty(m))
 +		return NULL;
++	for (;;) {
++		while (k->pos < k->ncand) {
++			struct lru_cast_cand *c = &k->cand[k->pos++];
++
++			lru_cast_cand_ahead(k, k->pos - 1, false);
++			folio = lru_cast_cand_folio(lruvec, type, c);
++			if (folio) {
++				*bucket = c->key;
++				sw_add(SW_TAKEN, 1);
++				return folio;
++			}
++			sw_add(SW_STALE, 1);
++		}
++		if (swept)
++			break;
++		lru_cast_sweep(lruvec, type);
++		lru_cast_cand_ahead(k, 0, true);
++		swept = true;
++	}
 +	sw_add(SW_FALLBACK, 1);
 +	folio = lru_to_folio(m);
 +	*bucket = lru_cast_key_now(folio, lru_cast_tick(lruvec_pgdat(lruvec), type), k->ring_le);

@@ -116,18 +116,18 @@ on:
         required: true
         type: boolean
         default: 'true'
+      cambyses_enable:
+        description: '是否安装 Cambyses 调度器优化'
+        required: true
+        type: boolean
+        default: 'false'
       hmbird_enable:
-        description: '是否集成 HMBIRD 调度器'
+        description: '是否安装 HMBIRD 调度器'
         required: true
         type: boolean
         default: 'true'
       perf_patch_enable:
         description: '是否安装性能优化补丁集'
-        required: true
-        type: boolean
-        default: 'true'
-      cambyses_enable:
-        description: '是否集成 Cambyses 调度器优化(CFS detach_tasks 负载均衡改进)'
         required: true
         type: boolean
         default: 'true'

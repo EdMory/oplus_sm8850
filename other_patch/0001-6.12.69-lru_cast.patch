@@ -1,9 +1,9 @@
 diff --git a/include/linux/lru_cast.h b/include/linux/lru_cast.h
 new file mode 100644
-index 0000000..87f2f88
+index 0000000..05bc48d
 --- /dev/null
 +++ b/include/linux/lru_cast.h
-@@ -0,0 +1,301 @@
+@@ -0,0 +1,321 @@
 +/* SPDX-License-Identifier: GPL-2.0 */
 +/*
 + * CAST -- what the rest of the kernel sees (mm/lru_cast/).
@@ -36,12 +36,19 @@ index 0000000..87f2f88
 +	return static_branch_likely(&lru_cast_enabled_key);
 +}
 +
++/* CAST is on, as /sys/kernel/mm/lru_cast/enabled says */
++bool lru_cast_is_enabled(void);
++/* held across a switch of MGLRU (lru_gen_change_state()): never both on */
++void lru_cast_switch_begin(void);
++void lru_cast_switch_end(void);
++
 +#ifdef CONFIG_SWAP
 +/*
 + * kcompressd (mm/page_io.c): kswapd hands its anon swap-outs to a thread
 + * per node. /sys/kernel/mm/lru_cast/kcompressd, -100..100: 0 off; the
 + * magnitude the queue's depth, at which kswapd writes a folio itself;
-+ * above 0 only while CAST is on, below 0 also with CAST off.
++ * above 0 only while CAST is on, below 0 whatever runs: CAST, MGLRU or
++ * legacy reclaim.
 + */
 +DECLARE_STATIC_KEY_TRUE(kcompressd_enabled_key);
 +DECLARE_STATIC_KEY_FALSE(kcompressd_force_key);
@@ -166,6 +173,19 @@ index 0000000..87f2f88
 +#else /* !CONFIG_LRU_CAST */
 +
 +#define LRU_CAST_SHADOW_KIND	0
++
++static inline bool lru_cast_is_enabled(void)
++{
++	return false;
++}
++
++static inline void lru_cast_switch_begin(void)
++{
++}
++
++static inline void lru_cast_switch_end(void)
++{
++}
 +
 +static inline bool lru_cast_shadow(void *shadow)
 +{
@@ -306,7 +326,7 @@ index 0000000..87f2f88
 +#endif /* _LINUX_LRU_CAST_H */
 +
 diff --git a/include/linux/mm_inline.h b/include/linux/mm_inline.h
-index 35b50f0..720ba8a 100644
+index 35b50f0..d2e3880 100644
 --- a/include/linux/mm_inline.h
 +++ b/include/linux/mm_inline.h
 @@ -9,6 +9,7 @@
@@ -317,7 +337,17 @@ index 35b50f0..720ba8a 100644
  
  #undef CREATE_TRACE_POINTS
  #include <trace/hooks/mm.h>
-@@ -356,6 +357,8 @@ void lruvec_add_folio(struct lruvec *lruvec, struct folio *folio)
+@@ -105,7 +106,8 @@ static __always_inline enum lru_list folio_lru_list(struct folio *folio)
+ 
+ #ifdef CONFIG_LRU_GEN
+ 
+-#ifdef CONFIG_LRU_GEN_ENABLED
++/* as mm/vmscan.c's lru_gen_caps */
++#if defined(CONFIG_LRU_GEN_ENABLED) && !defined(CONFIG_LRU_CAST)
+ static inline bool lru_gen_enabled(void)
+ {
+ 	DECLARE_STATIC_KEY_TRUE(lru_gen_caps[NR_LRU_GEN_CAPS]);
+@@ -356,6 +358,8 @@ void lruvec_add_folio(struct lruvec *lruvec, struct folio *folio)
  	bool skip = false;
  
  	trace_android_vh_lruvec_add_folio(lruvec, folio, lru, false, &skip);
@@ -326,7 +356,7 @@ index 35b50f0..720ba8a 100644
  	if (skip)
  		return;
  
-@@ -375,6 +378,8 @@ void lruvec_add_folio_tail(struct lruvec *lruvec, struct folio *folio)
+@@ -375,6 +379,8 @@ void lruvec_add_folio_tail(struct lruvec *lruvec, struct folio *folio)
  	bool skip = false;
  
  	trace_android_vh_lruvec_add_folio(lruvec, folio, lru, true, &skip);
@@ -588,24 +618,40 @@ index 3caa543..4b3a340 100644
  	update_rq_clock(rq);
  	trace_android_rvh_tick_entry(rq);
 diff --git a/mm/Kconfig b/mm/Kconfig
-index 88d7aba..b023d45 100644
+index 88d7aba..9ca6a51 100644
 --- a/mm/Kconfig
 +++ b/mm/Kconfig
-@@ -1379,3 +1379,14 @@ config NUMA_EMU
+@@ -1327,7 +1327,8 @@ config LRU_GEN_ENABLED
+ 	bool "Enable by default"
+ 	depends on LRU_GEN
+ 	help
+-	  This option enables the multi-gen LRU by default.
++	  This option enables the multi-gen LRU by default. With LRU_CAST,
++	  only when booted with lru_cast=0.
+ 
+ config LRU_GEN_STATS
+ 	bool "Full stats for debugging"
+@@ -1379,3 +1380,20 @@ config NUMA_EMU
  source "mm/damon/Kconfig"
  
  endmenu
 +
 +config LRU_CAST
-+	bool "CAST: Cost-Aware Safety Tier (lru_cast)"
-+	default y if EXPERT
-+	depends on !LRU_GEN
++	bool "CAST page replacement"
++	depends on 64BIT && MMU && SPARSEMEM
++	default y
 +	help
-+	  CAST reclaims by access cost (latency of memory) rather than
-+	  recency of use: a cache under CAST is organized in buckets
-+	  keyed by the size of the window over which the access was seen,
-+	  and reclaim takes from the bucket holding the smallest accesses,
-+	  whatever their recency. See mm/lru_cast/ for the design.
++	  A replacement for the active/inactive LRU lists: newcomers wait in
++	  a FIFO window, the rest are ranked by their exponentially decayed
++	  read count, kept in buckets of a key that does not change while a
++	  folio is not read (CAST). It keeps a 32-bit word per page
++	  frame, 1/1024 of memory, set up when it first runs.
++
++	  It may be built with the multi-gen LRU; the two are never on at
++	  once. CAST is on at boot unless lru_cast=0 is given, and then the
++	  multi-gen LRU is as LRU_GEN_ENABLED says. At run time, one is
++	  switched off before the other is switched on:
++	  /sys/kernel/mm/lru_cast/enabled, /sys/kernel/mm/lru_gen/enabled.
 diff --git a/mm/Makefile b/mm/Makefile
 index 5629f1c..e98668f 100644
 --- a/mm/Makefile
@@ -1132,10 +1178,10 @@ index 0000000..4158f64
 +
 diff --git a/mm/lru_cast/control.c b/mm/lru_cast/control.c
 new file mode 100644
-index 0000000..1231975
+index 0000000..9c8b747
 --- /dev/null
 +++ b/mm/lru_cast/control.c
-@@ -0,0 +1,186 @@
+@@ -0,0 +1,209 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * CAST -- switching it on and off.
@@ -1155,8 +1201,16 @@ index 0000000..1231975
 + * stale (nothing resets them at free); they are all cleared before it comes
 + * back on, and with them goes all it had learnt: the shadows it left
 + * (lru_cast_ghosts_forget()) and the controllers (lru_cast_tune_init()).
++ *
++ * CAST and MGLRU both run on the lists legacy reclaim leaves: one is
++ * switched off to them before the other is switched on from them, and
++ * never are both on. Either's switch is made under lru_cast_switch_lock
++ * (MGLRU's, lru_gen_change_state(), takes it before its own locks), and
++ * neither comes on while the other is: -EBUSY.
 + */
 +#include <linux/init.h>
++#include <linux/mm.h>
++#include <linux/mm_inline.h>
 +#include <linux/mutex.h>
 +#include "control.h"
 +#include "core/core.h"
@@ -1274,6 +1328,10 @@ index 0000000..1231975
 +
 +	mutex_lock(&lru_cast_switch_lock);
 +	if (on != READ_ONCE(lru_cast_active)) {
++		if (on && lru_gen_enabled()) {
++			err = -EBUSY;
++			goto out;
++		}
 +		if (on) {
 +			/* all it needs, or it stays off and says so */
 +			err = lru_cast_store_init();
@@ -1307,6 +1365,17 @@ index 0000000..1231975
 +	return READ_ONCE(lru_cast_active);
 +}
 +
++/* MGLRU's switch: CAST stays as it is while it is made */
++void lru_cast_switch_begin(void)
++{
++	mutex_lock(&lru_cast_switch_lock);
++}
++
++void lru_cast_switch_end(void)
++{
++	mutex_unlock(&lru_cast_switch_lock);
++}
++
 +static int __init lru_cast_init(void)
 +{
 +	lru_cast_prefetch_init();
@@ -1324,10 +1393,10 @@ index 0000000..1231975
 +
 diff --git a/mm/lru_cast/control.h b/mm/lru_cast/control.h
 new file mode 100644
-index 0000000..cf2caee
+index 0000000..6f5c3d8
 --- /dev/null
 +++ b/mm/lru_cast/control.h
-@@ -0,0 +1,17 @@
+@@ -0,0 +1,16 @@
 +/* SPDX-License-Identifier: GPL-2.0 */
 +/*
 + * CAST -- switching it on and off (control.c), and its sysfs
@@ -1340,7 +1409,6 @@ index 0000000..cf2caee
 +#include <linux/types.h>
 +
 +int lru_cast_set_enabled(bool on);
-+bool lru_cast_is_enabled(void);
 +int lru_cast_sysfs_init(void);
 +
 +#endif /* _MM_LRU_CAST_CONTROL_H */
@@ -6494,7 +6562,7 @@ index 0000000..eefff7e
 +
 diff --git a/mm/lru_cast/version.h b/mm/lru_cast/version.h
 new file mode 100644
-index 0000000..15d69ce
+index 0000000..ac3b590
 --- /dev/null
 +++ b/mm/lru_cast/version.h
 @@ -0,0 +1,16 @@
@@ -6507,10 +6575,10 @@ index 0000000..15d69ce
 + * a version bump rebuilds just those objects.
 + */
 +
-+#define LRU_CAST_PROGNAME	"CAST"
++#define LRU_CAST_PROGNAME	"lru_cast"
 +#define LRU_CAST_AUTHOR	"Masahito Suzuki"
 +
-+#define LRU_CAST_VERSION	"0.1.0"
++#define LRU_CAST_VERSION	"0.1.1"
 +
 +#endif /* _MM_LRU_CAST_VERSION_H */
 +
@@ -8425,7 +8493,7 @@ index ad2f121..d2039f4 100644
  /* linux/mm/swap_state.c */
  /* One swap address space for each 64M swap space */
 diff --git a/mm/vmscan.c b/mm/vmscan.c
-index 33275e0..3c9c82a 100644
+index 33275e0..6532b51 100644
 --- a/mm/vmscan.c
 +++ b/mm/vmscan.c
 @@ -159,6 +159,9 @@ struct scan_control {
@@ -8725,7 +8793,88 @@ index 33275e0..3c9c82a 100644
  		switch (scan_balance) {
  		case SCAN_EQUAL:
  			/* Scan lists relative to size */
-@@ -5945,13 +6140,19 @@ static void shrink_lruvec(struct lruvec *lruvec, struct scan_control *sc)
+@@ -2783,7 +2978,8 @@ static bool can_age_anon_pages(struct pglist_data *pgdat,
+ 
+ #ifdef CONFIG_LRU_GEN
+ 
+-#ifdef CONFIG_LRU_GEN_ENABLED
++/* with CAST, CAST comes on at boot: MGLRU only without it (init_lru_gen()) */
++#if defined(CONFIG_LRU_GEN_ENABLED) && !defined(CONFIG_LRU_CAST)
+ DEFINE_STATIC_KEY_ARRAY_TRUE(lru_gen_caps, NR_LRU_GEN_CAPS);
+ #define get_cap(cap)	static_branch_likely(&lru_gen_caps[cap])
+ #else
+@@ -5312,12 +5508,15 @@ static bool drain_evictable(struct lruvec *lruvec)
+ 	return true;
+ }
+ 
+-static void lru_gen_change_state(bool enabled)
++static int lru_gen_change_state(bool enabled)
+ {
+ 	static DEFINE_MUTEX(state_mutex);
+ 
+ 	struct mem_cgroup *memcg;
++	int err = 0;
+ 
++	/* CAST, on the same lists, is never on with it (mm/lru_cast/control.c) */
++	lru_cast_switch_begin();
+ 	cgroup_lock();
+ 	cpus_read_lock();
+ 	get_online_mems();
+@@ -5326,6 +5525,11 @@ static void lru_gen_change_state(bool enabled)
+ 	if (enabled == lru_gen_enabled())
+ 		goto unlock;
+ 
++	if (enabled && lru_cast_is_enabled()) {
++		err = -EBUSY;
++		goto unlock;
++	}
++
+ 	if (enabled)
+ 		static_branch_enable_cpuslocked(&lru_gen_caps[LRU_GEN_CORE]);
+ 	else
+@@ -5361,6 +5565,8 @@ unlock:
+ 	put_online_mems();
+ 	cpus_read_unlock();
+ 	cgroup_unlock();
++	lru_cast_switch_end();
++	return err;
+ }
+ 
+ /******************************************************************************
+@@ -5421,9 +5627,12 @@ static ssize_t enabled_store(struct kobject *kobj, struct kobj_attribute *attr,
+ 	for (i = 0; i < NR_LRU_GEN_CAPS; i++) {
+ 		bool enabled = caps & BIT(i);
+ 
+-		if (i == LRU_GEN_CORE)
+-			lru_gen_change_state(enabled);
+-		else if (enabled)
++		if (i == LRU_GEN_CORE) {
++			int err = lru_gen_change_state(enabled);
++
++			if (err)
++				return err;
++		} else if (enabled)
+ 			static_branch_enable(&lru_gen_caps[i]);
+ 		else
+ 			static_branch_disable(&lru_gen_caps[i]);
+@@ -5885,6 +6094,16 @@ static int __init init_lru_gen(void)
+ 	debugfs_create_file("lru_gen", 0644, NULL, NULL, &lru_gen_rw_fops);
+ 	debugfs_create_file("lru_gen_full", 0444, NULL, NULL, &lru_gen_ro_fops);
+ 
++	/* CAST off (lru_cast=0): MGLRU comes on if it would have without CAST */
++	if (IS_ENABLED(CONFIG_LRU_GEN_ENABLED) && IS_ENABLED(CONFIG_LRU_CAST) &&
++	    !lru_gen_change_state(true)) {
++		int i;
++
++		for (i = 0; i < NR_LRU_GEN_CAPS; i++)
++			if (i != LRU_GEN_CORE)
++				static_branch_enable(&lru_gen_caps[i]);
++	}
++
+ 	return 0;
+ };
+ late_initcall(init_lru_gen);
+@@ -5945,13 +6164,19 @@ static void shrink_lruvec(struct lruvec *lruvec, struct scan_control *sc)
  				sc->priority == DEF_PRIORITY);
  
  	blk_start_plug(&plug);
@@ -8746,7 +8895,7 @@ index 33275e0..3c9c82a 100644
  		unsigned long nr_anon, nr_file, percentage;
  		unsigned long nr_scanned;
  
-@@ -6029,9 +6230,10 @@ out:
+@@ -6029,9 +6254,10 @@ out:
  
  	/*
  	 * Even if we did not try to evict anon pages at all, we want to
@@ -8759,7 +8908,7 @@ index 33275e0..3c9c82a 100644
  	    inactive_is_low(lruvec, LRU_INACTIVE_ANON))
  		shrink_active_list(SWAP_CLUSTER_MAX, lruvec,
  				   sc, LRU_ACTIVE_ANON);
-@@ -6922,6 +7124,10 @@ static void kswapd_age_node(struct pglist_data *pgdat, struct scan_control *sc)
+@@ -6922,6 +7148,10 @@ static void kswapd_age_node(struct pglist_data *pgdat, struct scan_control *sc)
  		return;
  	}
  
@@ -8770,7 +8919,7 @@ index 33275e0..3c9c82a 100644
  	if (!can_age_anon_pages(pgdat, sc))
  		return;
  
-@@ -7671,6 +7877,9 @@ unsigned long shrink_all_memory(unsigned long nr_to_reclaim)
+@@ -7671,6 +7901,9 @@ unsigned long shrink_all_memory(unsigned long nr_to_reclaim)
  void __meminit kswapd_run(int nid)
  {
  	pg_data_t *pgdat = NODE_DATA(nid);
@@ -8780,7 +8929,7 @@ index 33275e0..3c9c82a 100644
  
  	pgdat_kswapd_lock(pgdat);
  	if (!pgdat->kswapd) {
-@@ -7682,7 +7891,32 @@ void __meminit kswapd_run(int nid)
+@@ -7682,7 +7915,32 @@ void __meminit kswapd_run(int nid)
  			BUG_ON(system_state < SYSTEM_RUNNING);
  			pgdat->kswapd = NULL;
  		}
@@ -8813,7 +8962,7 @@ index 33275e0..3c9c82a 100644
  	pgdat_kswapd_unlock(pgdat);
  }
  
-@@ -7701,6 +7935,13 @@ void __meminit kswapd_stop(int nid)
+@@ -7701,6 +7959,13 @@ void __meminit kswapd_stop(int nid)
  		kthread_stop(kswapd);
  		pgdat->kswapd = NULL;
  	}
@@ -8828,7 +8977,7 @@ index 33275e0..3c9c82a 100644
  }
  
 diff --git a/mm/workingset.c b/mm/workingset.c
-index 2613579..8518bd5 100644
+index 2613579..7fb3de6 100644
 --- a/mm/workingset.c
 +++ b/mm/workingset.c
 @@ -6,6 +6,7 @@
@@ -8863,7 +9012,20 @@ index 2613579..8518bd5 100644
  	workingset = entry & ((1UL << WORKINGSET_SHIFT) - 1);
  	entry >>= WORKINGSET_SHIFT;
  	nid = entry & ((1UL << NODES_SHIFT) - 1);
-@@ -394,6 +398,9 @@ void *workingset_eviction(struct folio *folio, struct mem_cgroup *target_memcg)
+@@ -294,6 +298,12 @@ static void lru_gen_refault(struct folio *folio, void *shadow)
+ 
+ 	rcu_read_lock();
+ 
++	/* left by CAST before it was switched off: a refault, of no history here */
++	if (lru_cast_shadow(shadow)) {
++		mod_lruvec_state(folio_lruvec(folio), WORKINGSET_REFAULT_BASE + type, delta);
++		goto unlock;
++	}
++
+ 	recent = lru_gen_test_recent(shadow, &lruvec, &token, &workingset);
+ 	if (lruvec != folio_lruvec(folio))
+ 		goto unlock;
+@@ -394,6 +404,9 @@ void *workingset_eviction(struct folio *folio, struct mem_cgroup *target_memcg)
  	if (lru_gen_enabled())
  		return lru_gen_eviction(folio);
  
@@ -8873,10 +9035,11 @@ index 2613579..8518bd5 100644
  	lruvec = mem_cgroup_lruvec(target_memcg, pgdat);
  	/* XXX: target_memcg can be NULL, go through lruvec */
  	memcgid = mem_cgroup_id(lruvec_memcg(lruvec));
-@@ -437,6 +444,19 @@ bool workingset_test_recent(void *shadow, bool file, bool *workingset,
- 		return recent;
- 	}
+@@ -428,16 +441,28 @@ bool workingset_test_recent(void *shadow, bool file, bool *workingset,
+ 	struct pglist_data *pgdat;
+ 	unsigned long eviction;
  
++	rcu_read_lock();
 +
 +	if (lru_cast_enabled()) {
 +		rcu_read_unlock();
@@ -8890,10 +9053,22 @@ index 2613579..8518bd5 100644
 +		return false;
 +	}
 +
- 	rcu_read_lock();
+ 	if (lru_gen_enabled()) {
+-		bool recent;
++		bool recent = lru_gen_test_recent(shadow, &eviction_lruvec, &eviction, workingset);
+ 
+-		rcu_read_lock();
+-		recent = lru_gen_test_recent(shadow, &eviction_lruvec, &eviction, workingset);
+ 		rcu_read_unlock();
+ 		return recent;
+ 	}
+ 
+-	rcu_read_lock();
++
  	unpack_shadow(shadow, &memcgid, &pgdat, &eviction, workingset);
  	eviction <<= bucket_order;
-@@ -547,6 +567,11 @@ void workingset_refault(struct folio *folio, void *shadow)
+ 
+@@ -547,6 +572,11 @@ void workingset_refault(struct folio *folio, void *shadow)
  		lru_gen_refault(folio, shadow);
  		return;
  	}

@@ -126,6 +126,11 @@ on:
         required: true
         type: boolean
         default: 'true'
+      cambyses_enable:
+        description: '是否集成 Cambyses 调度器优化(CFS detach_tasks 负载均衡改进)'
+        required: true
+        type: boolean
+        default: 'true'
       ccache_update:
         description: '更新ccache缓存(将本次编译生成的ccache缓存覆盖至仓库缓存)'
         required: true
@@ -1369,6 +1374,59 @@ jobs:
           echo "CONFIG_HMBIRD_SCHED=y" >> arch/arm64/configs/gki_defconfig
           echo "HMBIRD 集成完成"
           
+      - name: 集成 Cambyses 调度器优化
+        if: inputs.cambyses_enable
+        run: |
+          echo "正在集成 Cambyses(firelzrd/cambyses v0.6.0; 基于 6.12.74 原版补丁针对本 6.12.69 GKI 树逐 hunk 重建, 仅改 kernel/sched/fair.c 与 features.h, 不新增导出符号、不触碰 ANDROID_KABI_RESERVE, KABI 面安全)…"
+          # 任何命令失败时打印出错行号: 避免 set -e 静默退出后失败点无法定位
+          trap 'echo "Cambyses 集成步骤在脚本第 $LINENO 行失败(退出码 $?)" >&2' ERR
+          cd kernel_workspace/common
+
+          # 下载补丁(仓库 other_patch 三源回退)
+          fetch() { # $1=url $2=输出文件 $3=日志文件
+            if command -v curl >/dev/null 2>&1; then
+              curl -fSL --retry 3 --retry-delay 2 --connect-timeout 20 -o "$2" "$1" 2> "$3"
+            else
+              wget -O "$2" --tries=3 --timeout=20 "$1" 2> "$3"
+            fi
+          }
+          get_patch() { # $1=补丁文件名(位于仓库 other_patch/ 目录)
+            local name="$1" u
+            local urls=(
+              "https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/$name"
+              "https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$GITHUB_REF_NAME/other_patch/$name"
+              "https://cdn.jsdelivr.net/gh/$GITHUB_REPOSITORY@$GITHUB_REF_NAME/other_patch/$name"
+            )
+            rm -f "$name"
+            for u in "${urls[@]}"; do
+              echo "尝试下载 Cambyses 补丁 $name: $u"
+              if fetch "$u" "$name.tmp" "$name.download.log"; then
+                if [ -s "$name.tmp" ] && grep -q '^diff --git ' "$name.tmp"; then
+                  mv "$name.tmp" "$name"
+                  echo "下载成功: $name ($(wc -c < "$name") 字节)"
+                  rm -f "$name.download.log"
+                  return 0
+                fi
+                echo "该源返回内容异常(空文件或非 unified diff), 尝试下一个源"
+              else
+                echo "该源不可用: $(tail -n 2 "$name.download.log" 2>/dev/null | tr '\n' ' ')"
+              fi
+            done
+            rm -f "$name.tmp" "$name.download.log"
+            return 1
+          }
+          CAMBYSES_PATCH=cambyses-6.12.69-kabi-safe.patch
+          get_patch "$CAMBYSES_PATCH" || { echo "Cambyses 补丁下载失败: 仓库 other_patch/$CAMBYSES_PATCH 缺失或不可达(见上方诊断)"; exit 1; }
+          patch -p1 -F 0 --no-backup-if-mismatch < "$CAMBYSES_PATCH"
+
+          # 显式写入开关: SCHED_FEAT 生效依赖 CONFIG_SCHED_DEBUG=y, JUMP_LABEL 为 Cambyses 运行前提, 幂等追加
+          grep -q '^CONFIG_SCHED_DEBUG=' arch/arm64/configs/gki_defconfig \
+            || echo "CONFIG_SCHED_DEBUG=y" >> arch/arm64/configs/gki_defconfig
+          grep -q '^CONFIG_JUMP_LABEL=' arch/arm64/configs/gki_defconfig \
+            || echo "CONFIG_JUMP_LABEL=y" >> arch/arm64/configs/gki_defconfig
+          echo "提示: Cambyses 两个 feature 默认开启(LB_ROTATE_BLOCK/LB_STRICT_BUDGET), 运行时可用 /sys/kernel/debug/sched/features 查看/切换"
+          echo "Cambyses 集成完成(零 fuzz 应用 + ABI 面未触碰)！"
+          
       - name: 启用Re-Kernel支持
         if: inputs.rekernel_enable
         run: |
@@ -1698,6 +1756,7 @@ jobs:
           echo "ADIOS: ${{ github.event.inputs.adios_enable }}" >> ./ak3.log
           echo "BORE: ${{ github.event.inputs.bore_enable }}" >> ./ak3.log
           echo "Perf-Patch ${{ github.event.inputs.perf_patch_enable }}" >> ./ak3.log
+          echo "Cambyses ${{ github.event.inputs.cambyses_enable }}" >> ./ak3.log
           zip -z ../$AK3_NAME < ./ak3.log
 
       - name: 上传 Ccache 调试日志
@@ -1788,6 +1847,7 @@ jobs:
           - ADIOS IO调度器支持：${{ github.event.inputs.adios_enable }}
           - BORE 调度器支持：${{ github.event.inputs.bore_enable }}
           - 性能优化补丁集：${{ github.event.inputs.perf_patch_enable }}
+          - Cambyses 调度器优化：${{ github.event.inputs.cambyses_enable }}
           - BakaSU管理器下载：[BakaSU_CI](https://github.com/cctv18/ReSukiSU_CI/releases)
           
           ### ⏫️ 更新内容：

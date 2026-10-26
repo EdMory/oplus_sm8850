@@ -545,6 +545,7 @@ jobs:
         run: |
           echo "正在下载并应用 lru_cast 补丁..."
           cd kernel_workspace/common
+          echo 'CONFIG_LRU_CAST=y' >> arch/arm64/configs/gki_defconfig
           wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/0001-6.12.69-lru_cast.patch
           # 前置断言: 补丁必须包含 mm/lru_cast/ 新文件与 Kconfig 选项
           grep -q 'config LRU_CAST' 0001-6.12.69-lru_cast.patch || { echo "::error::lru_cast 补丁内容异常(缺 Kconfig 段)"; exit 1; }
@@ -558,15 +559,6 @@ jobs:
           patch -p1 --no-backup-if-mismatch -F 0 < 0001-6.12.69-lru_cast.patch
           echo "lru_cast 补丁应用成功"
 
-      - name: 调整 defconfig 以启用 lru_cast
-        if: inputs.lru_cast_enable
-        run: |
-          echo "lru_cast 与 MGLRU(LRU_GEN) 互斥, 按 lru_cast 设计关闭 MGLRU 并显式开启 LRU_CAST..."
-          cd kernel_workspace/common
-          sed -i 's/^CONFIG_LRU_GEN=y/# CONFIG_LRU_GEN is not set/; s/^CONFIG_LRU_GEN_ENABLED=y/# CONFIG_LRU_GEN_ENABLED is not set/' arch/arm64/configs/gki_defconfig
-          echo 'CONFIG_LRU_CAST=y' >> arch/arm64/configs/gki_defconfig
-          grep -nE 'LRU_GEN|LRU_CAST' arch/arm64/configs/gki_defconfig
-          
       - name: 应用 PMICWD 修复补丁
         run: |
           echo "正在应用PMICWD修复补丁(移除 ktime_get() 内 WARN_ON(timekeeping_suspended), 消除 suspend 期 PMICWD 刷屏 WARN)…"

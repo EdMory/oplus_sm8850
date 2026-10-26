@@ -28,7 +28,7 @@ index 0000000..05bc48d
 +
 +#ifdef CONFIG_LRU_CAST
 +
-+DECLARE_STATIC_KEY_TRUE(lru_cast_enabled_key);
++DECLARE_STATIC_KEY_FALSE(lru_cast_enabled_key);
 +
 +/* CAST is on somewhere: for the hooks with no lruvec at hand */
 +static inline bool lru_cast_enabled(void)

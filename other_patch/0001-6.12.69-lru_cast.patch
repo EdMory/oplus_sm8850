@@ -2547,7 +2547,7 @@ index 0000000..910f803
 +#include <linux/sysfs.h>
 +#include "policy/policy.h"
 +
-+static unsigned int lru_cast_clean_min_ratio = 10;
++static unsigned int lru_cast_clean_min_ratio = 0;
 +
 +/* reclaim calls that took anon, took file, took nothing, took both by size */
 +static atomic_long_t lru_cast_picks[4];

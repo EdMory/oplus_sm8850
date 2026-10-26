@@ -3,7 +3,7 @@ new file mode 100644
 index 0000000..05bc48d
 --- /dev/null
 +++ b/include/linux/lru_cast.h
-@@ -0,0 +1,321 @@
+@@ -0,0 +1,317 @@
 +/* SPDX-License-Identifier: GPL-2.0 */
 +/*
 + * CAST -- what the rest of the kernel sees (mm/lru_cast/).
@@ -56,11 +56,7 @@ index 0000000..05bc48d
 +
 +static inline bool kcompressd_active(void)
 +{
-+	if (!static_branch_likely(&kcompressd_enabled_key))
-+		return false;
-+	if (static_branch_unlikely(&kcompressd_force_key))
-+		return true;
-+	return lru_cast_enabled();
++	return false;
 +}
 +#endif
 +
@@ -2547,7 +2543,7 @@ index 0000000..910f803
 +#include <linux/sysfs.h>
 +#include "policy/policy.h"
 +
-+static unsigned int lru_cast_clean_min_ratio = 0;
++static unsigned int lru_cast_clean_min_ratio = 10;
 +
 +/* reclaim calls that took anon, took file, took nothing, took both by size */
 +static atomic_long_t lru_cast_picks[4];

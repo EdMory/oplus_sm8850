@@ -28,7 +28,7 @@ index 0000000..05bc48d
 +
 +#ifdef CONFIG_LRU_CAST
 +
-+DECLARE_STATIC_KEY_FALSE(lru_cast_enabled_key);
++DECLARE_STATIC_KEY_TRUE(lru_cast_enabled_key);
 +
 +/* CAST is on somewhere: for the hooks with no lruvec at hand */
 +static inline bool lru_cast_enabled(void)
@@ -1218,10 +1218,10 @@ index 0000000..9c8b747
 +#include "tune/tune.h"
 +#include "version.h"
 +
-+DEFINE_STATIC_KEY_FALSE(lru_cast_enabled_key);
++DEFINE_STATIC_KEY_TRUE(lru_cast_enabled_key);
 +
 +/* what a new lruvec starts with */
-+static bool lru_cast_active __read_mostly = false;
++static bool lru_cast_active __read_mostly = true;
 +static DEFINE_MUTEX(lru_cast_switch_lock);
 +
 +#define LRU_CAST_BATCH	1024
@@ -1240,7 +1240,7 @@ index 0000000..9c8b747
 +{
 +	lru_cast_ring_init(lruvec);
 +	lru_cast_ring_reset(lruvec);
-+	lruvec->lru_cast_on = lru_cast_active;
++	lruvec->lru_cast_on = false;
 +}
 +
 +/* an lruvec freed (its memcg's): no folio is left on it */

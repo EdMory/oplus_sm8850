@@ -1413,10 +1413,10 @@ jobs:
           patch -p1 -F 0 --no-backup-if-mismatch < "$CAMBYSES_PATCH"
 
           # 显式写入开关: SCHED_FEAT 生效依赖 CONFIG_SCHED_DEBUG=y, JUMP_LABEL 为 Cambyses 运行前提, 幂等追加
-          grep -q '^CONFIG_SCHED_DEBUG=' arch/arm64/configs/gki_defconfig \
-            || echo "CONFIG_SCHED_DEBUG=y" >> arch/arm64/configs/gki_defconfig
-          grep -q '^CONFIG_JUMP_LABEL=' arch/arm64/configs/gki_defconfig \
-            || echo "CONFIG_JUMP_LABEL=y" >> arch/arm64/configs/gki_defconfig
+          #grep -q '^CONFIG_SCHED_DEBUG=' arch/arm64/configs/gki_defconfig \
+          #  || echo "CONFIG_SCHED_DEBUG=y" >> arch/arm64/configs/gki_defconfig
+          #grep -q '^CONFIG_JUMP_LABEL=' arch/arm64/configs/gki_defconfig \
+          #  || echo "CONFIG_JUMP_LABEL=y" >> arch/arm64/configs/gki_defconfig
           echo "提示: Cambyses 两个 feature 默认开启(LB_ROTATE_BLOCK/LB_STRICT_BUDGET), 运行时可用 /sys/kernel/debug/sched/features 查看/切换"
           echo "Cambyses 集成完成(零 fuzz 应用 + ABI 面未触碰)！"
           

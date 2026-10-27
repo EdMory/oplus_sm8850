@@ -1,10 +1,13 @@
 diff --git a/kernel/sched/features.h b/kernel/sched/features.h
-index 050d7503064e..a15d2b929ca6 100644
+index 050d7503064e..92807b4312d6 100644
 --- a/kernel/sched/features.h
 +++ b/kernel/sched/features.h
-@@ -122,3 +122,5 @@
- SCHED_FEAT(UTIL_EST, true)
+@@ -111,6 +111,8 @@
+ SCHED_FEAT(RT_RUNTIME_SHARE, false)
+ SCHED_FEAT(LB_MIN, false)
+ SCHED_FEAT(ATTACH_AGE_LOAD, true)
++/* cambyses-e5: LB_STRICT_BUDGET entry at original E3 site (identity control) */
++SCHED_FEAT(LB_STRICT_BUDGET, false)
  
- SCHED_FEAT(LATENCY_WARN, false)
-+/* cambyses-e4: LB_ROTATE_BLOCK entry appended at end of file (position control) */
-+SCHED_FEAT(LB_ROTATE_BLOCK, false)
+ SCHED_FEAT(WA_IDLE, true)
+ SCHED_FEAT(WA_WEIGHT, true)

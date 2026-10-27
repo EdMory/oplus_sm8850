@@ -117,10 +117,10 @@ on:
         type: boolean
         default: 'true'
       cambyses_enable:
-        description: '是否安装 Cambyses 调度器优化'
+        description: '是否安装 Cambyses 调度器'
         required: true
         type: boolean
-        default: 'false'
+        default: 'true'
       hmbird_enable:
         description: '是否安装 HMBIRD 调度器'
         required: true

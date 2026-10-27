@@ -1,19 +1,10 @@
 diff --git a/kernel/sched/features.h b/kernel/sched/features.h
-index 318a744e7f..cf2d5887d2 100644
+index 050d7503064e..a15d2b929ca6 100644
 --- a/kernel/sched/features.h
 +++ b/kernel/sched/features.h
-@@ -112,6 +112,14 @@
- SCHED_FEAT(LB_MIN, false)
- SCHED_FEAT(ATTACH_AGE_LOAD, true)
+@@ -122,3 +122,5 @@
+ SCHED_FEAT(UTIL_EST, true)
  
-+/*
-+ * Advance detach_tasks()' scan window by rotating the examined block to the
-+ * head of cfs_tasks, instead of moving each rejected task there one by one.
-+ *
-+ * Turn off to get the upstream per-reject list_move() behaviour.
-+ */
+ SCHED_FEAT(LATENCY_WARN, false)
++/* cambyses-e4: LB_ROTATE_BLOCK entry appended at end of file (position control) */
 +SCHED_FEAT(LB_ROTATE_BLOCK, false)
-+
- SCHED_FEAT(WA_IDLE, true)
- SCHED_FEAT(WA_WEIGHT, true)
- SCHED_FEAT(WA_BIAS, true)

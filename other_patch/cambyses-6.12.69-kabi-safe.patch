@@ -1,9 +1,8 @@
-diff --git a/kernel/sched/features.h b/kernel/sched/features.h
-index 050d7503064e..dfacad4de23c 100644
 --- a/kernel/sched/features.h
 +++ b/kernel/sched/features.h
-@@ -121,4 +121,3 @@
+@@ -121,4 +121,4 @@
   */
  SCHED_FEAT(UTIL_EST, true)
  
 -SCHED_FEAT(LATENCY_WARN, false)
++SCHED_FEAT(LATENCY_WARN, true)

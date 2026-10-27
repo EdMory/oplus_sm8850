@@ -369,11 +369,13 @@ diff --git a/include/linux/page-flags.h b/include/linux/page-flags.h
 index 47ac06b..ab5c9ab 100644
 --- a/include/linux/page-flags.h
 +++ b/include/linux/page-flags.h
-@@ -135,6 +135,7 @@
+@@ -135,6 +135,9 @@
  	PG_oem_reserved_2,
  	PG_oem_reserved_3,
  	PG_oem_reserved_4,
++#ifdef CONFIG_LRU_CAST
 +	PG_rekey,
++#endif
  #endif
  	__NR_PAGEFLAGS,
  

@@ -996,7 +996,7 @@ new file mode 100644
 index 0000000..9c8b747
 --- /dev/null
 +++ b/mm/lru_cast/control.c
-@@ -0,0 +1,114 @@
+@@ -0,0 +1,106 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * CAST -- switching it on and off.

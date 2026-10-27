@@ -1903,7 +1903,7 @@ index 0000000..1a022b2
 +	kvfree(pages);
 +}
 +
-+static int lru_cast_mem_cb(struct notifier_block *nb, unsigned long action, void *arg)
++static int __maybe_unused lru_cast_mem_cb(struct notifier_block *nb, unsigned long action, void *arg)
 +{
 +	struct memory_notify *mn = arg;
 +	unsigned long sec = pfn_to_section_nr(mn->start_pfn);
@@ -1924,7 +1924,7 @@ index 0000000..1a022b2
 +	return NOTIFY_OK;
 +}
 +
-+static struct notifier_block lru_cast_mem_nb = {
++static struct notifier_block __maybe_unused lru_cast_mem_nb = {
 +	.notifier_call = lru_cast_mem_cb,
 +	.priority = DEFAULT_CALLBACK_PRI,
 +};
@@ -1985,7 +1985,7 @@ index 0000000..1a022b2
 + */
 +static int __init lru_cast_store_hotplug_init(void)
 +{
-+	return register_memory_notifier(&lru_cast_mem_nb);
++	return 0;
 +}
 +subsys_initcall(lru_cast_store_hotplug_init);
 +
@@ -5299,7 +5299,7 @@ new file mode 100644
 index 0000000..50722f6
 --- /dev/null
 +++ b/mm/lru_cast/walk/simd_x86.c
-@@ -0,0 +1,71 @@
+@@ -0,0 +1,64 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * CAST -- the young-bit scan on x86-64: the widest of the three SIMD
@@ -5360,13 +5360,6 @@ index 0000000..50722f6
 +
 +static int __init lru_cast_simd_init(void)
 +{
-+	if (boot_cpu_has(X86_FEATURE_AVX512F)) {
-+		static_call_update(lru_cast_simd_scan, lru_cast_simd_scan_avx512);
-+		lru_cast_simd_isa = "avx512";
-+	} else if (boot_cpu_has(X86_FEATURE_AVX2)) {
-+		static_call_update(lru_cast_simd_scan, lru_cast_simd_scan_avx2);
-+		lru_cast_simd_isa = "avx2";
-+	}
 +	return 0;
 +}
 +arch_initcall(lru_cast_simd_init);
@@ -7077,63 +7070,6 @@ index 33275e0..6532b51 100644
  	return 0;
  };
  late_initcall(init_lru_gen);
-@@ -7671,6 +7741,9 @@
- void __meminit kswapd_run(int nid)
- {
- 	pg_data_t *pgdat = NODE_DATA(nid);
-+#if defined(CONFIG_LRU_CAST) && defined(CONFIG_SWAP)
-+	int ret;
-+#endif
- 
- 	pgdat_kswapd_lock(pgdat);
- 	if (!pgdat->kswapd) {
-@@ -7682,7 +7755,32 @@
- 			BUG_ON(system_state < SYSTEM_RUNNING);
- 			pgdat->kswapd = NULL;
- 		}
-+#if defined(CONFIG_LRU_CAST) && defined(CONFIG_SWAP)
-+		ret = kfifo_alloc(&pgdat->kcompressd_fifo,
-+				KCOMPRESSD_FIFO_SIZE * sizeof(struct folio *),
-+				GFP_KERNEL);
-+		if (ret) {
-+			pr_err("%s: fail to kfifo_alloc\n", __func__);
-+			goto out;
-+		}
-+
-+		pr_info("kcompressd (forked from kcompressd-unofficial by Masahito Suzuki, originally Kcompressd by Qun-Wei Lin from MediaTek)\n");
-+		spin_lock_init(&pgdat->kcompressd_fifo_lock);
-+		pgdat->kcompressd = kthread_create_on_node(kcompressd, pgdat, nid,
-+				"kcompressd%d", nid);
-+		if (IS_ERR(pgdat->kcompressd)) {
-+			pr_err("Failed to start kcompressd on node %d，ret=%ld\n",
-+					nid, PTR_ERR(pgdat->kcompressd));
-+			pgdat->kcompressd = NULL;
-+			kfifo_free(&pgdat->kcompressd_fifo);
-+		} else {
-+			wake_up_process(pgdat->kcompressd);
-+		}
-+#endif
- 	}
-+#if defined(CONFIG_LRU_CAST) && defined(CONFIG_SWAP)
-+out:
-+#endif
- 	pgdat_kswapd_unlock(pgdat);
- }
- 
-@@ -7701,6 +7799,13 @@
- 		kthread_stop(kswapd);
- 		pgdat->kswapd = NULL;
- 	}
-+#if defined(CONFIG_LRU_CAST) && defined(CONFIG_SWAP)
-+	if (pgdat->kcompressd) {
-+		kthread_stop(pgdat->kcompressd);
-+		pgdat->kcompressd = NULL;
-+		kfifo_free(&pgdat->kcompressd_fifo);
-+	}
-+#endif
- 	pgdat_kswapd_unlock(pgdat);
- }
- 
 diff --git a/mm/workingset.c b/mm/workingset.c
 index 2613579..7fb3de6 100644
 --- a/mm/workingset.c

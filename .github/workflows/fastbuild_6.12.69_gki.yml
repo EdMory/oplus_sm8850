@@ -545,7 +545,7 @@ jobs:
         run: |
           echo "正在下载并应用 lru_cast 补丁..."
           cd kernel_workspace/common
-          echo 'CONFIG_LRU_CAST=y' >> arch/arm64/configs/gki_defconfig
+          echo '# CONFIG_LRU_CAST is not set' >> arch/arm64/configs/gki_defconfig
           wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/0001-6.12.69-lru_cast.patch
           # 前置断言: 补丁必须包含 mm/lru_cast/ 新文件与 Kconfig 选项
           grep -q 'config LRU_CAST' 0001-6.12.69-lru_cast.patch || { echo "::error::lru_cast 补丁内容异常(缺 Kconfig 段)"; exit 1; }

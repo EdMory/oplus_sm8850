@@ -1,3 +1,5 @@
+diff --git a/kernel/sched/features.h b/kernel/sched/features.h
+index 050d7503064e..0d3182c19c9c 100644
 --- a/kernel/sched/features.h
 +++ b/kernel/sched/features.h
 @@ -121,4 +121,4 @@

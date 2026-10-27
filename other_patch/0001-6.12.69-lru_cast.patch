@@ -142,11 +142,11 @@ index 0000000..05bc48d
 + * legacy's (mm/workingset.c), whose fields sit above it. Across a switch
 + * each side takes the other's as no history.
 + */
-+#define LRU_CAST_SHADOW_KIND	1
++#define LRU_CAST_SHADOW_KIND	0
 +
 +static inline bool lru_cast_shadow(void *shadow)
 +{
-+	return xa_to_value(shadow) & 1;
++	return false;
 +}
 +
 +#else /* !CONFIG_LRU_CAST */

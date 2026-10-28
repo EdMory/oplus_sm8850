@@ -820,7 +820,7 @@ index 5629f1c..e98668f 100644
  obj-$(CONFIG_ZSWAP)	+= zswap.o
  obj-$(CONFIG_HAS_DMA)	+= dmapool.o
 diff --git a/mm/filemap.c b/mm/filemap.c
-index 9a7e8f1..1e4753d 100644
+index 9a7e8f1..5c8e068 100644
 --- a/mm/filemap.c
 +++ b/mm/filemap.c
 @@ -21,6 +21,7 @@
@@ -840,11 +840,10 @@ index 9a7e8f1..1e4753d 100644
  		struct address_space *mapping, size_t count,
  		struct folio *folio, bool need_uptodate)
  {
-@@ -2580,7 +2581,25 @@ unlock_mapping:
+@@ -2580,6 +2581,24 @@ unlock_mapping:
  	return error;
  }
  
--static int filemap_create_folio(struct kiocb *iocb, struct folio_batch *fbatch)
 +/* CAST: what waiting for a page to come back in cost the task */
 +static int filemap_update_page(struct kiocb *iocb,
 +		struct address_space *mapping, size_t count,
@@ -863,10 +862,9 @@ index 9a7e8f1..1e4753d 100644
 +	return error;
 +}
 +
-+static int filemap_create_folio(static int filemap_create_folio(struct kiocb *iocb, struct folio_batch *fbatch)
+ static int filemap_create_folio(struct kiocb *iocb, struct folio_batch *fbatch)
  {
  	struct address_space *mapping = iocb->ki_filp->f_mapping;
- 	struct folio *folio;
 @@ -3519,6 +3538,8 @@ vm_fault_t filemap_fault(struct vm_fault *vmf)
  	struct folio *folio;
  	vm_fault_t ret = 0;

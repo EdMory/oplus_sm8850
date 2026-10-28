@@ -726,19 +726,9 @@ index 2613579..7fb3de6 100644
  	/*
  	 * The activation decision for this folio is made at the level
 diff --git a/include/linux/mmzone.h b/include/linux/mmzone.h
-index 37cd759..f99e58f 100644
 --- a/include/linux/mmzone.h
 +++ b/include/linux/mmzone.h
-@@ -24,6 +24,8 @@
- #include <linux/page-flags.h>
- #include <linux/local_lock.h>
- #include <linux/zswap.h>
-+#include <linux/sizes.h>
-+#include <linux/kfifo.h>
- #include <linux/android_kabi.h>
- #include <asm/page.h>
- 
-@@ -657,6 +659,73 @@ static inline void lru_gen_soft_reclaim(struct mem_cgroup *memcg, int nid)
+@@ -657,6 +657,52 @@
  
  #endif /* CONFIG_LRU_GEN */
  
@@ -786,33 +776,12 @@ index 37cd759..f99e58f 100644
 +	long			w_room;
 +};
 +
-+/*
-+ * per node: the eviction clock and its tick, one for both types so that
-+ * the value of an anon page and of a file page are in the same time
-+ */
-+struct lru_cast_clock {
-+	/*
-+	 * C/4 pages taken in per tick, C what the node's LRUs can hold: read
-+	 * with every read recorded, written once a tick, on a line of its own
-+	 */
-+	unsigned long		tick ____cacheline_aligned_in_smp;
-+	/* pages taken in so far, added to once a CPU's batch */
-+	atomic_long_t		installed ____cacheline_aligned_in_smp;
-+	/* pages taken in at which the tick next advances */
-+	unsigned long		next;
-+	/* pages evicted so far, written with every eviction */
-+	unsigned long		evict;
-+	/* the lruvecs' numbers in the node's owner tags (lru_cast.lid) in use */
-+	DECLARE_BITMAP(lids, LRU_CAST_LIDS);
-+	/* ... of those, the numbers of lruvecs whose folios went to another's lists */
-+	DECLARE_BITMAP(lids_moved, LRU_CAST_LIDS);
-+};
 +#endif
 +
  struct lruvec {
  	struct list_head		lists[NR_LRU_LISTS];
  	/* per lruvec lru_lock for memcg */
-@@ -682,6 +751,11 @@ struct lruvec {
+@@ -682,6 +728,11 @@
  	struct lru_gen_mm_state		mm_state;
  #endif
  #endif /* CONFIG_LRU_GEN */
@@ -824,68 +793,3 @@ index 37cd759..f99e58f 100644
  #ifdef CONFIG_MEMCG
  	struct pglist_data *pgdat;
  #endif
-@@ -1409,6 +1483,20 @@ typedef struct pglist_data {
- 
- 	int kswapd_failures;		/* Number of 'reclaimed == 0' runs */
- 
-+#if defined(CONFIG_LRU_CAST) && defined(CONFIG_SWAP)
-+/*
-+ * kfifo backing storage capacity (in folio* slots). The sysfs knob
-+ * vm_kcompressd sets the effective queue length in [-100, +100]; this
-+ * matches the upper bound. ~800 bytes per pgdat regardless of the
-+ * currently configured depth.
-+ */
-+#define KCOMPRESSD_FIFO_SIZE 100
-+	wait_queue_head_t kcompressd_wait;
-+	struct task_struct *kcompressd;
-+	struct kfifo kcompressd_fifo;
-+	spinlock_t kcompressd_fifo_lock;
-+#endif
-+
- #ifdef CONFIG_COMPACTION
- 	int kcompactd_max_order;
- 	enum zone_type kcompactd_highest_zoneidx;
-@@ -1477,6 +1565,9 @@ typedef struct pglist_data {
- 	/* lru_gen_folio list */
- 	struct lru_gen_memcg memcg_lru;
- #endif
-+#ifdef CONFIG_LRU_CAST
-+	struct lru_cast_clock lru_cast_clock;
-+#endif
- 
- 	CACHELINE_PADDING(_pad2_);
- 
-diff --git a/include/linux/mm_types.h b/include/linux/mm_types.h
-index 21a3ec0..67cdfe9 100644
---- a/include/linux/mm_types.h
-+++ b/include/linux/mm_types.h
-@@ -1075,6 +1075,10 @@ struct mm_struct {
- 		} lru_gen;
- #endif /* CONFIG_LRU_GEN_WALKS_MMU */
- 
-+#ifdef CONFIG_LRU_CAST
-+		unsigned long lru_cast_used;
-+#endif
-+
- 		ANDROID_KABI_USE(1, struct task_dma_buf_info *dmabuf_info);
- 	} __randomize_layout;
- 
-@@ -1164,6 +1168,18 @@ static inline void lru_gen_use_mm(struct mm_struct *mm)
- 
- #endif /* CONFIG_LRU_GEN_WALKS_MMU */
- 
-+#ifdef CONFIG_LRU_CAST
-+static inline void lru_cast_use_mm(struct mm_struct *mm)
-+{
-+	if (mm && !READ_ONCE(mm->lru_cast_used))
-+		WRITE_ONCE(mm->lru_cast_used, 1);
-+}
-+#else
-+static inline void lru_cast_use_mm(struct mm_struct *mm)
-+{
-+}
-+#endif
-+
- struct vma_iterator {
- 	struct ma_state mas;
- };

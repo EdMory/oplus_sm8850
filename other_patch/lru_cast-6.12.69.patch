@@ -781,15 +781,3 @@ diff --git a/include/linux/mmzone.h b/include/linux/mmzone.h
  struct lruvec {
  	struct list_head		lists[NR_LRU_LISTS];
  	/* per lruvec lru_lock for memcg */
-@@ -682,6 +728,11 @@
- 	struct lru_gen_mm_state		mm_state;
- #endif
- #endif /* CONFIG_LRU_GEN */
-+#ifdef CONFIG_LRU_CAST
-+	struct lru_cast		lru_cast[ANON_AND_FILE];
-+	/* CAST runs this lruvec: its active folios are in the rings */
-+	bool				lru_cast_on;
-+#endif
- #ifdef CONFIG_MEMCG
- 	struct pglist_data *pgdat;
- #endif

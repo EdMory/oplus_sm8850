@@ -740,8 +740,8 @@ diff --git a/include/linux/mmzone.h b/include/linux/mmzone.h
 + * list is the newcomers' FIFO window (W).
 + */
 +#define LRU_CAST_BUCKETS	256	/* the controllers' simulated caches' ring */
-+#define LRU_CAST_CANDS		128
-+#define LRU_CAST_SAMPLES	128
++#define LRU_CAST_CANDS		16
++#define LRU_CAST_SAMPLES	32
 +#define LRU_CAST_BLOCKS	256
 +#define LRU_CAST_LIDS		512	/* an lruvec's number in its node's owner tags */
 +

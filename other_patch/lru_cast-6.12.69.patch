@@ -3,7 +3,7 @@ new file mode 100644
 index 0000000..888f82cb47e6492499ec0ea93d5e9f42d4166175
 --- /dev/null
 +++ b/include/linux/lru_cast.h
-@@ -0,0 +464 @@
+@@ -0,0 +1,464 @@
 +/* SPDX-License-Identifier: GPL-2.0 */
 +/*
 + * CAST -- what the rest of the kernel sees (mm/lru_cast/).
@@ -822,7 +822,7 @@ new file mode 100644
 index 0000000..9142e53f0d90ca63e71f7d8ef16684c45f5f4f54
 --- /dev/null
 +++ b/mm/lru_cast/Makefile
-@@ -0,0 +31 @@
+@@ -0,0 +1,31 @@
 +# SPDX-License-Identifier: GPL-2.0
 +#
 +# CAST. Reached from mm/Makefile via obj-$(CONFIG_LRU_CAST) += lru_cast/.
@@ -859,7 +859,7 @@ new file mode 100644
 index 0000000..b81a95cd42193faeaac38e2cd345265657bca314
 --- /dev/null
 +++ b/mm/lru_cast/check-layers.sh
-@@ -0,0 +59 @@
+@@ -0,0 +1,59 @@
 +#!/bin/sh
 +# SPDX-License-Identifier: GPL-2.0
 +#
@@ -924,7 +924,7 @@ new file mode 100644
 index 0000000..a15ad130ee0df1134b4bfa42030538d03f1dd322
 --- /dev/null
 +++ b/mm/lru_cast/compat/caps.h
-@@ -0,0 +67 @@
+@@ -0,0 +1,67 @@
 +/* SPDX-License-Identifier: GPL-2.0 */
 +/*
 + * CAST's view of the host kernel, as capabilities.
@@ -997,7 +997,7 @@ new file mode 100644
 index 0000000..2e37e3b72a1d012fc20e79b7c33e7620bf56632e
 --- /dev/null
 +++ b/mm/lru_cast/compat/kernel.h
-@@ -0,0 +184 @@
+@@ -0,0 +1,184 @@
 +/* SPDX-License-Identifier: GPL-2.0 */
 +/*
 + * The host kernel's API, as mm/lru_cast/ uses it. Each adapter picks its
@@ -1187,7 +1187,7 @@ new file mode 100644
 index 0000000..64a833a2c78a00fb50c7ec54b0f85e952b5332f9
 --- /dev/null
 +++ b/mm/lru_cast/compat/vmap.h
-@@ -0,0 +28 @@
+@@ -0,0 +1,28 @@
 +/* SPDX-License-Identifier: GPL-2.0 */
 +/*
 + * Mapping pages into a reserved range, as the state array's sections are
@@ -1221,7 +1221,7 @@ new file mode 100644
 index 0000000..584fe393c286f63bde26b154b892aba4e52a2eee
 --- /dev/null
 +++ b/mm/lru_cast/control.c
-@@ -0,0 +209 @@
+@@ -0,0 +1,209 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * CAST -- switching it on and off.
@@ -1436,7 +1436,7 @@ new file mode 100644
 index 0000000..7d0947f1b25853cf40ea864f942548ed45645bd3
 --- /dev/null
 +++ b/mm/lru_cast/control.h
-@@ -0,0 +16 @@
+@@ -0,0 +1,16 @@
 +/* SPDX-License-Identifier: GPL-2.0 */
 +/*
 + * CAST -- switching it on and off (control.c), and its sysfs
@@ -1458,7 +1458,7 @@ new file mode 100644
 index 0000000..14011e440892c6dfcb25f9fd128783742f9d8902
 --- /dev/null
 +++ b/mm/lru_cast/core/clock.c
-@@ -0,0 +130 @@
+@@ -0,0 +1,130 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * CAST -- the clock.
@@ -1594,7 +1594,7 @@ new file mode 100644
 index 0000000..03ea296706dd92c96add48d7aec5511a38f49c3c
 --- /dev/null
 +++ b/mm/lru_cast/core/core.h
-@@ -0,0 +104 @@
+@@ -0,0 +1,104 @@
 +/* SPDX-License-Identifier: GPL-2.0 */
 +/*
 + * CAST -- the core: what a folio's reads were, and when.
@@ -1704,7 +1704,7 @@ new file mode 100644
 index 0000000..a7963fb1f12e09e4b91723f354e844bab244f42d
 --- /dev/null
 +++ b/mm/lru_cast/core/key.c
-@@ -0,0 +167 @@
+@@ -0,0 +1,167 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * CAST -- the key of a state word.
@@ -1877,7 +1877,7 @@ new file mode 100644
 index 0000000..69638f09cdbe5a5f59aebd486d4d75d642c5d5a3
 --- /dev/null
 +++ b/mm/lru_cast/core/nia_state.c
-@@ -0,0 +103 @@
+@@ -0,0 +1,103 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * CAST -- non-invasive (nia) state: the fields CAST used to embed in the
@@ -1986,7 +1986,7 @@ new file mode 100644
 index 0000000..cced0aba3fd387d87c213ce80f29acfe95962b8d
 --- /dev/null
 +++ b/mm/lru_cast/core/nia_types.h
-@@ -0,0 +85 @@
+@@ -0,0 +1,85 @@
 +/* SPDX-License-Identifier: GPL-2.0 */
 +/*
 + * CAST -- the types CAST used to embed in the frozen GKI structs
@@ -2077,7 +2077,7 @@ new file mode 100644
 index 0000000..5ecb9ad08bcbd0ca5e3557b1f18405adb66d9711
 --- /dev/null
 +++ b/mm/lru_cast/core/prefetch.c
-@@ -0,0 +77 @@
+@@ -0,0 +1,77 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * CAST -- how far ahead the two prefetch legs reach (core/prefetch.h),
@@ -2160,7 +2160,7 @@ new file mode 100644
 index 0000000..0e0dd7b0993e97ab000589d9a27a1445d1f2c613
 --- /dev/null
 +++ b/mm/lru_cast/core/prefetch.h
-@@ -0,0 +61 @@
+@@ -0,0 +1,61 @@
 +/* SPDX-License-Identifier: GPL-2.0 */
 +/*
 + * CAST -- software prefetch in two stages, as Marie's.
@@ -2227,7 +2227,7 @@ new file mode 100644
 index 0000000..81b150f348cbad44f62505f4acef780339b615fe
 --- /dev/null
 +++ b/mm/lru_cast/core/state.c
-@@ -0,0 +240 @@
+@@ -0,0 +1,240 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * CAST -- the per-folio state word.
@@ -2473,7 +2473,7 @@ new file mode 100644
 index 0000000..e321970f4a189006fafadb0d2e69e7062db0bc6e
 --- /dev/null
 +++ b/mm/lru_cast/core/store.c
-@@ -0,0 +198 @@
+@@ -0,0 +1,198 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * CAST -- where the state words live.
@@ -2677,7 +2677,7 @@ new file mode 100644
 index 0000000..b4449d4c47a07456124fe0fdddb5f4534e6c3d88
 --- /dev/null
 +++ b/mm/lru_cast/core/store.h
-@@ -0,0 +26 @@
+@@ -0,0 +1,26 @@
 +/* SPDX-License-Identifier: GPL-2.0 */
 +/*
 + * CAST -- the state words' array, inside core/ only: the rest reads
@@ -2709,7 +2709,7 @@ new file mode 100644
 index 0000000..dc75a0e212e2f88db3ad51083cf9885766bc3fb2
 --- /dev/null
 +++ b/mm/lru_cast/hooks.c
-@@ -0,0 +29 @@
+@@ -0,0 +1,29 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * CAST -- what the core's events reach. The core (core/) tells of a
@@ -2744,7 +2744,7 @@ new file mode 100644
 index 0000000..1b2777f44054bbd34e9ea2d40522b047ab2ff0a0
 --- /dev/null
 +++ b/mm/lru_cast/policy/balance.c
-@@ -0,0 +246 @@
+@@ -0,0 +1,246 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * CAST -- which type to take from, and the clean-file floor.
@@ -2996,7 +2996,7 @@ new file mode 100644
 index 0000000..01fd25f3990ac6a3df02c4867b63f9c096dd3e10
 --- /dev/null
 +++ b/mm/lru_cast/policy/ghost.c
-@@ -0,0 +160 @@
+@@ -0,0 +1,160 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * CAST -- the history of evicted folios.
@@ -3162,7 +3162,7 @@ new file mode 100644
 index 0000000..68e4817f9012261bdf44249bd8dfd69df9b22c11
 --- /dev/null
 +++ b/mm/lru_cast/policy/params.c
-@@ -0,0 +70 @@
+@@ -0,0 +1,70 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * CAST -- the main cache's operating point.
@@ -3238,7 +3238,7 @@ new file mode 100644
 index 0000000..016080a046169794f64d752727b02d2281ae8bef
 --- /dev/null
 +++ b/mm/lru_cast/policy/policy.h
-@@ -0,0 +79 @@
+@@ -0,0 +1,79 @@
 +/* SPDX-License-Identifier: GPL-2.0 */
 +/*
 + * CAST -- the policy: the main cache, run inside reclaim.
@@ -3323,7 +3323,7 @@ new file mode 100644
 index 0000000..da4737278fd2d98d28533dae103d47e6b50df62b
 --- /dev/null
 +++ b/mm/lru_cast/policy/reclaim.c
-@@ -0,0 +185 @@
+@@ -0,0 +1,185 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * CAST -- the choice of victims.
@@ -3514,7 +3514,7 @@ new file mode 100644
 index 0000000..6b309dc106c04b569439a57d0c9a0c6d1df08e43
 --- /dev/null
 +++ b/mm/lru_cast/policy/ring.c
-@@ -0,0 +760 @@
+@@ -0,0 +1,760 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * CAST -- keys, and M's lowest found by a sweep.
@@ -4280,7 +4280,7 @@ new file mode 100644
 index 0000000..c490d053e22766379df0290e95e0ddd7caf32445
 --- /dev/null
 +++ b/mm/lru_cast/sysfs.c
-@@ -0,0 +293 @@
+@@ -0,0 +1,293 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * CAST -- /sys/kernel/mm/lru_cast/
@@ -4579,7 +4579,7 @@ new file mode 100644
 index 0000000..a5db445e0981c95a193229be948bbed60d323f19
 --- /dev/null
 +++ b/mm/lru_cast/tune/cost.c
-@@ -0,0 +409 @@
+@@ -0,0 +1,409 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * CAST -- what a refault costs, per type: how long a task waited,
@@ -4994,7 +4994,7 @@ new file mode 100644
 index 0000000..f120894d60417000bd1b7a479933f75098146986
 --- /dev/null
 +++ b/mm/lru_cast/tune/cost.h
-@@ -0,0 +13 @@
+@@ -0,0 +1,13 @@
 +/* SPDX-License-Identifier: GPL-2.0 */
 +/* CAST -- what a refault costs, per type (cost.c) */
 +#ifndef _MM_LRU_CAST_TUNE_COST_H
@@ -5013,7 +5013,7 @@ new file mode 100644
 index 0000000..90c149a542a1e85be54e275a3843c96bf7ef7e5e
 --- /dev/null
 +++ b/mm/lru_cast/tune/decay.c
-@@ -0,0 +76 @@
+@@ -0,0 +1,76 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * CAST -- the decay: the half-life a type's keys decay with,
@@ -5095,7 +5095,7 @@ new file mode 100644
 index 0000000..6eef0ba07a43adebb67efc084878451779a79a8e
 --- /dev/null
 +++ b/mm/lru_cast/tune/decay.h
-@@ -0,0 +15 @@
+@@ -0,0 +1,15 @@
 +/* SPDX-License-Identifier: GPL-2.0 */
 +/* CAST -- the decay controller (decay.c) */
 +#ifndef _MM_LRU_CAST_TUNE_DECAY_H
@@ -5116,7 +5116,7 @@ new file mode 100644
 index 0000000..aa5a8afeac3444a11699e5a17d179c2a5969af6a
 --- /dev/null
 +++ b/mm/lru_cast/tune/evidence.c
-@@ -0,0 +90 @@
+@@ -0,0 +1,90 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * CAST -- the evidence the controllers decide on.
@@ -5212,7 +5212,7 @@ new file mode 100644
 index 0000000..c396e01ab343f3a5cf1477a006f95ffe1f8fc653
 --- /dev/null
 +++ b/mm/lru_cast/tune/evidence.h
-@@ -0,0 +38 @@
+@@ -0,0 +1,38 @@
 +/* SPDX-License-Identifier: GPL-2.0 */
 +/*
 + * CAST -- what the controllers decide on (evidence.c): per cache of
@@ -5256,7 +5256,7 @@ new file mode 100644
 index 0000000..ecf27877c3c840730d64f9cb849543053c1f22a2
 --- /dev/null
 +++ b/mm/lru_cast/tune/protect.c
-@@ -0,0 +214 @@
+@@ -0,0 +1,214 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * CAST -- catching every read of a sampled mapped page.
@@ -5476,7 +5476,7 @@ new file mode 100644
 index 0000000..2821e7bffa18703da4a6237145c6a982082313b1
 --- /dev/null
 +++ b/mm/lru_cast/tune/readahead.c
-@@ -0,0 +65 @@
+@@ -0,0 +1,65 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * CAST -- readahead, as each point of the curve would have it.
@@ -5547,7 +5547,7 @@ new file mode 100644
 index 0000000..ca7431d6ecccc9ac3012e597e90b7e8443af9a63
 --- /dev/null
 +++ b/mm/lru_cast/tune/sample.c
-@@ -0,0 +36 @@
+@@ -0,0 +1,36 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * CAST -- the controllers' sample.
@@ -5589,7 +5589,7 @@ new file mode 100644
 index 0000000..6880c3a6d7047d1e8f85d84c1b4b210b0f52b2ab
 --- /dev/null
 +++ b/mm/lru_cast/tune/sample.h
-@@ -0,0 +25 @@
+@@ -0,0 +1,25 @@
 +/* SPDX-License-Identifier: GPL-2.0 */
 +/*
 + * CAST -- which pages the controllers sample (sample.c), and how
@@ -5620,7 +5620,7 @@ new file mode 100644
 index 0000000..d939e2e0b4552c70dfe57e45d9e4f404e225e7a3
 --- /dev/null
 +++ b/mm/lru_cast/tune/shape.h
-@@ -0,0 +61 @@
+@@ -0,0 +1,61 @@
 +/* SPDX-License-Identifier: GPL-2.0 */
 +/*
 + * CAST -- the shape of the controllers, shared inside tune/.
@@ -5687,7 +5687,7 @@ new file mode 100644
 index 0000000..e2badb2c0f4fb600068b70694e56ca092ca758a5
 --- /dev/null
 +++ b/mm/lru_cast/tune/share.c
-@@ -0,0 +105 @@
+@@ -0,0 +1,105 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * CAST -- anon's share of memory.
@@ -5798,7 +5798,7 @@ new file mode 100644
 index 0000000..07f421fdebb915e8828d022adde2741db5ba8999
 --- /dev/null
 +++ b/mm/lru_cast/tune/share.h
-@@ -0,0 +13 @@
+@@ -0,0 +1,13 @@
 +/* SPDX-License-Identifier: GPL-2.0 */
 +/* CAST -- anon's share of memory (share.c), under the controllers' lock */
 +#ifndef _MM_LRU_CAST_TUNE_SHARE_H
@@ -5817,7 +5817,7 @@ new file mode 100644
 index 0000000..c3a160dfffc973667f3777cbd31d9f77d0f5f9e5
 --- /dev/null
 +++ b/mm/lru_cast/tune/sim.c
-@@ -0,0 +644 @@
+@@ -0,0 +1,644 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * CAST -- simulated CAST caches of a sample, and its order.
@@ -6467,7 +6467,7 @@ new file mode 100644
 index 0000000..438e6de7f5d0ad86d7ad0d0d5129c4a6b892dc47
 --- /dev/null
 +++ b/mm/lru_cast/tune/sim.h
-@@ -0,0 +54 @@
+@@ -0,0 +1,54 @@
 +/* SPDX-License-Identifier: GPL-2.0 */
 +/*
 + * CAST -- LRU_CAST_TUNE_SIM simulated CAST caches of one type's sample, and
@@ -6527,7 +6527,7 @@ new file mode 100644
 index 0000000..d4283b60210f010c6ac71353620c7cc8b6682347
 --- /dev/null
 +++ b/mm/lru_cast/tune/tune.c
-@@ -0,0 +339 @@
+@@ -0,0 +1,339 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * CAST -- the controllers: the decay, W's share, and anon's share
@@ -6872,7 +6872,7 @@ new file mode 100644
 index 0000000..90d01495e18e3a4251e8d66df41df3b267106aec
 --- /dev/null
 +++ b/mm/lru_cast/tune/tune.h
-@@ -0,0 +98 @@
+@@ -0,0 +1,98 @@
 +/* SPDX-License-Identifier: GPL-2.0 */
 +/*
 + * CAST -- the controllers: what the main cache's operating point
@@ -6976,7 +6976,7 @@ new file mode 100644
 index 0000000..6147bc05cb945c66f3bda2ace3fb6f5244a8e99c
 --- /dev/null
 +++ b/mm/lru_cast/tune/world.c
-@@ -0,0 +56 @@
+@@ -0,0 +1,56 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * CAST -- the curve's worlds.
@@ -7038,7 +7038,7 @@ new file mode 100644
 index 0000000..81fdf0c9b016d70d78c423da9e5dc080c9229fdd
 --- /dev/null
 +++ b/mm/lru_cast/tune/world.h
-@@ -0,0 +16 @@
+@@ -0,0 +1,16 @@
 +/* SPDX-License-Identifier: GPL-2.0 */
 +/*
 + * CAST -- the curve's worlds (world.c): memory held at each split.
@@ -7060,7 +7060,7 @@ new file mode 100644
 index 0000000..c2afd0296590c0130efae8db3fcb6a09af56090f
 --- /dev/null
 +++ b/mm/lru_cast/tune/wshare.c
-@@ -0,0 +82 @@
+@@ -0,0 +1,82 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * CAST -- W's share of a type's pages, chosen by measuring.
@@ -7148,7 +7148,7 @@ new file mode 100644
 index 0000000..2404adcd35da8ddda43e34be505747f5f1ee7df4
 --- /dev/null
 +++ b/mm/lru_cast/tune/wshare.h
-@@ -0,0 +21 @@
+@@ -0,0 +1,21 @@
 +/* SPDX-License-Identifier: GPL-2.0 */
 +/* CAST -- W's share and its test (wshare.c) */
 +#ifndef _MM_LRU_CAST_TUNE_WSHARE_H
@@ -7175,7 +7175,7 @@ new file mode 100644
 index 0000000..f98b8abb30da99e934f1cfdceddf681380e37168
 --- /dev/null
 +++ b/mm/lru_cast/version.h
-@@ -0,0 +15 @@
+@@ -0,0 +1,15 @@
 +/* SPDX-License-Identifier: GPL-2.0 */
 +#ifndef _MM_LRU_CAST_VERSION_H
 +#define _MM_LRU_CAST_VERSION_H
@@ -7196,7 +7196,7 @@ new file mode 100644
 index 0000000..16b6dcb220e998223170e4255861bedefc13beaa
 --- /dev/null
 +++ b/mm/lru_cast/walk/bloom.c
-@@ -0,0 +66 @@
+@@ -0,0 +1,66 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * CAST -- the bloom of PMDs reclaim found young (Marie's).
@@ -7268,7 +7268,7 @@ new file mode 100644
 index 0000000..e92881de7fab1915a6b44631b17a54c7a37a1343
 --- /dev/null
 +++ b/mm/lru_cast/walk/lookaround.c
-@@ -0,0 +102 @@
+@@ -0,0 +1,102 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * CAST -- the look-around (Marie's): reclaim's references check, a
@@ -7376,7 +7376,7 @@ new file mode 100644
 index 0000000..d04076080c0dca36be7dc757769d4b691f45e169
 --- /dev/null
 +++ b/mm/lru_cast/walk/simd.h
-@@ -0,0 +28 @@
+@@ -0,0 +1,28 @@
 +/* SPDX-License-Identifier: GPL-2.0 */
 +#ifndef _MM_LRU_CAST_WALK_SIMD_H
 +#define _MM_LRU_CAST_WALK_SIMD_H
@@ -7410,7 +7410,7 @@ new file mode 100644
 index 0000000..f19a10aeeef6610760c37b287ca810f397ffe638
 --- /dev/null
 +++ b/mm/lru_cast/walk/simd_generic.c
-@@ -0,0 +35 @@
+@@ -0,0 +1,35 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * CAST -- the young-bit scan where there is no SIMD kernel: the
@@ -7451,7 +7451,7 @@ new file mode 100644
 index 0000000..8b2fd4009123daf906dc0a7f4dff013cdbb3a524
 --- /dev/null
 +++ b/mm/lru_cast/walk/simd_x86.c
-@@ -0,0 +71 @@
+@@ -0,0 +1,71 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * CAST -- the young-bit scan on x86-64: the widest of the three SIMD
@@ -7528,7 +7528,7 @@ new file mode 100644
 index 0000000..f7f9a87981104adc5145ca4e784d017f398f0928
 --- /dev/null
 +++ b/mm/lru_cast/walk/simd_x86_avx2.S
-@@ -0,0 +171 @@
+@@ -0,0 +1,171 @@
 +/* SPDX-License-Identifier: GPL-2.0 */
 +/*
 + * mm/lru_cast/simd_x86_avx2.S -- AVX2 PTE young-bit scan for the CAST walker.
@@ -7705,7 +7705,7 @@ new file mode 100644
 index 0000000..82e3050e852518ac4eb6003bb7d221c155afb931
 --- /dev/null
 +++ b/mm/lru_cast/walk/simd_x86_avx512.S
-@@ -0,0 +221 @@
+@@ -0,0 +1,221 @@
 +/* SPDX-License-Identifier: GPL-2.0 */
 +/*
 + * mm/lru_cast/simd_x86_avx512.S -- AVX-512F PTE young-bit scan for the CAST walker.
@@ -7932,7 +7932,7 @@ new file mode 100644
 index 0000000..fcc7f1f43c2c43117c4fda1e7a232c65fef215ae
 --- /dev/null
 +++ b/mm/lru_cast/walk/simd_x86_sse2.S
-@@ -0,0 +159 @@
+@@ -0,0 +1,159 @@
 +/* SPDX-License-Identifier: GPL-2.0 */
 +/*
 + * mm/lru_cast/simd_x86_sse2.S -- SSE2 PTE young-bit scan for the CAST walker.
@@ -8097,7 +8097,7 @@ new file mode 100644
 index 0000000..915450a735ae3b065817b0e35a2af796f96341f5
 --- /dev/null
 +++ b/mm/lru_cast/walk/walk.c
-@@ -0,0 +308 @@
+@@ -0,0 +1,308 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * CAST -- the walker: reads of mapped pages, from the young bits.
@@ -8411,7 +8411,7 @@ new file mode 100644
 index 0000000..44a8d500dff82e1b87dc6d65207d8d9edaebcefa
 --- /dev/null
 +++ b/mm/lru_cast/walk/walk.h
-@@ -0,0 +29 @@
+@@ -0,0 +1,29 @@
 +/* SPDX-License-Identifier: GPL-2.0 */
 +/*
 + * CAST -- the walker: reads of mapped pages, from their young bits.
@@ -8446,7 +8446,7 @@ new file mode 100644
 index 0000000..7f2eb1130b9e6a0988cf429e9864386412e34140
 --- /dev/null
 +++ b/mm/lru_cast/walk/young.h
-@@ -0,0 +59 @@
+@@ -0,0 +1,59 @@
 +/* SPDX-License-Identifier: GPL-2.0 */
 +/*
 + * CAST -- what the walker and the look-around share, inside walk/:

@@ -1542,7 +1542,7 @@ new file mode 100644
 +	get_online_mems();
 +	for_each_node_state(nid, N_MEMORY) {
 +		struct pglist_data *pgdat = NODE_DATA(nid);
-+		struct lru_cast_clock *c = &pgdat->lru_cast_clock;
++		struct lru_cast_clock *c = lru_cast_clock_of(pgdat);
 +		unsigned long tick = READ_ONCE(c->tick);
 +		unsigned long start = pgdat->node_start_pfn, end = pgdat_end_pfn(pgdat);
 +		unsigned long part = DIV_ROUND_UP(end - start, LRU_CAST_STALE_PASS);
@@ -2183,7 +2183,7 @@ diff --git a/mm/lru_cast/core/nia_types.h b/mm/lru_cast/core/nia_types.h
 new file mode 100644
 --- /dev/null
 +++ b/mm/lru_cast/core/nia_types.h
-@@ -0,0 +1,85 @@
+@@ -0,0 +1,87 @@
 +/* SPDX-License-Identifier: GPL-2.0 */
 +/*
 + * CAST -- the types CAST used to embed in the frozen GKI structs
@@ -2265,6 +2265,8 @@ new file mode 100644
 +	DECLARE_BITMAP(lids, LRU_CAST_LIDS);
 +	/* ... of those, the numbers of lruvecs whose folios went to another's lists */
 +	DECLARE_BITMAP(lids_moved, LRU_CAST_LIDS);
++	/* the PFN the marking of stale words reads next, and the tick it has read up to */
++	unsigned long		stale_pfn, stale_tick;
 +};
 +#endif
 +

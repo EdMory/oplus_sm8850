@@ -485,7 +485,7 @@ diff --git a/include/linux/mm_inline.h b/include/linux/mm_inline.h
  
 -#ifdef CONFIG_LRU_GEN_ENABLED
 +/* as mm/vmscan.c's lru_gen_caps */
-+#if defined(CONFIG_LRU_GEN_ENABLED)
++#if defined(CONFIG_LRU_GEN_ENABLED) && !defined(CONFIG_LRU_CAST)
  static inline bool lru_gen_enabled(void)
  {
  	DECLARE_STATIC_KEY_TRUE(lru_gen_caps[NR_LRU_GEN_CAPS]);
@@ -9920,7 +9920,7 @@ diff --git a/mm/vmscan.c b/mm/vmscan.c
  
 -#ifdef CONFIG_LRU_GEN_ENABLED
 +/* MGLRU comes on at boot: CAST is switched in via sysfs (init_lru_gen()) */
-+#if defined(CONFIG_LRU_GEN_ENABLED)
++#if defined(CONFIG_LRU_GEN_ENABLED) && !defined(CONFIG_LRU_CAST)
  DEFINE_STATIC_KEY_ARRAY_TRUE(lru_gen_caps, NR_LRU_GEN_CAPS);
  #define get_cap(cap)	static_branch_likely(&lru_gen_caps[cap])
  #else

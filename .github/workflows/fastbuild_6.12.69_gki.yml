@@ -546,7 +546,6 @@ jobs:
           echo "正在下载并应用 lru_cast 补丁..."
           cd kernel_workspace/common
           echo 'CONFIG_LRU_CAST=y' >> arch/arm64/configs/gki_defconfig
-          sed -i 's/^CONFIG_LRU_GEN=y/# CONFIG_LRU_GEN is not set/; s/^CONFIG_LRU_GEN_ENABLED=y/# CONFIG_LRU_GEN_ENABLED is not set/' arch/arm64/configs/gki_defconfig
           wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/lru_cast-6.12.69.patch
           # 严格零 fuzz 预演, 任一 Hunk FAILED / with fuzz 立即中止
           patch -p1 --dry-run -F 0 < lru_cast-6.12.69.patch > /tmp/lrucast_dryrun.log 2>&1

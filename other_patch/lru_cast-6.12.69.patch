@@ -4228,9 +4228,10 @@ new file mode 100644
 
 diff --git a/mm/lru_cast/tune/cost.c b/mm/lru_cast/tune/cost.c
 new file mode 100644
+index 000000000000..000000000000
 --- /dev/null
 +++ b/mm/lru_cast/tune/cost.c
-@@ -0,0 +1,409 @@
+@@ -0,0 +1,429 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * CAST -- what a refault costs, per type: how long a task waited,
@@ -4404,6 +4405,26 @@ new file mode 100644
 +		}
 +	}
 +	return LRU_CAST_WAIT_DEVS;
++}
++
++/* one more in flight on @q: the first of a burst reads the clock at its start */
++static void lru_cast_q_join(struct lru_cast_wait_q *q, struct lru_cast_wait_stat *stat)
++{
++	if (atomic_inc_return(&q->inflight) == 1)
++		lru_cast_wait_time(q, stat, ktime_get_ns());
++}
++
++/* one fewer, @inc added to its ends: the last of a burst, or the end that makes a batch */
++static void lru_cast_q_leave(struct lru_cast_wait_q *q, struct lru_cast_wait_stat *stat,
++			     u64 inc)
++{
++	u64 ended = inc ? atomic64_add_return(inc, &q->ended) : 0;
++	u64 now = ended & LRU_CAST_WAIT_MASK, was = (ended - inc) & LRU_CAST_WAIT_MASK;
++
++	/* the ends after the batch's, before the reading takes the count, go with it */
++	if (atomic_dec_if_positive(&q->inflight) <= 0 ||
++	    (was < LRU_CAST_WAIT_BATCH && now >= LRU_CAST_WAIT_BATCH))
++		lru_cast_wait_time(q, stat, ktime_get_ns());
 +}
 +
 +/*
@@ -4640,7 +4661,6 @@ new file mode 100644
 +	}
 +	return len;
 +}
-
 diff --git a/mm/lru_cast/tune/cost.h b/mm/lru_cast/tune/cost.h
 new file mode 100644
 --- /dev/null

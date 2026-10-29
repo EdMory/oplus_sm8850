@@ -2111,18 +2111,19 @@ index 0000000000000000000000000000000000000000..7e32f5d8df8b5b70886f9c5119ae7949
 +}
 diff --git a/mm/lru_cast/core/nia_state.c b/mm/lru_cast/core/nia_state.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..9042078d7ecc5acdf6d68d27f4457e4a599a03ab
+index 0000000000000000000000000000000000000000..35896a0746c6e385412674aa759e48f8e6751cda
 --- /dev/null
 +++ b/mm/lru_cast/core/nia_state.c
-@@ -0,0 +1,177 @@
+@@ -0,0 +1,183 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * CAST -- non-invasive (nia) state: the fields CAST used to embed in the
 + * frozen GKI structs (struct lruvec, struct pglist_data, struct mm_struct)
 + * are kept here instead, so the structs pass the ABI layout checks.  An
-+ * lruvec's state is allocated on its init and kept in an xarray by the
-+ * address of the lruvec; the node's eviction clock and kcompressd live in
-+ * arrays by node id; an mm's "used" hint lives in an xarray by its address.
++ * lruvec's state, made when CAST is switched on and let go with the lruvec,
++ * is kept in an xarray by the address of the lruvec; the node's eviction
++ * clock and kcompressd live in arrays by node id; an mm's "used" hint lives
++ * in an xarray by its address.
 + *
 + * The rest of the kernel sees only include/linux/lru_cast.h.
 + */
@@ -2160,12 +2161,10 @@ index 0000000000000000000000000000000000000000..9042078d7ecc5acdf6d68d27f4457e4a
 +}
 +
 +/*
-+ * An lruvec's state, made where the lruvec is made (its init) and not under
-+ * its lru_lock: made there, with the lock held and interrupts off, it could
-+ * be made atomically only, and one that failed left the lruvec on the null
-+ * state -- another's rings, another's numbers. Called again where more room
-+ * is at hand (switching on), should it have failed before. A state the
-+ * lruvec has already is kept.
++ * An lruvec's state, made where CAST is switched on -- not where the lruvec
++ * is made, and never under its lru_lock: there it could be made atomically
++ * only, and one that failed left the lruvec with none, to run without CAST
++ * rather than on another's rings. A state the lruvec has already is kept.
 + */
 +int lru_cast_state_alloc(struct lruvec *lruvec, gfp_t gfp)
 +{
@@ -2220,11 +2219,18 @@ index 0000000000000000000000000000000000000000..9042078d7ecc5acdf6d68d27f4457e4a
 +	return lru_cast_state_get(lruvec) != NULL;
 +}
 +
++static void lru_cast_state_rcu(struct rcu_head *rcu)
++{
++	kfree(container_of(rcu, struct lru_cast_lruvec_state, rcu));
++}
++
 +/*
 + * The state goes with the lruvec: left behind, its entry is found by the
 + * next lruvec made at that address, which then finds it claimed and runs on
 + * rings holding another memcg's folios. Freed after a grace period, as a
-+ * reader may be holding it under rcu_read_lock() (lru_cast_folio_on()).
++ * reader may be holding it under rcu_read_lock() (lru_cast_folio_on());
++ * freed by a call of its own, as kfree_rcu() keeps the head's offset in a
++ * few bits and this state is far larger than that.
 + */
 +void lru_cast_state_free(struct lruvec *lruvec)
 +{
@@ -2232,7 +2238,7 @@ index 0000000000000000000000000000000000000000..9042078d7ecc5acdf6d68d27f4457e4a
 +
 +	st = xa_erase(&lru_cast_lruvec_states, (unsigned long)lruvec);
 +	if (st)
-+		kfree_rcu(st, rcu);
++		call_rcu(&st->rcu, lru_cast_state_rcu);
 +}
 +
 +bool lru_cast_state_on(struct lruvec *lruvec)

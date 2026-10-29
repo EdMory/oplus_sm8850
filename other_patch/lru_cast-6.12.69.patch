@@ -2202,7 +2202,7 @@ diff --git a/mm/lru_cast/core/nia_state.c b/mm/lru_cast/core/nia_state.c
 new file mode 100644
 --- /dev/null
 +++ b/mm/lru_cast/core/nia_state.c
-@@ -0,0 +1,195 @@
+@@ -0,0 +1,202 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * CAST -- non-invasive (nia) state: the fields CAST used to embed in the
@@ -2309,11 +2309,18 @@ new file mode 100644
 +	return lru_cast_state_get(lruvec) != NULL;
 +}
 +
++static void lru_cast_state_rcu(struct rcu_head *rcu)
++{
++	kfree(container_of(rcu, struct lru_cast_lruvec_state, rcu));
++}
++
 +/*
 + * The state goes with the lruvec: left behind, its entry is found by the
 + * next lruvec made at that address, which then finds it claimed and runs on
 + * rings holding another memcg's folios. Freed after a grace period, as a
-+ * reader may be holding it under rcu_read_lock() (lru_cast_folio_on()).
++ * reader may be holding it under rcu_read_lock() (lru_cast_folio_on());
++ * freed by a call of its own, as kfree_rcu() keeps the head's offset in a
++ * few bits and this state is far larger than that.
 + */
 +void lru_cast_state_free(struct lruvec *lruvec)
 +{
@@ -2321,7 +2328,7 @@ new file mode 100644
 +
 +	st = xa_erase(&lru_cast_lruvec_states, (unsigned long)lruvec);
 +	if (st)
-+		kfree_rcu(st, rcu);
++		call_rcu(&st->rcu, lru_cast_state_rcu);
 +}
 +
 +bool lru_cast_state_on(struct lruvec *lruvec)

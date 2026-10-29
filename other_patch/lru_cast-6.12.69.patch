@@ -906,7 +906,7 @@ new file mode 100644
 +DEFINE_STATIC_KEY_TRUE(lru_cast_enabled_key);
 +
 +/* what a new lruvec starts with */
-+static bool lru_cast_active __read_mostly = false;
++static bool lru_cast_active __read_mostly = true;
 +static DEFINE_MUTEX(lru_cast_switch_lock);
 +
 +#define LRU_CAST_BATCH	1024

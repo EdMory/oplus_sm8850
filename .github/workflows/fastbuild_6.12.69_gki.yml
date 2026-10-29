@@ -186,11 +186,14 @@ jobs:
           mv "android_gki_kernel_common-android16-6.12-2026-03" common &&
           rm -rf common.zip &
           
-          echo "正在克隆llvm-clang19工具链..." &&
-          mkdir -p clang19 &&
-          aria2c -s16 -x16 -k1M https://github.com/cctv18/oneplus_sm8650_toolchain/releases/download/LLVM-Clang19-r536225/clang-r536225.zip -o clang.zip &&
-          unzip -q clang.zip -d clang19 &&
-          rm -rf clang.zip &
+          echo "正在通过稀疏检出获取 AOSP clang-r547379 (Clang 20.0.0)..." &&
+          git clone --depth 1 --filter=blob:none --sparse \
+          https://github.com/msft-mirror-aosp/platform.prebuilts.clang.host.linux-x86.git clang-mirror &&
+          cd clang-mirror &&
+          git sparse-checkout set clang-r547379 &&
+          cd .. &&
+          mv clang-mirror/clang-r547379 clang20 &&
+          rm -rf clang-mirror &&
           
           echo "正在克隆Rust 1.82.0工具链..." &&
           mkdir -p rust &&
@@ -1608,6 +1611,7 @@ jobs:
           # 3. 配置KCFLAGS
           KCFLAGS+=" -no-canonical-prefixes"
           KCFLAGS+=" -O2"
+          KCFLAGS+=" -mcpu=oryon-1"
           KCFLAGS+=" -pipe"
           KCFLAGS+=" -Wno-error"
           KCFLAGS+=" -fno-stack-protector"

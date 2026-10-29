@@ -1,5 +1,6 @@
 diff --git a/include/linux/lru_cast.h b/include/linux/lru_cast.h
 new file mode 100644
+index 0000000000000000000000000000000000000000..2bc1bc91f65fc98bc9ba29d456634bbefff91efd
 --- /dev/null
 +++ b/include/linux/lru_cast.h
 @@ -0,0 +1,465 @@
@@ -775,6 +776,7 @@ diff --git a/mm/khugepaged.c b/mm/khugepaged.c
  
 diff --git a/mm/lru_cast/Makefile b/mm/lru_cast/Makefile
 new file mode 100644
+index 0000000000000000000000000000000000000000..f55db0fac99a122d6ae407887c30df4632d14af5
 --- /dev/null
 +++ b/mm/lru_cast/Makefile
 @@ -0,0 +1,31 @@
@@ -811,6 +813,7 @@ new file mode 100644
 +
 diff --git a/mm/lru_cast/check-layers.sh b/mm/lru_cast/check-layers.sh
 new file mode 100644
+index 0000000000000000000000000000000000000000..03e5420bc8b0e2b593bcbec95cc1f3d2e5e26bce
 --- /dev/null
 +++ b/mm/lru_cast/check-layers.sh
 @@ -0,0 +1,59 @@
@@ -875,6 +878,7 @@ new file mode 100644
 +
 diff --git a/mm/lru_cast/compat/caps.h b/mm/lru_cast/compat/caps.h
 new file mode 100644
+index 0000000000000000000000000000000000000000..8711797e7eec413e46ba87de8a60f69bd1141c4b
 --- /dev/null
 +++ b/mm/lru_cast/compat/caps.h
 @@ -0,0 +1,73 @@
@@ -953,6 +957,7 @@ new file mode 100644
 +
 diff --git a/mm/lru_cast/compat/kernel.h b/mm/lru_cast/compat/kernel.h
 new file mode 100644
+index 0000000000000000000000000000000000000000..4323e34b4cb9416348581d2ef8990d646a822b95
 --- /dev/null
 +++ b/mm/lru_cast/compat/kernel.h
 @@ -0,0 +1,214 @@
@@ -1172,6 +1177,7 @@ new file mode 100644
 +
 diff --git a/mm/lru_cast/compat/vmap.h b/mm/lru_cast/compat/vmap.h
 new file mode 100644
+index 0000000000000000000000000000000000000000..4158f644dc0663643c4c67fc8fd2ef9935ed5b13
 --- /dev/null
 +++ b/mm/lru_cast/compat/vmap.h
 @@ -0,0 +1,28 @@
@@ -1205,9 +1211,10 @@ new file mode 100644
 +
 diff --git a/mm/lru_cast/control.c b/mm/lru_cast/control.c
 new file mode 100644
+index 0000000000000000000000000000000000000000..83144d00e5180686ca04d82eff0668db2d014360
 --- /dev/null
 +++ b/mm/lru_cast/control.c
-@@ -0,0 +1,210 @@
+@@ -0,0 +1,224 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * CAST -- switching it on and off.
@@ -1264,8 +1271,13 @@ new file mode 100644
 +
 +void lru_cast_init_lruvec(struct lruvec *lruvec)
 +{
-+	lru_cast_ring_init(lruvec);
-+	lru_cast_ring_reset(lruvec);
++	/*
++	 * No state made here: one is some 3 KiB for each of the two types, made
++	 * for every lruvec of every memcg whether CAST ever runs it or not. It
++	 * is made where CAST is switched on (lru_cast_fill()), where room is at
++	 * hand, and until then the lruvec runs without CAST rather than on
++	 * another's rings; an lruvec made while CAST runs stays without.
++	 */
 +	lru_cast_state_on_set(lruvec, lru_cast_active);
 +}
 +
@@ -1273,6 +1285,7 @@ new file mode 100644
 +void lru_cast_exit_lruvec(struct lruvec *lruvec)
 +{
 +	lru_cast_ring_exit(lruvec);
++	lru_cast_state_free(lruvec);
 +}
 +
 +/* CAST runs @folio's lruvec; the folio locked or isolated, so its memcg held */
@@ -1300,6 +1313,14 @@ new file mode 100644
 +static void lru_cast_fill(struct lruvec *lruvec)
 +{
 +	int type;
++
++	/* a lruvec made without a state of its own (see lru_cast_init_lruvec()) */
++	if (lru_cast_state_alloc(lruvec, GFP_KERNEL))
++		return;
++	if (lru_cast_state_claim(lruvec)) {
++		lru_cast_ring_init(lruvec);
++		lru_cast_ring_reset(lruvec);
++	}
 +
 +	spin_lock_irq(&lruvec->lru_lock);
 +	for (type = 0; type < ANON_AND_FILE; type++) {
@@ -1420,6 +1441,7 @@ new file mode 100644
 +
 diff --git a/mm/lru_cast/control.h b/mm/lru_cast/control.h
 new file mode 100644
+index 0000000000000000000000000000000000000000..6f5c3d8fb0e0f91966abbfff5f3722eb6ff4d488
 --- /dev/null
 +++ b/mm/lru_cast/control.h
 @@ -0,0 +1,16 @@
@@ -1441,6 +1463,7 @@ new file mode 100644
 +
 diff --git a/mm/lru_cast/core/clock.c b/mm/lru_cast/core/clock.c
 new file mode 100644
+index 0000000000000000000000000000000000000000..a6449ef00523cab7a41fafb5cd67f7e0e02e75c3
 --- /dev/null
 +++ b/mm/lru_cast/core/clock.c
 @@ -0,0 +1,183 @@
@@ -1629,9 +1652,10 @@ new file mode 100644
 +
 diff --git a/mm/lru_cast/core/core.h b/mm/lru_cast/core/core.h
 new file mode 100644
+index 0000000000000000000000000000000000000000..8d05b971a5d0e2213fd24a786cd2f3be5c31a632
 --- /dev/null
 +++ b/mm/lru_cast/core/core.h
-@@ -0,0 +1,227 @@
+@@ -0,0 +1,240 @@
 +/* SPDX-License-Identifier: GPL-2.0 */
 +/*
 + * CAST -- the core: what a folio's reads were, and when.
@@ -1829,6 +1853,19 @@ new file mode 100644
 +
 +/* the rings of an lruvec, in its non-invasive state (nia_state.c) */
 +struct lru_cast *lru_cast_k(struct lruvec *lruvec, int type);
++/* its state made where the lruvec is made, not under its lru_lock */
++int lru_cast_state_alloc(struct lruvec *lruvec, gfp_t gfp);
++/* its rings made ready: true for the one caller that is to do it */
++bool lru_cast_state_claim(struct lruvec *lruvec);
++/* whether it has a state of its own */
++bool lru_cast_state_here(struct lruvec *lruvec);
++/*
++ * Its state let go where the lruvec is let go: kept, the entry would be seen
++ * by the next lruvec made at that address, which would then run on rings
++ * holding another memcg's folios. Freed a grace period later, as a reader
++ * of it may still be under rcu_read_lock() (lru_cast_folio_on()).
++ */
++void lru_cast_state_free(struct lruvec *lruvec);
 +
 +/* key.c */
 +/*
@@ -1861,6 +1898,7 @@ new file mode 100644
 +#endif /* _MM_LRU_CAST_CORE_H */
 diff --git a/mm/lru_cast/core/key.c b/mm/lru_cast/core/key.c
 new file mode 100644
+index 0000000000000000000000000000000000000000..7e32f5d8df8b5b70886f9c5119ae79495c76a781
 --- /dev/null
 +++ b/mm/lru_cast/core/key.c
 @@ -0,0 +1,207 @@
@@ -2073,9 +2111,10 @@ new file mode 100644
 +}
 diff --git a/mm/lru_cast/core/nia_state.c b/mm/lru_cast/core/nia_state.c
 new file mode 100644
+index 0000000000000000000000000000000000000000..9042078d7ecc5acdf6d68d27f4457e4a599a03ab
 --- /dev/null
 +++ b/mm/lru_cast/core/nia_state.c
-@@ -0,0 +1,103 @@
+@@ -0,0 +1,177 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * CAST -- non-invasive (nia) state: the fields CAST used to embed in the
@@ -2090,6 +2129,7 @@ new file mode 100644
 +#include <linux/mmzone.h>
 +#include <linux/mm_types.h>
 +#include <linux/sched.h>
++#include <linux/slab.h>
 +#include <linux/wait.h>
 +#include <linux/kfifo.h>
 +#include <linux/xarray.h>
@@ -2100,16 +2140,68 @@ new file mode 100644
 +struct lru_cast_lruvec_state {
 +	struct lru_cast	lru_cast[ANON_AND_FILE];
 +	bool		lru_cast_on;
++	/* given its number in the node, its rings made ready */
++	atomic_t	inited;
++	struct rcu_head	rcu;
 +};
 +
 +static DEFINE_XARRAY(lru_cast_lruvec_states);
 +
-+/* an lruvec never given a state of its own (a memcg's, never filled) */
++/*
++ * An lruvec never given a state of its own: read, never written. Were its
++ * rings, its number (lid), kept here, every lruvec without a state would
++ * share them -- and reclaim one as if its folios were another's.
++ */
 +static struct lru_cast_lruvec_state lru_cast_null_state;
 +
 +static struct lru_cast_lruvec_state *lru_cast_state_get(struct lruvec *lruvec)
 +{
 +	return xa_load(&lru_cast_lruvec_states, (unsigned long)lruvec);
++}
++
++/*
++ * An lruvec's state, made where the lruvec is made (its init) and not under
++ * its lru_lock: made there, with the lock held and interrupts off, it could
++ * be made atomically only, and one that failed left the lruvec on the null
++ * state -- another's rings, another's numbers. Called again where more room
++ * is at hand (switching on), should it have failed before. A state the
++ * lruvec has already is kept.
++ */
++int lru_cast_state_alloc(struct lruvec *lruvec, gfp_t gfp)
++{
++	struct lru_cast_lruvec_state *st, *old;
++
++	if (lru_cast_state_get(lruvec))
++		return 0;
++	st = kzalloc(sizeof(*st), gfp);
++	if (!st)
++		return -ENOMEM;
++	/* two callers may race for one lruvec: the one that finds another's frees its own */
++	old = xa_load(&lru_cast_lruvec_states, (unsigned long)lruvec);
++	if (old) {
++		kfree(st);
++		return 0;
++	}
++	if (xa_is_err(xa_store(&lru_cast_lruvec_states, (unsigned long)lruvec, st, gfp))) {
++		kfree(st);
++		return -ENOMEM;
++	}
++	return 0;
++}
++
++/*
++ * @lruvec's state taken for its rings to be made ready: true for the one
++ * caller that is to give it its number and reset it, false if it has one
++ * already -- made where the lruvec was, or by an earlier call.
++ */
++bool lru_cast_state_claim(struct lruvec *lruvec)
++{
++	struct lru_cast_lruvec_state *st = lru_cast_state_get(lruvec);
++	int unclaimed = 0;
++
++	if (!st)
++		return false;
++	return atomic_cmpxchg(&st->inited, unclaimed, 1) == unclaimed;
 +}
 +
 +/* the rings of an lruvec; the null state when it has none of its own */
@@ -2122,6 +2214,27 @@ new file mode 100644
 +	return &st->lru_cast[type];
 +}
 +
++/* whether the lruvec has a state of its own -- rings to reset, a flag to set */
++bool lru_cast_state_here(struct lruvec *lruvec)
++{
++	return lru_cast_state_get(lruvec) != NULL;
++}
++
++/*
++ * The state goes with the lruvec: left behind, its entry is found by the
++ * next lruvec made at that address, which then finds it claimed and runs on
++ * rings holding another memcg's folios. Freed after a grace period, as a
++ * reader may be holding it under rcu_read_lock() (lru_cast_folio_on()).
++ */
++void lru_cast_state_free(struct lruvec *lruvec)
++{
++	struct lru_cast_lruvec_state *st;
++
++	st = xa_erase(&lru_cast_lruvec_states, (unsigned long)lruvec);
++	if (st)
++		kfree_rcu(st, rcu);
++}
++
 +bool lru_cast_state_on(struct lruvec *lruvec)
 +{
 +	struct lru_cast_lruvec_state *st = lru_cast_state_get(lruvec);
@@ -2129,17 +2242,17 @@ new file mode 100644
 +	return st && READ_ONCE(st->lru_cast_on);
 +}
 +
++/*
++ * An lruvec with no state of its own stays off, its rings nobody's: it is
++ * given one where it is made, and CAST is not run on it until that worked.
++ * The null state is only ever read.
++ */
 +void lru_cast_state_on_set(struct lruvec *lruvec, bool on)
 +{
 +	struct lru_cast_lruvec_state *st = lru_cast_state_get(lruvec);
 +
-+	if (!st) {
-+		/* GFP_ATOMIC: lru_cast_fill()/lru_cast_drain() hold the lru_lock */
-+		st = kzalloc(sizeof(*st), GFP_ATOMIC);
-+		if (!st)
-+			return;
-+		xa_store(&lru_cast_lruvec_states, (unsigned long)lruvec, st, GFP_ATOMIC);
-+	}
++	if (!st)
++		return;
 +	WRITE_ONCE(st->lru_cast_on, on);
 +}
 +
@@ -2181,6 +2294,7 @@ new file mode 100644
 +}
 diff --git a/mm/lru_cast/core/nia_types.h b/mm/lru_cast/core/nia_types.h
 new file mode 100644
+index 0000000000000000000000000000000000000000..079f3b95deabda1d4c350b3b56b435748af6f243
 --- /dev/null
 +++ b/mm/lru_cast/core/nia_types.h
 @@ -0,0 +1,87 @@
@@ -2273,6 +2387,7 @@ new file mode 100644
 +#endif /* _MM_LRU_CAST_NIA_TYPES_H */
 diff --git a/mm/lru_cast/core/prefetch.c b/mm/lru_cast/core/prefetch.c
 new file mode 100644
+index 0000000000000000000000000000000000000000..f88ef8702056c563c114d067cded6eca49296949
 --- /dev/null
 +++ b/mm/lru_cast/core/prefetch.c
 @@ -0,0 +1,77 @@
@@ -2355,6 +2470,7 @@ new file mode 100644
 +
 diff --git a/mm/lru_cast/core/prefetch.h b/mm/lru_cast/core/prefetch.h
 new file mode 100644
+index 0000000000000000000000000000000000000000..58088976639b60258bdafae3d4d1437610d90484
 --- /dev/null
 +++ b/mm/lru_cast/core/prefetch.h
 @@ -0,0 +1,61 @@
@@ -2421,6 +2537,7 @@ new file mode 100644
 +
 diff --git a/mm/lru_cast/core/state.c b/mm/lru_cast/core/state.c
 new file mode 100644
+index 0000000000000000000000000000000000000000..d33df9d1200887f0a955ca5dca28497f6f6b3c4a
 --- /dev/null
 +++ b/mm/lru_cast/core/state.c
 @@ -0,0 +1,269 @@
@@ -2695,6 +2812,7 @@ new file mode 100644
 +}
 diff --git a/mm/lru_cast/core/store.c b/mm/lru_cast/core/store.c
 new file mode 100644
+index 0000000000000000000000000000000000000000..0b5e855790faf81aa72cfb15059e2d338a84fcc4
 --- /dev/null
 +++ b/mm/lru_cast/core/store.c
 @@ -0,0 +1,198 @@
@@ -2898,6 +3016,7 @@ new file mode 100644
 +
 diff --git a/mm/lru_cast/core/store.h b/mm/lru_cast/core/store.h
 new file mode 100644
+index 0000000000000000000000000000000000000000..511a663ce0e2535608545c9314ac0b409651e0d5
 --- /dev/null
 +++ b/mm/lru_cast/core/store.h
 @@ -0,0 +1,26 @@
@@ -2929,6 +3048,7 @@ new file mode 100644
 +
 diff --git a/mm/lru_cast/hooks.c b/mm/lru_cast/hooks.c
 new file mode 100644
+index 0000000000000000000000000000000000000000..26d56e6ffa6d407ae31852e5cc257c67a2943cde
 --- /dev/null
 +++ b/mm/lru_cast/hooks.c
 @@ -0,0 +1,29 @@
@@ -2963,6 +3083,7 @@ new file mode 100644
 +
 diff --git a/mm/lru_cast/policy/balance.c b/mm/lru_cast/policy/balance.c
 new file mode 100644
+index 0000000000000000000000000000000000000000..12e6906a323a0298bc0f2c9224b60e9f774fe47e
 --- /dev/null
 +++ b/mm/lru_cast/policy/balance.c
 @@ -0,0 +1,246 @@
@@ -3214,6 +3335,7 @@ new file mode 100644
 +}
 diff --git a/mm/lru_cast/policy/ghost.c b/mm/lru_cast/policy/ghost.c
 new file mode 100644
+index 0000000000000000000000000000000000000000..7dd32508d25b5e1a5c0a04f05aa0dade324cdd0e
 --- /dev/null
 +++ b/mm/lru_cast/policy/ghost.c
 @@ -0,0 +1,167 @@
@@ -3386,6 +3508,7 @@ new file mode 100644
 +
 diff --git a/mm/lru_cast/policy/params.c b/mm/lru_cast/policy/params.c
 new file mode 100644
+index 0000000000000000000000000000000000000000..d032ff46304e36acf28056d490c5322e25a4417e
 --- /dev/null
 +++ b/mm/lru_cast/policy/params.c
 @@ -0,0 +1,70 @@
@@ -3461,6 +3584,7 @@ new file mode 100644
 +}
 diff --git a/mm/lru_cast/policy/policy.h b/mm/lru_cast/policy/policy.h
 new file mode 100644
+index 0000000000000000000000000000000000000000..fe707e4cb2085467f99e64594036b11f892ba084
 --- /dev/null
 +++ b/mm/lru_cast/policy/policy.h
 @@ -0,0 +1,79 @@
@@ -3545,9 +3669,10 @@ new file mode 100644
 +
 diff --git a/mm/lru_cast/policy/reclaim.c b/mm/lru_cast/policy/reclaim.c
 new file mode 100644
+index 0000000000000000000000000000000000000000..d086b9d50b2be72080ac6b5b64e578005d9e9233
 --- /dev/null
 +++ b/mm/lru_cast/policy/reclaim.c
-@@ -0,0 +1,185 @@
+@@ -0,0 +1,209 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * CAST -- the choice of victims.
@@ -3639,9 +3764,14 @@ new file mode 100644
 +{
 +	enum lru_list lru_w = s->type ? LRU_INACTIVE_FILE : LRU_INACTIVE_ANON;
 +	struct list_head *w = &lruvec->lists[lru_w];
++	struct list_head *m = &lruvec->lists[lru_w + LRU_ACTIVE];
 +	unsigned long nr_w = s->nr_w, nr_m = s->nr_m, scan = 0, nr_pages;
 +	LIST_HEAD(aside_w);
 +	LIST_HEAD(aside_m);
++
++	/* no state of its own: nothing of CAST's to reclaim from, its lists are the kernel's */
++	if (!lru_cast_on(lruvec))
++		return 0;
 +
 +	lru_cast_w_admit(lruvec, s->type, &nr_w, &nr_m, 0, s->nr_to_scan * LRU_CAST_ADMIT);
 +	lru_cast_ring_prepare(lruvec, s->type);
@@ -3662,19 +3792,27 @@ new file mode 100644
 +		}
 +
 +		nr_pages = folio_nr_pages(folio);
++		/*
++		 * Every folio met counts against the budget, the one set aside
++		 * too. A folio set aside is put back behind the others, where
++		 * the sweep finds it last -- counted as met, it cannot hold
++		 * reclaim here for as long as it is set aside again.
++		 */
++		scan += nr_pages;
 +		s->nr_scanned += nr_pages;
 +		if (from_m)
 +			nr_m -= min(nr_m, nr_pages);
 +		else
 +			nr_w -= min(nr_w, nr_pages);
 +
-+		/* not eligible: set aside, back where it was at the end */
++		/* not eligible: set aside, back behind what waits */
 +		if (folio_zonenum(folio) > s->reclaim_idx) {
 +			s->skipped[folio_zonenum(folio)] += nr_pages;
 +			goto aside;
 +		}
-+		scan += nr_pages;
-+		if (!folio_test_lru(folio) || (!s->may_unmap && folio_mapped(folio)))
++		if (!folio_test_lru(folio))
++			goto aside;
++		if (!s->may_unmap && folio_mapped(folio))
 +			goto aside;
 +		if (unlikely(!folio_try_get(folio)))
 +			goto aside;
@@ -3695,16 +3833,27 @@ new file mode 100644
 +		s->nr_taken += nr_pages;
 +		continue;
 +aside:
-+		list_move(&folio->lru, from_m ? &aside_m : &aside_w);
++		/* the list it was on may have gone under it: then there is none to put it back on */
++		if (!folio_test_lru(folio)) {
++			if (from_m)
++				lru_cast_ring_out(folio);
++			continue;
++		}
++		if (from_m) {
++			/*
++			 * Still M's, its tag kept: out of the way of this pass,
++			 * and back behind what waits when it ends. The sweep
++			 * that finds it again is bound by its budget; the ones
++			 * set aside here are those the zone leaves out, few.
++			 */
++			list_move_tail(&folio->lru, &aside_m);
++		} else {
++			list_move(&folio->lru, &aside_w);
++		}
 +	}
 +
 +	list_splice(&aside_w, w);
-+	while (!list_empty(&aside_m)) {
-+		struct folio *folio = lru_to_folio(&aside_m);
-+
-+		list_del(&folio->lru);
-+		lru_cast_ring_put(lruvec, folio, s->type);
-+	}
++	list_splice_tail(&aside_m, m);
 +	if (s->nr_taken)
 +		lru_cast_evicted(lruvec_pgdat(lruvec), s->type, s->nr_taken);
 +	return s->nr_taken;
@@ -3735,9 +3884,10 @@ new file mode 100644
 +
 diff --git a/mm/lru_cast/policy/ring.c b/mm/lru_cast/policy/ring.c
 new file mode 100644
+index 0000000000000000000000000000000000000000..13f7e7b6d0d0042e19e7921e79c7662b2c69539e
 --- /dev/null
 +++ b/mm/lru_cast/policy/ring.c
-@@ -0,0 +1,760 @@
+@@ -0,0 +1,773 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * CAST -- keys, and M's lowest found by a sweep.
@@ -3802,10 +3952,17 @@ new file mode 100644
 +#include "policy/policy.h"
 +
 +#define LRU_CAST_RES		4	/* sixteenths of a half-life */
-+#define LRU_CAST_SWEEP_MAX		4096	/* frames a sweep reads at most */
-+#define LRU_CAST_SWEEP_EMPTY	65536	/* ... or, with nothing found yet, this many */
++/*
++ * The lru_lock is held, interrupts off, for as long as a sweep runs: it reads
++ * a few frames at a time and gives the lock back, the next pass taking up the
++ * cursor, rather than wait on one long read of a whole node -- a node of 12M
++ * PFNs, the watchdogs, and every CPU queueing on the lock meanwhile.
++ */
++#define LRU_CAST_SWEEP_MAX		2048	/* frames a sweep reads at most */
++#define LRU_CAST_SWEEP_EMPTY	4096	/* ... or, with nothing found yet, this many */
++#define LRU_CAST_PASSES			2	/* passes over the node at most in one sweep */
 +#define LRU_CAST_TAU_SHIFT		4	/* tau: the 1/16 quantile */
-+#define LRU_CAST_PROBES		4096	/* frames drawn at most for tau before a pass */
++#define LRU_CAST_PROBES		512	/* frames drawn at most for tau before a pass */
 +#define LRU_CAST_PROBE_MIN		32	/* ... and the keys it takes */
 +#define LRU_CAST_REHOME_SCAN	(1UL << 18)	/* frames the work reads between rests */
 +
@@ -3942,8 +4099,11 @@ new file mode 100644
 +/* its number back to the node; no folio is left with it */
 +void lru_cast_ring_exit(struct lruvec *lruvec)
 +{
-+	u16 lid = lru_cast_k(lruvec, 0)->lid;
++	u16 lid;
 +
++	if (!lru_cast_state_here(lruvec))
++		return;			/* its number, if any, is no lruvec's own */
++	lid = lru_cast_k(lruvec, 0)->lid;
 +	if (lid && lid != LRU_CAST_LID_SPILL)
 +		clear_bit(lid, lru_cast_clock_of(lruvec_pgdat(lruvec))->lids);
 +	lru_cast_k(lruvec, 0)->lid = 0;
@@ -4278,10 +4438,13 @@ new file mode 100644
 +
 +		if (frames >= budget)
 +			break;
++		/* a CPU is waited for: the lock given back, the next pass from here on */
++		if (need_resched())
++			break;
 +		if (k->tau_ok && k->ncand == LRU_CAST_CANDS && k->cand[0].key <= k->tau)
 +			break;
 +		if (k->cursor >= end) {			/* a pass ends: tau from its keys */
-+			if (++wraps > 2)		/* no block left that may hold M */
++			if (++wraps > LRU_CAST_PASSES)	/* no block left that may hold M */
 +				break;
 +			k->cursor = start;
 +			if (k->seen) {
@@ -4500,6 +4663,7 @@ new file mode 100644
 +}
 diff --git a/mm/lru_cast/sysfs.c b/mm/lru_cast/sysfs.c
 new file mode 100644
+index 0000000000000000000000000000000000000000..42d05034b64b6c22c90c958adbc182a65337f2db
 --- /dev/null
 +++ b/mm/lru_cast/sysfs.c
 @@ -0,0 +1,293 @@
@@ -4798,6 +4962,7 @@ new file mode 100644
 +}
 diff --git a/mm/lru_cast/tune/cost.c b/mm/lru_cast/tune/cost.c
 new file mode 100644
+index 0000000000000000000000000000000000000000..84917a82b5df6a978ef85258b5d6599e486a0d6b
 --- /dev/null
 +++ b/mm/lru_cast/tune/cost.c
 @@ -0,0 +1,429 @@
@@ -5232,6 +5397,7 @@ new file mode 100644
 +}
 diff --git a/mm/lru_cast/tune/cost.h b/mm/lru_cast/tune/cost.h
 new file mode 100644
+index 0000000000000000000000000000000000000000..f3739f4cec0050dfe8539591aa3730214d3ebae4
 --- /dev/null
 +++ b/mm/lru_cast/tune/cost.h
 @@ -0,0 +1,13 @@
@@ -5250,6 +5416,7 @@ new file mode 100644
 +
 diff --git a/mm/lru_cast/tune/decay.c b/mm/lru_cast/tune/decay.c
 new file mode 100644
+index 0000000000000000000000000000000000000000..3ba561fbae70052ee699677a603543e2b6bf2184
 --- /dev/null
 +++ b/mm/lru_cast/tune/decay.c
 @@ -0,0 +1,76 @@
@@ -5331,6 +5498,7 @@ new file mode 100644
 +}
 diff --git a/mm/lru_cast/tune/decay.h b/mm/lru_cast/tune/decay.h
 new file mode 100644
+index 0000000000000000000000000000000000000000..480dc48dbd5a5030c2ce01625eab5e6332a66305
 --- /dev/null
 +++ b/mm/lru_cast/tune/decay.h
 @@ -0,0 +1,15 @@
@@ -5351,6 +5519,7 @@ new file mode 100644
 +
 diff --git a/mm/lru_cast/tune/evidence.c b/mm/lru_cast/tune/evidence.c
 new file mode 100644
+index 0000000000000000000000000000000000000000..b20e96f470649855554a6e4ce98833d82d99c164
 --- /dev/null
 +++ b/mm/lru_cast/tune/evidence.c
 @@ -0,0 +1,112 @@
@@ -5468,6 +5637,7 @@ new file mode 100644
 +
 diff --git a/mm/lru_cast/tune/evidence.h b/mm/lru_cast/tune/evidence.h
 new file mode 100644
+index 0000000000000000000000000000000000000000..ef0511f84803c049cb0fc4a909a42539f731ebb5
 --- /dev/null
 +++ b/mm/lru_cast/tune/evidence.h
 @@ -0,0 +1,49 @@
@@ -5522,6 +5692,7 @@ new file mode 100644
 +
 diff --git a/mm/lru_cast/tune/protect.c b/mm/lru_cast/tune/protect.c
 new file mode 100644
+index 0000000000000000000000000000000000000000..1583b322197d0ad83ae2120ce9a805b31b15b2b6
 --- /dev/null
 +++ b/mm/lru_cast/tune/protect.c
 @@ -0,0 +1,214 @@
@@ -5741,6 +5912,7 @@ new file mode 100644
 +
 diff --git a/mm/lru_cast/tune/readahead.c b/mm/lru_cast/tune/readahead.c
 new file mode 100644
+index 0000000000000000000000000000000000000000..6add7c6f5f489b63d8298a11af9e5761a22d0d1d
 --- /dev/null
 +++ b/mm/lru_cast/tune/readahead.c
 @@ -0,0 +1,67 @@
@@ -5813,6 +5985,7 @@ new file mode 100644
 +
 diff --git a/mm/lru_cast/tune/sample.c b/mm/lru_cast/tune/sample.c
 new file mode 100644
+index 0000000000000000000000000000000000000000..1ecdff226afeaa31b88788be0cc0606cf558fd30
 --- /dev/null
 +++ b/mm/lru_cast/tune/sample.c
 @@ -0,0 +1,36 @@
@@ -5854,6 +6027,7 @@ new file mode 100644
 +
 diff --git a/mm/lru_cast/tune/sample.h b/mm/lru_cast/tune/sample.h
 new file mode 100644
+index 0000000000000000000000000000000000000000..7970da5f4a2b4a809c9e151cd2049c10bd76d64e
 --- /dev/null
 +++ b/mm/lru_cast/tune/sample.h
 @@ -0,0 +1,26 @@
@@ -5885,6 +6059,7 @@ new file mode 100644
 +
 diff --git a/mm/lru_cast/tune/shape.h b/mm/lru_cast/tune/shape.h
 new file mode 100644
+index 0000000000000000000000000000000000000000..36657b440f08f82c7708e4ef8b7f79b07d65f0c2
 --- /dev/null
 +++ b/mm/lru_cast/tune/shape.h
 @@ -0,0 +1,61 @@
@@ -5951,6 +6126,7 @@ new file mode 100644
 +
 diff --git a/mm/lru_cast/tune/share.c b/mm/lru_cast/tune/share.c
 new file mode 100644
+index 0000000000000000000000000000000000000000..15538d20e2e6b8267cb3ff22927561a6c3605ab6
 --- /dev/null
 +++ b/mm/lru_cast/tune/share.c
 @@ -0,0 +1,105 @@
@@ -6061,6 +6237,7 @@ new file mode 100644
 +}
 diff --git a/mm/lru_cast/tune/share.h b/mm/lru_cast/tune/share.h
 new file mode 100644
+index 0000000000000000000000000000000000000000..8a9442e90c5137f1e8565f3fca809ec08043283c
 --- /dev/null
 +++ b/mm/lru_cast/tune/share.h
 @@ -0,0 +1,13 @@
@@ -6079,6 +6256,7 @@ new file mode 100644
 +
 diff --git a/mm/lru_cast/tune/sim.c b/mm/lru_cast/tune/sim.c
 new file mode 100644
+index 0000000000000000000000000000000000000000..860d51597164914cfd34412797e61544817538c2
 --- /dev/null
 +++ b/mm/lru_cast/tune/sim.c
 @@ -0,0 +1,733 @@
@@ -6817,6 +6995,7 @@ new file mode 100644
 +}
 diff --git a/mm/lru_cast/tune/sim.h b/mm/lru_cast/tune/sim.h
 new file mode 100644
+index 0000000000000000000000000000000000000000..d9ac645edb6fa9ef3247c6c8fe9a3de427640e93
 --- /dev/null
 +++ b/mm/lru_cast/tune/sim.h
 @@ -0,0 +1,54 @@
@@ -6876,6 +7055,7 @@ new file mode 100644
 +
 diff --git a/mm/lru_cast/tune/tune.c b/mm/lru_cast/tune/tune.c
 new file mode 100644
+index 0000000000000000000000000000000000000000..cdbaed56250fe26947d3a53b584cb1ea7f64ee86
 --- /dev/null
 +++ b/mm/lru_cast/tune/tune.c
 @@ -0,0 +1,368 @@
@@ -7249,6 +7429,7 @@ new file mode 100644
 +
 diff --git a/mm/lru_cast/tune/tune.h b/mm/lru_cast/tune/tune.h
 new file mode 100644
+index 0000000000000000000000000000000000000000..0d2190de25145e193e64d7eb4d8222618788af39
 --- /dev/null
 +++ b/mm/lru_cast/tune/tune.h
 @@ -0,0 +1,98 @@
@@ -7352,6 +7533,7 @@ new file mode 100644
 +
 diff --git a/mm/lru_cast/tune/world.c b/mm/lru_cast/tune/world.c
 new file mode 100644
+index 0000000000000000000000000000000000000000..d91733e87b23962f2df507c42f55fb378df9d7ac
 --- /dev/null
 +++ b/mm/lru_cast/tune/world.c
 @@ -0,0 +1,56 @@
@@ -7413,6 +7595,7 @@ new file mode 100644
 +}
 diff --git a/mm/lru_cast/tune/world.h b/mm/lru_cast/tune/world.h
 new file mode 100644
+index 0000000000000000000000000000000000000000..e74e19e933c85c56937ba527a763a2ed06e9494b
 --- /dev/null
 +++ b/mm/lru_cast/tune/world.h
 @@ -0,0 +1,16 @@
@@ -7434,6 +7617,7 @@ new file mode 100644
 +
 diff --git a/mm/lru_cast/tune/wshare.c b/mm/lru_cast/tune/wshare.c
 new file mode 100644
+index 0000000000000000000000000000000000000000..6cec84f0a091846a3f2961de3d4bb04d9134a068
 --- /dev/null
 +++ b/mm/lru_cast/tune/wshare.c
 @@ -0,0 +1,82 @@
@@ -7521,6 +7705,7 @@ new file mode 100644
 +}
 diff --git a/mm/lru_cast/tune/wshare.h b/mm/lru_cast/tune/wshare.h
 new file mode 100644
+index 0000000000000000000000000000000000000000..ac9d33c024564c3d8bc0826242287f9ea51d1464
 --- /dev/null
 +++ b/mm/lru_cast/tune/wshare.h
 @@ -0,0 +1,21 @@
@@ -7547,6 +7732,7 @@ new file mode 100644
 +#endif /* _MM_LRU_CAST_TUNE_WSHARE_H */
 diff --git a/mm/lru_cast/version.h b/mm/lru_cast/version.h
 new file mode 100644
+index 0000000000000000000000000000000000000000..e3bdabd4d21e70c4617c5b2ff1a8aeda00632749
 --- /dev/null
 +++ b/mm/lru_cast/version.h
 @@ -0,0 +1,15 @@
@@ -7567,6 +7753,7 @@ new file mode 100644
 +#endif /* _MM_LRU_CAST_VERSION_H */
 diff --git a/mm/lru_cast/walk/bloom.c b/mm/lru_cast/walk/bloom.c
 new file mode 100644
+index 0000000000000000000000000000000000000000..b38c1546df5f0eec48ec224e1b007b5b1a83b042
 --- /dev/null
 +++ b/mm/lru_cast/walk/bloom.c
 @@ -0,0 +1,66 @@
@@ -7638,6 +7825,7 @@ new file mode 100644
 +
 diff --git a/mm/lru_cast/walk/lookaround.c b/mm/lru_cast/walk/lookaround.c
 new file mode 100644
+index 0000000000000000000000000000000000000000..76414164c2dbf747a7123c2bbe59e847eaa62b2b
 --- /dev/null
 +++ b/mm/lru_cast/walk/lookaround.c
 @@ -0,0 +1,102 @@
@@ -7745,6 +7933,7 @@ new file mode 100644
 +
 diff --git a/mm/lru_cast/walk/simd.h b/mm/lru_cast/walk/simd.h
 new file mode 100644
+index 0000000000000000000000000000000000000000..3513e54c696e799fe77e2669e8ad6416db737c12
 --- /dev/null
 +++ b/mm/lru_cast/walk/simd.h
 @@ -0,0 +1,28 @@
@@ -7778,6 +7967,7 @@ new file mode 100644
 +
 diff --git a/mm/lru_cast/walk/simd_generic.c b/mm/lru_cast/walk/simd_generic.c
 new file mode 100644
+index 0000000000000000000000000000000000000000..909ed61777c4fbe34d243430dbc32592e280da29
 --- /dev/null
 +++ b/mm/lru_cast/walk/simd_generic.c
 @@ -0,0 +1,35 @@
@@ -7818,6 +8008,7 @@ new file mode 100644
 +
 diff --git a/mm/lru_cast/walk/simd_x86.c b/mm/lru_cast/walk/simd_x86.c
 new file mode 100644
+index 0000000000000000000000000000000000000000..50722f60bdeb469bbf3c756947affbe20c54bd77
 --- /dev/null
 +++ b/mm/lru_cast/walk/simd_x86.c
 @@ -0,0 +1,71 @@
@@ -7894,6 +8085,7 @@ new file mode 100644
 +
 diff --git a/mm/lru_cast/walk/simd_x86_avx2.S b/mm/lru_cast/walk/simd_x86_avx2.S
 new file mode 100644
+index 0000000000000000000000000000000000000000..6e0f21994a18bce774aa8bccf1e6d02af6839b9f
 --- /dev/null
 +++ b/mm/lru_cast/walk/simd_x86_avx2.S
 @@ -0,0 +1,171 @@
@@ -8070,6 +8262,7 @@ new file mode 100644
 +
 diff --git a/mm/lru_cast/walk/simd_x86_avx512.S b/mm/lru_cast/walk/simd_x86_avx512.S
 new file mode 100644
+index 0000000000000000000000000000000000000000..9dd3211160d3f2370455a496baaeba4ead9aae85
 --- /dev/null
 +++ b/mm/lru_cast/walk/simd_x86_avx512.S
 @@ -0,0 +1,221 @@
@@ -8296,6 +8489,7 @@ new file mode 100644
 +
 diff --git a/mm/lru_cast/walk/simd_x86_sse2.S b/mm/lru_cast/walk/simd_x86_sse2.S
 new file mode 100644
+index 0000000000000000000000000000000000000000..673355c1527859490fcc724a226279eee8518d3d
 --- /dev/null
 +++ b/mm/lru_cast/walk/simd_x86_sse2.S
 @@ -0,0 +1,159 @@
@@ -8460,6 +8654,7 @@ new file mode 100644
 +
 diff --git a/mm/lru_cast/walk/walk.c b/mm/lru_cast/walk/walk.c
 new file mode 100644
+index 0000000000000000000000000000000000000000..b36522307679c01d2375fba577b717b6d99e9224
 --- /dev/null
 +++ b/mm/lru_cast/walk/walk.c
 @@ -0,0 +1,308 @@
@@ -8773,6 +8968,7 @@ new file mode 100644
 +
 diff --git a/mm/lru_cast/walk/walk.h b/mm/lru_cast/walk/walk.h
 new file mode 100644
+index 0000000000000000000000000000000000000000..d5fd850cc8b16d834fdd06c219463dc9267aa7b0
 --- /dev/null
 +++ b/mm/lru_cast/walk/walk.h
 @@ -0,0 +1,29 @@
@@ -8807,6 +9003,7 @@ new file mode 100644
 +
 diff --git a/mm/lru_cast/walk/young.h b/mm/lru_cast/walk/young.h
 new file mode 100644
+index 0000000000000000000000000000000000000000..0593e29051edff337f5c8603a6687e2524069312
 --- /dev/null
 +++ b/mm/lru_cast/walk/young.h
 @@ -0,0 +1,59 @@

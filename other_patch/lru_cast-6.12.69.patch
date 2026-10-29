@@ -9552,7 +9552,7 @@ diff --git a/mm/page_io.c b/mm/page_io.c
  	__end_swap_bio_write(bio);
  	bio_put(bio);
  }
-@@ -238,12 +269,174 @@
+@@ -238,12 +269,181 @@
  }
  
  /*
@@ -9696,6 +9696,13 @@ diff --git a/mm/page_io.c b/mm/page_io.c
 +	    abs(READ_ONCE(vm_kcompressd)) * sizeof(struct folio *))
 +		return false;
 +
++	/*
++	 * This handover aliases folio->lru as the queue link, exactly as
++	 * page_list did: a folio that is still on the LRU would corrupt
++	 * the LRU (and the queue) once kcompressd re-links it.
++	 */
++	VM_BUG_ON_FOLIO(folio_test_lru(folio), folio);
++
 +	/* Increment the folio reference count to avoid it being freed */
 +	folio_get(folio);
 +
@@ -9727,7 +9734,7 @@ diff --git a/mm/page_io.c b/mm/page_io.c
  	int ret;
  
  	if (folio_free_swap(folio)) {
-@@ -260,6 +453,9 @@
+@@ -260,6 +460,9 @@
  		folio_unlock(folio);
  		return ret;
  	}
@@ -9737,7 +9744,7 @@ diff --git a/mm/page_io.c b/mm/page_io.c
  
  	/*
  	 * Use a bitmap (zeromap) to avoid doing IO for zero-filled pages.
-@@ -270,6 +466,7 @@
+@@ -270,6 +473,7 @@
  	if (is_folio_zero_filled(folio)) {
  		swap_zeromap_folio_set(folio);
  		folio_unlock(folio);
@@ -9745,7 +9752,7 @@ diff --git a/mm/page_io.c b/mm/page_io.c
  		return 0;
  	} else {
  		/*
-@@ -279,8 +476,18 @@
+@@ -279,8 +483,18 @@
  		 */
  		swap_zeromap_folio_clear(folio);
  	}
@@ -9764,7 +9771,7 @@ diff --git a/mm/page_io.c b/mm/page_io.c
  		return 0;
  	}
  	if (!mem_cgroup_zswap_writeback_enabled(folio_memcg(folio))) {
-@@ -291,6 +498,84 @@
+@@ -291,6 +505,84 @@
  	__swap_writepage(folio, wbc);
  	return 0;
  }
@@ -9849,7 +9856,7 @@ diff --git a/mm/page_io.c b/mm/page_io.c
  
  static inline void count_swpout_vm_event(struct folio *folio)
  {
-@@ -415,6 +700,8 @@
+@@ -415,6 +707,8 @@
  static void swap_writepage_bdev_sync(struct folio *folio,
  		struct writeback_control *wbc, struct swap_info_struct *sis)
  {
@@ -9858,7 +9865,7 @@ diff --git a/mm/page_io.c b/mm/page_io.c
  	struct bio_vec bv;
  	struct bio bio;
  
-@@ -431,7 +718,58 @@
+@@ -431,7 +725,58 @@
  
  	submit_bio_wait(&bio);
  	__end_swap_bio_write(&bio);
@@ -9918,7 +9925,7 @@ diff --git a/mm/page_io.c b/mm/page_io.c
  
  static void swap_writepage_bdev_async(struct folio *folio,
  		struct writeback_control *wbc, struct swap_info_struct *sis)
-@@ -449,6 +787,8 @@
+@@ -449,6 +794,8 @@
  	count_swpout_vm_event(folio);
  	folio_start_writeback(folio);
  	folio_unlock(folio);
@@ -9927,7 +9934,7 @@ diff --git a/mm/page_io.c b/mm/page_io.c
  	submit_bio(bio);
  }
  
-@@ -651,6 +991,12 @@
+@@ -651,6 +998,12 @@
  	}
  	delayacct_swapin_start();
  
@@ -9940,7 +9947,7 @@ diff --git a/mm/page_io.c b/mm/page_io.c
  	if (swap_read_folio_zeromap(folio)) {
  		folio_unlock(folio);
  		goto finish;
-@@ -662,6 +1008,11 @@
+@@ -662,6 +1015,11 @@
  	/* We have to read from slower devices. Increase zswap protection. */
  	zswap_folio_swapin(folio);
  
@@ -10174,7 +10181,7 @@ diff --git a/mm/vmscan.c b/mm/vmscan.c
  
  	if (lru_gen_enabled()) {
  		if (!referenced_ptes)
-@@ -1475,6 +1539,15 @@
+@@ -1475,6 +1539,22 @@
  					nr_pages = 1;
  				}
  				goto activate_locked;
@@ -10184,13 +10191,20 @@ diff --git a/mm/vmscan.c b/mm/vmscan.c
 +				 * moment: counted as freed, or kswapd would
 +				 * write more in the meantime
 +				 */
++				/*
++				 * pageout() isolated it, but the handover only borrowed that
++				 * isolation: the folio is still on page_list. Drop the stale
++				 * list node here -- kcompressd reuses folio->lru as its queue
++				 * link, and a stale page_list link would tear that queue.
++				 */
++				list_del_init(&folio->lru);
 +				stat->nr_pageout += nr_pages;
 +				nr_reclaimed += nr_pages;
 +				continue;
  			case PAGE_SUCCESS:
  				if (nr_pages > 1 && !folio_test_large(folio)) {
  					sc->nr_scanned -= (nr_pages - 1);
-@@ -1883,6 +1956,53 @@
+@@ -1883,6 +1963,53 @@
  	return nr_taken;
  }
  
@@ -10244,7 +10258,7 @@ diff --git a/mm/vmscan.c b/mm/vmscan.c
  /**
   * folio_isolate_lru() - Try to isolate a folio from its LRU list.
   * @folio: Folio to isolate from its LRU list.
-@@ -2088,8 +2208,12 @@
+@@ -2088,8 +2215,12 @@
  
  	spin_lock_irq(&lruvec->lru_lock);
  
@@ -10259,7 +10273,7 @@ diff --git a/mm/vmscan.c b/mm/vmscan.c
  
  	__mod_node_page_state(pgdat, NR_ISOLATED_ANON + file, nr_taken);
  	item = PGSCAN_KSWAPD + reclaimer_offset();
-@@ -2356,6 +2480,33 @@
+@@ -2356,6 +2487,33 @@
  	return nr_reclaimed;
  }
  
@@ -10293,7 +10307,7 @@ diff --git a/mm/vmscan.c b/mm/vmscan.c
  unsigned long reclaim_pages(struct list_head *folio_list)
  {
  	return __reclaim_pages(folio_list, NULL);
-@@ -2365,6 +2516,11 @@
+@@ -2365,6 +2523,11 @@
  static unsigned long shrink_list(enum lru_list lru, unsigned long nr_to_scan,
  				 struct lruvec *lruvec, struct scan_control *sc)
  {
@@ -10305,7 +10319,7 @@ diff --git a/mm/vmscan.c b/mm/vmscan.c
  	if (is_active_lru(lru)) {
  		if (sc->may_deactivate & (1 << is_file_lru(lru)))
  			shrink_active_list(nr_to_scan, lruvec, sc, lru);
-@@ -2551,6 +2707,13 @@
+@@ -2551,6 +2714,13 @@
  			anon >> sc->priority;
  	}
  
@@ -10319,7 +10333,7 @@ diff --git a/mm/vmscan.c b/mm/vmscan.c
  	customize_sc_file_is_tiny(sc);
  }
  
-@@ -2574,6 +2737,43 @@
+@@ -2574,6 +2744,43 @@
  	unsigned long ap, fp;
  	enum lru_list lru;
  	bool balance_anon_file_reclaim = false;
@@ -10363,7 +10377,7 @@ diff --git a/mm/vmscan.c b/mm/vmscan.c
  
  	/* If we have no swap space, do not bother scanning anon folios. */
  	if (!sc->may_swap || !can_reclaim_anon_pages(memcg, pgdat->node_id, sc)) {
-@@ -2734,6 +2934,11 @@
+@@ -2734,6 +2941,11 @@
  		if (!scan && !mem_cgroup_online(memcg))
  			scan = min(lruvec_size, SWAP_CLUSTER_MAX);
  
@@ -10375,7 +10389,7 @@ diff --git a/mm/vmscan.c b/mm/vmscan.c
  		switch (scan_balance) {
  		case SCAN_EQUAL:
  			/* Scan lists relative to size */
-@@ -2783,7 +2988,8 @@
+@@ -2783,7 +2995,8 @@
  
  #ifdef CONFIG_LRU_GEN
  
@@ -10385,7 +10399,7 @@ diff --git a/mm/vmscan.c b/mm/vmscan.c
  DEFINE_STATIC_KEY_ARRAY_TRUE(lru_gen_caps, NR_LRU_GEN_CAPS);
  #define get_cap(cap)	static_branch_likely(&lru_gen_caps[cap])
  #else
-@@ -5312,12 +5518,15 @@
+@@ -5312,12 +5525,15 @@
  	return true;
  }
  
@@ -10403,7 +10417,7 @@ diff --git a/mm/vmscan.c b/mm/vmscan.c
  	cgroup_lock();
  	cpus_read_lock();
  	get_online_mems();
-@@ -5325,6 +5534,11 @@
+@@ -5325,6 +5541,11 @@
  
  	if (enabled == lru_gen_enabled())
  		goto unlock;
@@ -10415,7 +10429,7 @@ diff --git a/mm/vmscan.c b/mm/vmscan.c
  
  	if (enabled)
  		static_branch_enable_cpuslocked(&lru_gen_caps[LRU_GEN_CORE]);
-@@ -5361,6 +5575,8 @@
+@@ -5361,6 +5582,8 @@
  	put_online_mems();
  	cpus_read_unlock();
  	cgroup_unlock();
@@ -10424,7 +10438,7 @@ diff --git a/mm/vmscan.c b/mm/vmscan.c
  }
  
  /******************************************************************************
-@@ -5421,9 +5637,12 @@
+@@ -5421,9 +5644,12 @@
  	for (i = 0; i < NR_LRU_GEN_CAPS; i++) {
  		bool enabled = caps & BIT(i);
  
@@ -10440,7 +10454,7 @@ diff --git a/mm/vmscan.c b/mm/vmscan.c
  			static_branch_enable(&lru_gen_caps[i]);
  		else
  			static_branch_disable(&lru_gen_caps[i]);
-@@ -5885,6 +6104,16 @@
+@@ -5885,6 +6111,16 @@
  	debugfs_create_file("lru_gen", 0644, NULL, NULL, &lru_gen_rw_fops);
  	debugfs_create_file("lru_gen_full", 0444, NULL, NULL, &lru_gen_ro_fops);
  
@@ -10457,7 +10471,7 @@ diff --git a/mm/vmscan.c b/mm/vmscan.c
  	return 0;
  };
  late_initcall(init_lru_gen);
-@@ -5945,13 +6174,19 @@
+@@ -5945,13 +6181,19 @@
  				sc->priority == DEF_PRIORITY);
  
  	blk_start_plug(&plug);
@@ -10478,7 +10492,7 @@ diff --git a/mm/vmscan.c b/mm/vmscan.c
  		unsigned long nr_anon, nr_file, percentage;
  		unsigned long nr_scanned;
  
-@@ -6029,9 +6264,10 @@
+@@ -6029,9 +6271,10 @@
  
  	/*
  	 * Even if we did not try to evict anon pages at all, we want to
@@ -10492,7 +10506,7 @@ diff --git a/mm/vmscan.c b/mm/vmscan.c
  	    inactive_is_low(lruvec, LRU_INACTIVE_ANON))
  		shrink_active_list(SWAP_CLUSTER_MAX, lruvec,
  				   sc, LRU_ACTIVE_ANON);
-@@ -6922,6 +7158,10 @@
+@@ -6922,6 +7165,10 @@
  		return;
  	}
  
@@ -10503,7 +10517,7 @@ diff --git a/mm/vmscan.c b/mm/vmscan.c
  	if (!can_age_anon_pages(pgdat, sc))
  		return;
  
-@@ -7671,6 +7911,9 @@
+@@ -7671,6 +7918,9 @@
  void __meminit kswapd_run(int nid)
  {
  	pg_data_t *pgdat = NODE_DATA(nid);
@@ -10513,7 +10527,7 @@ diff --git a/mm/vmscan.c b/mm/vmscan.c
  
  	pgdat_kswapd_lock(pgdat);
  	if (!pgdat->kswapd) {
-@@ -7682,7 +7925,32 @@
+@@ -7682,7 +7932,32 @@
  			BUG_ON(system_state < SYSTEM_RUNNING);
  			pgdat->kswapd = NULL;
  		}
@@ -10547,7 +10561,7 @@ diff --git a/mm/vmscan.c b/mm/vmscan.c
  	pgdat_kswapd_unlock(pgdat);
  }
  
-@@ -7701,6 +7969,13 @@
+@@ -7701,6 +7976,13 @@
  		kthread_stop(kswapd);
  		pgdat->kswapd = NULL;
  	}

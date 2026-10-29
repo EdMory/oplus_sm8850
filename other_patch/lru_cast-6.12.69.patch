@@ -2835,7 +2835,7 @@ new file mode 100644
 +	get_online_mems();
 +	mutex_lock(&lru_cast_store_lock);
 +	if (!lru_cast_states) {
-+		limit = ALIGN((unsigned long)max_possible_pfn, PAGES_PER_SECTION);
++		limit = ALIGN((unsigned long)max_t(unsigned long long, max_possible_pfn, max_pfn), PAGES_PER_SECTION);
 +		lru_cast_nr_secs = limit / PAGES_PER_SECTION;
 +		lru_cast_sec_on = kvzalloc(lru_cast_nr_secs,
 +					   GFP_KERNEL | __GFP_NORETRY | __GFP_NOWARN);

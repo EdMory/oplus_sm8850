@@ -57,6 +57,11 @@ on:
         required: true
         type: boolean
         default: 'true'
+      lru_cast_enable:
+        description: '是否安装 lru_cast 补丁'
+        required: true
+        type: boolean
+        default: 'true'
       droidspaces_enable:
         description: '是否开启 Droidspaces 容器支持(轻量化的完整Linux容器支持)'
         required: true
@@ -534,6 +539,23 @@ jobs:
             || echo "CONFIG_LZ4K_OPLUS_COMPRESS=y" >> arch/arm64/configs/gki_defconfig
           grep -q 'CONFIG_LZ4K_OPLUS_DECOMPRESS=y' arch/arm64/configs/gki_defconfig \
             || echo "CONFIG_LZ4K_OPLUS_DECOMPRESS=y" >> arch/arm64/configs/gki_defconfig
+
+      - name: 应用 lru_cast 补丁
+        if: inputs.lru_cast_enable
+        run: |
+          echo "正在下载并应用 lru_cast 补丁..."
+          cd kernel_workspace/common
+          echo 'CONFIG_LRU_CAST=y' >> arch/arm64/configs/gki_defconfig
+          wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/lru_cast-6.12.69.patch
+          # 严格零 fuzz 预演, 任一 Hunk FAILED / with fuzz 立即中止
+          patch -p1 --dry-run -F 0 < lru_cast-6.12.69.patch > /tmp/lrucast_dryrun.log 2>&1
+          cat /tmp/lrucast_dryrun.log
+          if grep -qE 'Hunk #[0-9]+ FAILED|with fuzz|[0-9]+ out of [0-9]+ hunk' /tmp/lrucast_dryrun.log; then
+            echo "::error::lru_cast 补丁 dry-run 出现 FAILED/fuzz, 中止构建"
+            exit 1
+          fi
+          patch -p1 --no-backup-if-mismatch -F 0 < lru_cast-6.12.69.patch
+          echo "lru_cast 补丁应用成功"
             
       - name: 应用 PMICWD 修复补丁
         run: |

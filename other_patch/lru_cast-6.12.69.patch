@@ -54,7 +54,7 @@ new file mode 100644
 + * above 0 only while CAST is on, below 0 whatever runs: CAST, MGLRU or
 + * legacy reclaim.
 + */
-+DECLARE_STATIC_KEY_TRUE(kcompressd_enabled_key);
++DECLARE_STATIC_KEY_FALSE(kcompressd_enabled_key);
 +DECLARE_STATIC_KEY_FALSE(kcompressd_force_key);
 +extern int vm_kcompressd;
 +

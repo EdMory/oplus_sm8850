@@ -1304,7 +1304,7 @@ diff --git a/mm/lru_cast/control.c b/mm/lru_cast/control.c
 new file mode 100644
 --- /dev/null
 +++ b/mm/lru_cast/control.c
-@@ -0,0 +1,364 @@
+@@ -0,0 +1,378 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * CAST -- switching it on and off.
@@ -1365,6 +1365,20 @@ new file mode 100644
 +/* yield: the lock given back between batches, for a list long enough to matter */
 +static bool lru_cast_take_yield __read_mostly = true;
 +core_param(lru_cast_take_yield, lru_cast_take_yield, bool, 0644);
++
++/*
++ * sweep: a sweep of M's words run inside the hold of the lru_lock, as v038 did.
++ *
++ * A sweep reads thousands of frames' state words, and the node's reclaim waits
++ * on that lock all the while; the paths that write those words take locks of
++ * their own, which the hold may wait on in turn -- the cycle v038's frozen
++ * device shows: thirteen sweeps into one isolate, then nothing at all. Off,
++ * reclaim takes the candidates a sweep has already left and M's oldest-added
++ * folio when there is none: the same victims a hold that has spent its frames
++ * takes, only from the first sweep on. This build is the A/B for that.
++ */
++bool lru_cast_hold_sweep __read_mostly;
++core_param(lru_cast_hold_sweep, lru_cast_hold_sweep, bool, 0644);
 +
 +static int __init lru_cast_setup(char *str)
 +{
@@ -4075,7 +4089,7 @@ diff --git a/mm/lru_cast/policy/policy.h b/mm/lru_cast/policy/policy.h
 new file mode 100644
 --- /dev/null
 +++ b/mm/lru_cast/policy/policy.h
-@@ -0,0 +1,84 @@
+@@ -0,0 +1,90 @@
 +/* SPDX-License-Identifier: GPL-2.0 */
 +/*
 + * CAST -- the policy: the main cache, run inside reclaim.
@@ -4143,6 +4157,12 @@ new file mode 100644
 +unsigned long lru_cast_ring_hold_left(void);
 +unsigned long lru_cast_ring_hold_sweeps(void);
 +bool lru_cast_ring_hold_many(void);
++/* the hold has run the sweeps it may, or read the frames they may: spent */
++bool lru_cast_ring_hold_spent(void);
++/* a folio of M met off every list: counted for sysfs, nothing else to do with it */
++void lru_cast_ring_leak(void);
++/* a sweep inside the hold, as v038 ran them: off unless asked for (control.c) */
++extern bool lru_cast_hold_sweep;
 +void lru_cast_ring_reset(struct lruvec *lruvec);
 +void lru_cast_ring_init(struct lruvec *lruvec);
 +void lru_cast_ring_exit(struct lruvec *lruvec);
@@ -4164,7 +4184,7 @@ diff --git a/mm/lru_cast/policy/reclaim.c b/mm/lru_cast/policy/reclaim.c
 new file mode 100644
 --- /dev/null
 +++ b/mm/lru_cast/policy/reclaim.c
-@@ -0,0 +1,239 @@
+@@ -0,0 +1,260 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * CAST -- the choice of victims.
@@ -4285,6 +4305,21 @@ new file mode 100644
 +		long bm = 0;
 +
 +		/*
++		 * The hold has run long enough (v039): what is left of the scan
++		 * is the next hold's. Interrupts are off here and the node's
++		 * reclaim waits on this lock the whole time, so a scan that
++		 * runs long is one nothing else on the node gets through --
++		 * the lock given back, what it has taken is taken, and the
++		 * scan comes again with a hold of its own.
++		 */
++		if (lru_cast_ring_hold_spent()) {
++			printk_deferred(LRU_CAST_PROGNAME ": isolate %d: hold spent, %lu of %lu frames, %lu taken, sweeps %lu\n",
++					s->type, scan, s->nr_to_scan, s->nr_taken,
++					lru_cast_ring_hold_sweeps());
++			break;
++		}
++
++		/*
 +		 * A hold this long is one the watchdogs see: how far it has
 +		 * got, deferred -- it is taken with interrupts off.
 +		 */
@@ -4354,8 +4389,14 @@ new file mode 100644
 +		s->nr_taken += nr_pages;
 +		continue;
 +aside:
-+		/* the list it was on may have gone under it: then there is none to put it back on */
++		/*
++		 * The list it was on may have gone under it: then there is none
++		 * to put it back on, and none to take it off either -- what is
++		 * left of its entry may be another list's now, so it is only
++		 * counted (v039), not cut away from a list it is not on.
++		 */
 +		if (!folio_test_lru(folio)) {
++			lru_cast_ring_leak();
 +			if (from_m)
 +				lru_cast_ring_out(folio);
 +			continue;
@@ -4408,7 +4449,7 @@ diff --git a/mm/lru_cast/policy/ring.c b/mm/lru_cast/policy/ring.c
 new file mode 100644
 --- /dev/null
 +++ b/mm/lru_cast/policy/ring.c
-@@ -0,0 +1,837 @@
+@@ -0,0 +1,869 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * CAST -- keys, and M's lowest found by a sweep.
@@ -4491,7 +4532,15 @@ new file mode 100644
 + */
 +#define LRU_CAST_HOLD_FRAMES	32768	/* frames the sweeps of one hold read at most */
 +/* what a hold of that many frames runs of sweeps at their smallest, near enough */
-+#define LRU_CAST_HOLD_SWEEPS	12	/* sweeps in one hold, past which it says so */
++#define LRU_CAST_HOLD_SWEEPS	12	/* sweeps in one hold, past which the lock is given back */
++/*
++ * v039: no sweep runs inside a hold unless asked for (lru_cast_hold_sweep).
++ * A hold spent of its frames was the smaller half of the trouble: one sweep
++ * reads thousands of frames' words while the node's reclaim waits on the
++ * lock, and waits in turn on the locks those frames' paths take -- the frozen
++ * device shows the one hold it got into, thirteen sweeps in, and no more.
++ * The two above stay, for the A/B that turns the sweep back on.
++ */
 +#define LRU_CAST_PASSES			2	/* passes over the node at most in one sweep */
 +#define LRU_CAST_TAU_SHIFT		4	/* tau: the 1/16 quantile */
 +#define LRU_CAST_PROBES		512	/* frames drawn at most for tau before a pass */
@@ -4507,7 +4556,7 @@ new file mode 100644
 +static DEFINE_XARRAY_FLAGS(lru_cast_spill, XA_FLAGS_LOCK_IRQ);
 +
 +/* what the sweeps did, for sysfs (lru_cast/sweep): counted under the lru_lock, per CPU */
-+enum { SW_SWEEPS, SW_FRAMES, SW_WORDS, SW_TAKEN, SW_STALE, SW_GATE, SW_FALLBACK, SW_SPILLED, SW_PROBED, SW_CAPPED, SW_NR };
++enum { SW_SWEEPS, SW_FRAMES, SW_WORDS, SW_TAKEN, SW_STALE, SW_GATE, SW_FALLBACK, SW_SPILLED, SW_PROBED, SW_CAPPED, SW_LEAK, SW_NR };
 +static DEFINE_PER_CPU(unsigned long [SW_NR], lru_cast_sw);
 +
 +static inline void sw_add(int i, unsigned long n)
@@ -4546,6 +4595,24 @@ new file mode 100644
 +bool lru_cast_ring_hold_many(void)
 +{
 +	return __this_cpu_read(lru_cast_hold_sweeps) > LRU_CAST_HOLD_SWEEPS;
++}
++
++/*
++ * The hold has run the sweeps it may, or read the frames they may: spent.
++ * Reclaim asks for a folio many times in one hold, and every sweep it runs
++ * adds to it -- one hold long enough to be seen, and to wait on the locks the
++ * per-frame paths take in turn. Spent, the hold gives the lock back.
++ */
++bool lru_cast_ring_hold_spent(void)
++{
++	return __this_cpu_read(lru_cast_hold_sweeps) >= LRU_CAST_HOLD_SWEEPS ||
++		!__this_cpu_read(lru_cast_hold_left);
++}
++
++/* a folio of M met off every list: counted, for the sysfs line to show */
++void lru_cast_ring_leak(void)
++{
++	sw_add(SW_LEAK, 1);
 +}
 +
 +long lru_cast_bucket(struct folio *folio, int type)
@@ -5150,11 +5217,16 @@ new file mode 100644
 +		if (swept)
 +			break;
 +		/*
-+		 * The hold's frames spent: M's oldest-added folio, as when a
-+		 * sweep finds none, until the lock is given back and reclaim
-+		 * takes the lock afresh.
++		 * A sweep inside the hold, only where it is asked for (v039).
++		 * It reads thousands of frames' words with the node's reclaim
++		 * waiting on the lock, and the paths that write them take locks
++		 * of their own: the hold waits on those in turn -- the cycle
++		 * v038's frozen device shows. Not asked for, what the last sweep
++		 * left is all there is, and M's oldest-added folio stands in;
++		 * that is the victim a hold spent of its frames takes anyway,
++		 * so what changes is how soon, not which.
 +		 */
-+		if (!__this_cpu_read(lru_cast_hold_left))
++		if (!READ_ONCE(lru_cast_hold_sweep) || lru_cast_ring_hold_spent())
 +			break;
 +		lru_cast_sweep(lruvec, type);
 +		lru_cast_cand_ahead(k, 0, true);
@@ -5174,9 +5246,10 @@ new file mode 100644
 +	for_each_possible_cpu(cpu)
 +		for (i = 0; i < SW_NR; i++)
 +			n[i] += per_cpu(lru_cast_sw, cpu)[i];
-+	return sysfs_emit(buf, "sweeps %lu frames %lu words %lu taken %lu stale %lu gate %lu fallback %lu spilled %lu probed %lu capped %lu\n",
++	return sysfs_emit(buf, "sweeps %lu frames %lu words %lu taken %lu stale %lu gate %lu fallback %lu spilled %lu probed %lu capped %lu leak %lu\n",
 +			  n[SW_SWEEPS], n[SW_FRAMES], n[SW_WORDS], n[SW_TAKEN], n[SW_STALE],
-+			  n[SW_GATE], n[SW_FALLBACK], n[SW_SPILLED], n[SW_PROBED], n[SW_CAPPED]);
++			  n[SW_GATE], n[SW_FALLBACK], n[SW_SPILLED], n[SW_PROBED], n[SW_CAPPED],
++			  n[SW_LEAK]);
 +}
 +
 +/*
@@ -8488,7 +8561,7 @@ new file mode 100644
 +#define LRU_CAST_PROGNAME	"lru_cast"
 +#define LRU_CAST_AUTHOR	"Masahito Suzuki"
 +
-+#define LRU_CAST_VERSION	"0.3.1-dbg"
++#define LRU_CAST_VERSION	"0.3.2-dbg"
 +
 +#endif /* _MM_LRU_CAST_VERSION_H */
 diff --git a/mm/lru_cast/walk/bloom.c b/mm/lru_cast/walk/bloom.c

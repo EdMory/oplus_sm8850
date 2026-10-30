@@ -2,7 +2,7 @@ diff --git a/include/linux/lru_cast.h b/include/linux/lru_cast.h
 new file mode 100644
 --- /dev/null
 +++ b/include/linux/lru_cast.h
-@@ -0,0 +1,508 @@
+@@ -0,0 +1,514 @@
 +/* SPDX-License-Identifier: GPL-2.0 */
 +/*
 + * CAST -- what the rest of the kernel sees (mm/lru_cast/).
@@ -38,9 +38,15 @@ new file mode 100644
 +#ifdef CONFIG_LRU_CAST_DEBUG
 +void lru_cast_dbg_hold_begin(struct lruvec *lruvec, const char *where);
 +void lru_cast_dbg_hold_end(void);
++void lru_cast_dbg_loop_begin(struct lruvec *lruvec, const char *where);
++bool lru_cast_dbg_loop_over(unsigned long frames);
++void lru_cast_dbg_loop_end(void);
 +#else
 +#define lru_cast_dbg_hold_begin(lruvec, where)	do { } while (0)
 +#define lru_cast_dbg_hold_end()			do { } while (0)
++#define lru_cast_dbg_loop_begin(lruvec, where)	do { } while (0)
++#define lru_cast_dbg_loop_over(frames)		(false)
++#define lru_cast_dbg_loop_end()			do { } while (0)
 +#endif
 +
 +#ifdef CONFIG_LRU_CAST
@@ -1298,7 +1304,7 @@ diff --git a/mm/lru_cast/control.c b/mm/lru_cast/control.c
 new file mode 100644
 --- /dev/null
 +++ b/mm/lru_cast/control.c
-@@ -0,0 +1,303 @@
+@@ -0,0 +1,364 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * CAST -- switching it on and off.
@@ -1328,6 +1334,7 @@ new file mode 100644
 +#include <linux/init.h>
 +#include <linux/mm.h>
 +#include <linux/mm_inline.h>
++#include <linux/moduleparam.h>
 +#include <linux/mutex.h>
 +#include <linux/slab.h>
 +#include "control.h"
@@ -1343,6 +1350,21 @@ new file mode 100644
 +static DEFINE_MUTEX(lru_cast_switch_lock);
 +
 +#define LRU_CAST_BATCH	1024
++
++/*
++ * How a lruvec's lists are taken over.  Both are switches for the A/B this
++ * build is for: each one turned back to what v035 did.
++ *
++ * early: the state switched on before the lists are walked, so that a folio
++ * added meanwhile goes into the rings and not onto the end of the list being
++ * walked -- a walk that adds as it takes does not end.
++ */
++static bool lru_cast_take_early __read_mostly = true;
++core_param(lru_cast_take_early, lru_cast_take_early, bool, 0644);
++
++/* yield: the lock given back between batches, for a list long enough to matter */
++static bool lru_cast_take_yield __read_mostly = true;
++core_param(lru_cast_take_yield, lru_cast_take_yield, bool, 0644);
 +
 +static int __init lru_cast_setup(char *str)
 +{
@@ -1405,21 +1427,16 @@ new file mode 100644
 +}
 +
 +/*
-+ * The active list is M as it is; a folio with no reads recorded is given
-+ * one. A batch at a time, and the lock let go between batches, so that a
-+ * long list does not hold it: the folios not yet taken stay on the lruvec's
-+ * list, where they are the lock's to move as any other, and are taken as
-+ * they are found still there.
-+ */
-+/*
 + * @list's folios taken into the rings of @type: a read recorded for those of
 + * the active list, none for those of the inactive one, which CAST has not
 + * seen since it took the lruvec.
 + */
-+static void lru_cast_take(struct lruvec *lruvec, struct list_head *list, int type,
-+			  bool active)
++static unsigned long lru_cast_take_batch(struct lruvec *lruvec,
++					 struct list_head *list, int type,
++					 bool active, unsigned long max)
 +{
-+	int n = 0;
++	struct folio *folio;
++	unsigned long n = 0;
 +
 +	/*
 +	 * Spliced off to the side as they once were, the folios left over kept
@@ -1429,27 +1446,61 @@ new file mode 100644
 +	 * the lock held all through, a folio is on a list the lock's, or none
 +	 * and not of the LRU, at every point the lock is let go.
 +	 */
-+	lru_cast_dbg_hold_begin(lruvec, "take");
-+	while (!list_empty(list)) {
-+		struct folio *folio;
++	while (n < max && !list_empty(list)) {
++		folio = lru_to_folio(list);
++		list_del(&folio->lru);
++		if (active && !(lru_cast_read(folio) >> 24))
++			lru_cast_access(folio);
++		lru_cast_ring_put(lruvec, folio, type);
++		n++;
++	}
 +
-+		for (n = 0; n < LRU_CAST_BATCH && !list_empty(list); n++) {
-+			folio = lru_to_folio(list);
-+			list_del(&folio->lru);
-+			if (active && !(lru_cast_read(folio) >> 24))
-+				lru_cast_access(folio);
-+			lru_cast_ring_put(lruvec, folio, type);
-+		}
++	return n;
++}
++
++static void lru_cast_take(struct lruvec *lruvec, struct list_head *list, int type,
++			  bool active)
++{
++	unsigned long flags;
++	unsigned long frames = 0;
++
++	/* the whole list in one hold of the lock: what v035 did, for the A/B */
++	if (!READ_ONCE(lru_cast_take_yield)) {
++		lru_cast_dbg_hold_begin(lruvec, "take");
++		spin_lock_irqsave(&lruvec->lru_lock, flags);
++		frames = lru_cast_take_batch(lruvec, list, type, active, ~0UL);
++		spin_unlock_irqrestore(&lruvec->lru_lock, flags);
++		lru_cast_dbg_hold_end();
++		return;
++	}
++
++	/*
++	 * The active list is M as it is; a folio with no reads recorded is
++	 * given one. A batch at a time, and the lock let go between batches,
++	 * so that a long list does not hold it: the folios not yet taken stay
++	 * on the lruvec's list, where they are the lock's to move as any
++	 * other, and are taken as they are found still there.
++	 *
++	 * A CPU that gives the lock back is one whose timers run, so the timer
++	 * above sees nothing of a walk that does not end: the walk says how
++	 * long it has walked, from here, with the lock in no hand.
++	 */
++	lru_cast_dbg_loop_begin(lruvec, "take");
++	for (;;) {
++		unsigned long n;
++
++		lru_cast_dbg_hold_begin(lruvec, "take");
++		spin_lock_irqsave(&lruvec->lru_lock, flags);
++		n = lru_cast_take_batch(lruvec, list, type, active, LRU_CAST_BATCH);
++		spin_unlock_irqrestore(&lruvec->lru_lock, flags);
++		lru_cast_dbg_hold_end();
++		frames += n;
 +		if (list_empty(list))
 +			break;
-+		/* a CPU waited for meanwhile: the lock given back, the rest still listed */
-+		lru_cast_dbg_hold_end();
-+		spin_unlock_irq(&lruvec->lru_lock);
++		(void)lru_cast_dbg_loop_over(frames);
 +		cond_resched();
-+		spin_lock_irq(&lruvec->lru_lock);
-+		lru_cast_dbg_hold_begin(lruvec, "take");
 +	}
-+	lru_cast_dbg_hold_end();
++	lru_cast_dbg_loop_end();
 +}
 +
 +static void lru_cast_fill(struct lruvec *lruvec)
@@ -1464,7 +1515,19 @@ new file mode 100644
 +		lru_cast_ring_reset(lruvec);
 +	}
 +
-+	spin_lock_irq(&lruvec->lru_lock);
++	/*
++	 * On before the lists are walked: a folio added meanwhile then goes
++	 * into the rings rather than onto the end of the list being walked,
++	 * which a walk that adds as it takes never reaches.  The order v035
++	 * had -- walk, then switch on -- is kept for the A/B.
++	 */
++	if (READ_ONCE(lru_cast_take_early)) {
++		spin_lock_irq(&lruvec->lru_lock);
++		lru_cast_state_on_set(lruvec, true);
++		spin_unlock_irq(&lruvec->lru_lock);
++	}
++
++	/* each take() takes the lock and gives it back on its own */
 +	for (type = 0; type < ANON_AND_FILE; type++) {
 +		/* the active folios first, as CAST counts a read since it ran */
 +		lru_cast_take(lruvec, &lruvec->lists[LRU_ACTIVE_ANON + type * LRU_FILE],
@@ -1477,8 +1540,12 @@ new file mode 100644
 +		lru_cast_take(lruvec, &lruvec->lists[LRU_INACTIVE_ANON + type * LRU_FILE],
 +			      type, false);
 +	}
-+	lru_cast_state_on_set(lruvec, true);
-+	spin_unlock_irq(&lruvec->lru_lock);
++
++	if (!READ_ONCE(lru_cast_take_early)) {
++		spin_lock_irq(&lruvec->lru_lock);
++		lru_cast_state_on_set(lruvec, true);
++		spin_unlock_irq(&lruvec->lru_lock);
++	}
 +}
 +
 +/* M is the active list already */
@@ -3227,7 +3294,7 @@ diff --git a/mm/lru_cast/dbg.c b/mm/lru_cast/dbg.c
 new file mode 100644
 --- /dev/null
 +++ b/mm/lru_cast/dbg.c
-@@ -0,0 +1,174 @@
+@@ -0,0 +1,244 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * CAST -- what a debug build watches: an lru_lock held too long.
@@ -3259,7 +3326,10 @@ new file mode 100644
 +#include <linux/panic_notifier.h>
 +#include <linux/percpu.h>
 +#include <linux/sched.h>
++#include <linux/sched/clock.h>
++#include <linux/smp.h>
 +#include <linux/spinlock.h>
++#include <linux/time64.h>
 +#include <linux/timer.h>
 +
 +#include "control.h"
@@ -3272,12 +3342,24 @@ new file mode 100644
 +	unsigned long lruvec;
 +	const char *where;
 +	int pid;
++	/*
++	 * A take() is not one hold of the lock but a walk of a list that
++	 * gives the lock back between batches: the timer above sees each
++	 * batch as short as it is, and never sees a walk that does not end.
++	 * This is what a walk says of itself, from the CPU walking it.
++	 */
++	bool looping;
++	bool said;
++	u64 loop_ns;
++	unsigned long frames;
 +};
 +
 +static DEFINE_PER_CPU(struct lru_cast_hold, lru_cast_holds);
 +
-+/* how long a hold is one worth reporting: 2s is a stall reclaim never takes */
-+static unsigned int lru_cast_hold_ms __read_mostly = 2000;
++/* how long a hold is one worth reporting: 2s was a stall no reclaim takes,
++ * and the freezes this build hunts last under a second -- 500ms says so
++ * while the machine still has a log to put it in */
++static unsigned int lru_cast_hold_ms __read_mostly = 500;
 +core_param(lru_cast_hold_ms, lru_cast_hold_ms, uint, 0644);
 +
 +/* and whether it ends the kernel, for a capture a reset would take with it */
@@ -3302,6 +3384,59 @@ new file mode 100644
 +	struct lru_cast_hold *h = this_cpu_ptr(&lru_cast_holds);
 +
 +	WRITE_ONCE(h->held, false);
++}
++
++/* a walk of a list, of which each batch is a hold of its own */
++void lru_cast_dbg_loop_begin(struct lruvec *lruvec, const char *where)
++{
++	struct lru_cast_hold *h = this_cpu_ptr(&lru_cast_holds);
++
++	h->lruvec = (unsigned long)lruvec;
++	h->where = where;
++	h->pid = current->pid;
++	h->frames = 0;
++	h->said = false;
++	h->loop_ns = local_clock();
++	/* last: a report that sees it walking sees the rest */
++	WRITE_ONCE(h->looping, true);
++}
++
++/*
++ * Called with the lock given back, between batches: prints and asks for the
++ * backtrace from here rather than under the lock, where printk could take a
++ * lock of its own and be the freeze it reports.  Once per walk.
++ */
++bool lru_cast_dbg_loop_over(unsigned long frames)
++{
++	struct lru_cast_hold *h = this_cpu_ptr(&lru_cast_holds);
++	unsigned long long ms;
++	unsigned long limit;
++
++	if (!READ_ONCE(h->looping))
++		return false;
++	h->frames = frames;
++	limit = READ_ONCE(lru_cast_hold_ms);
++	ms = (local_clock() - h->loop_ns) / NSEC_PER_MSEC;
++	if (h->said || ms < limit)
++		return false;
++	h->said = true;
++
++	pr_emerg(LRU_CAST_PROGNAME ": take still walking: cpu%d, %llums, %lu folios, lruvec %px, pid %d%s\n",
++		 raw_smp_processor_id(), ms, frames,
++		 (void *)READ_ONCE(h->lruvec), READ_ONCE(h->pid),
++		 READ_ONCE(lru_cast_hold_panic) ? ", panicking" : "");
++	pr_emerg(LRU_CAST_PROGNAME ": a backtrace of every CPU follows\n");
++	trigger_all_cpu_backtrace();
++	if (READ_ONCE(lru_cast_hold_panic))
++		panic(LRU_CAST_PROGNAME ": take walking past %lums\n", limit);
++	return true;
++}
++
++void lru_cast_dbg_loop_end(void)
++{
++	struct lru_cast_hold *h = this_cpu_ptr(&lru_cast_holds);
++
++	WRITE_ONCE(h->looping, false);
 +}
 +
 +static struct timer_list lru_cast_dbg_timer;
@@ -3350,7 +3485,7 @@ new file mode 100644
 +			panic(LRU_CAST_PROGNAME ": lru_lock held past %ums\n",
 +			      READ_ONCE(lru_cast_hold_ms));
 +	}
-+	mod_timer(t, jiffies + msecs_to_jiffies(1000));
++	mod_timer(t, jiffies + msecs_to_jiffies(250));
 +}
 +
 +static int lru_cast_dbg_panic(struct notifier_block *nb, unsigned long action,
@@ -3394,9 +3529,11 @@ new file mode 100644
 +		IS_ENABLED(CONFIG_ARM64_PSEUDO_NMI), IS_ENABLED(CONFIG_HARDLOCKUP_DETECTOR));
 +	pr_info(LRU_CAST_PROGNAME ": debug: lru_lock watch at %ums, panic %d\n",
 +		READ_ONCE(lru_cast_hold_ms), READ_ONCE(lru_cast_hold_panic));
++	/* a walk of a list is watched by the CPU walking it, not by this timer */
++	pr_info(LRU_CAST_PROGNAME ": debug: take walk watched from inside, same limit\n");
 +
 +	timer_setup(&lru_cast_dbg_timer, lru_cast_dbg_check, 0);
-+	mod_timer(&lru_cast_dbg_timer, jiffies + msecs_to_jiffies(1000));
++	mod_timer(&lru_cast_dbg_timer, jiffies + msecs_to_jiffies(250));
 +	atomic_notifier_chain_register(&panic_notifier_list,
 +				       &lru_cast_dbg_panic_nb);
 +	return 0;
@@ -8351,7 +8488,7 @@ new file mode 100644
 +#define LRU_CAST_PROGNAME	"lru_cast"
 +#define LRU_CAST_AUTHOR	"Masahito Suzuki"
 +
-+#define LRU_CAST_VERSION	"0.3.0-dbg"
++#define LRU_CAST_VERSION	"0.3.1-dbg"
 +
 +#endif /* _MM_LRU_CAST_VERSION_H */
 diff --git a/mm/lru_cast/walk/bloom.c b/mm/lru_cast/walk/bloom.c
@@ -10504,15 +10641,7 @@ diff --git a/mm/vmscan.c b/mm/vmscan.c
  } pageout_t;
  
  /*
-@@ -694,6 +716,7 @@
- 			.range_start = 0,
- 			.range_end = LLONG_MAX,
- 			.for_reclaim = 1,
-+	
- 			.swap_plug = plug,
- 		};
- 
-@@ -707,6 +730,13 @@
+@@ -707,6 +729,13 @@
  
  		folio_set_reclaim(folio);
  		res = mapping->a_ops->writepage(&folio->page, &wbc);
@@ -10526,7 +10655,7 @@ diff --git a/mm/vmscan.c b/mm/vmscan.c
  		if (res < 0)
  			handle_write_error(mapping, folio, res);
  		if (res == AOP_WRITEPAGE_ACTIVATE) {
-@@ -942,6 +972,40 @@
+@@ -942,6 +971,40 @@
  	 */
  	if (referenced_ptes == -1)
  		return FOLIOREF_KEEP;
@@ -10567,7 +10696,7 @@ diff --git a/mm/vmscan.c b/mm/vmscan.c
  
  	if (lru_gen_enabled()) {
  		if (!referenced_ptes)
-@@ -1475,6 +1539,22 @@
+@@ -1475,6 +1538,22 @@
  					nr_pages = 1;
  				}
  				goto activate_locked;
@@ -10590,7 +10719,7 @@ diff --git a/mm/vmscan.c b/mm/vmscan.c
  			case PAGE_SUCCESS:
  				if (nr_pages > 1 && !folio_test_large(folio)) {
  					sc->nr_scanned -= (nr_pages - 1);
-@@ -1883,6 +1963,53 @@
+@@ -1883,6 +1962,53 @@
  	return nr_taken;
  }
  
@@ -10644,7 +10773,7 @@ diff --git a/mm/vmscan.c b/mm/vmscan.c
  /**
   * folio_isolate_lru() - Try to isolate a folio from its LRU list.
   * @folio: Folio to isolate from its LRU list.
-@@ -2088,8 +2215,12 @@
+@@ -2088,8 +2214,12 @@
  
  	spin_lock_irq(&lruvec->lru_lock);
  
@@ -10659,7 +10788,7 @@ diff --git a/mm/vmscan.c b/mm/vmscan.c
  
  	__mod_node_page_state(pgdat, NR_ISOLATED_ANON + file, nr_taken);
  	item = PGSCAN_KSWAPD + reclaimer_offset();
-@@ -2356,6 +2487,33 @@
+@@ -2356,6 +2486,33 @@
  	return nr_reclaimed;
  }
  
@@ -10693,7 +10822,7 @@ diff --git a/mm/vmscan.c b/mm/vmscan.c
  unsigned long reclaim_pages(struct list_head *folio_list)
  {
  	return __reclaim_pages(folio_list, NULL);
-@@ -2365,6 +2523,11 @@
+@@ -2365,6 +2522,11 @@
  static unsigned long shrink_list(enum lru_list lru, unsigned long nr_to_scan,
  				 struct lruvec *lruvec, struct scan_control *sc)
  {
@@ -10705,7 +10834,7 @@ diff --git a/mm/vmscan.c b/mm/vmscan.c
  	if (is_active_lru(lru)) {
  		if (sc->may_deactivate & (1 << is_file_lru(lru)))
  			shrink_active_list(nr_to_scan, lruvec, sc, lru);
-@@ -2551,6 +2714,13 @@
+@@ -2551,6 +2713,13 @@
  			anon >> sc->priority;
  	}
  
@@ -10719,7 +10848,7 @@ diff --git a/mm/vmscan.c b/mm/vmscan.c
  	customize_sc_file_is_tiny(sc);
  }
  
-@@ -2574,6 +2744,43 @@
+@@ -2574,6 +2743,43 @@
  	unsigned long ap, fp;
  	enum lru_list lru;
  	bool balance_anon_file_reclaim = false;
@@ -10763,7 +10892,7 @@ diff --git a/mm/vmscan.c b/mm/vmscan.c
  
  	/* If we have no swap space, do not bother scanning anon folios. */
  	if (!sc->may_swap || !can_reclaim_anon_pages(memcg, pgdat->node_id, sc)) {
-@@ -2734,6 +2941,11 @@
+@@ -2734,6 +2940,11 @@
  		if (!scan && !mem_cgroup_online(memcg))
  			scan = min(lruvec_size, SWAP_CLUSTER_MAX);
  
@@ -10775,7 +10904,7 @@ diff --git a/mm/vmscan.c b/mm/vmscan.c
  		switch (scan_balance) {
  		case SCAN_EQUAL:
  			/* Scan lists relative to size */
-@@ -2783,7 +2995,8 @@
+@@ -2783,7 +2994,8 @@
  
  #ifdef CONFIG_LRU_GEN
  
@@ -10785,7 +10914,7 @@ diff --git a/mm/vmscan.c b/mm/vmscan.c
  DEFINE_STATIC_KEY_ARRAY_TRUE(lru_gen_caps, NR_LRU_GEN_CAPS);
  #define get_cap(cap)	static_branch_likely(&lru_gen_caps[cap])
  #else
-@@ -5312,12 +5525,15 @@
+@@ -5312,12 +5524,15 @@
  	return true;
  }
  
@@ -10803,7 +10932,7 @@ diff --git a/mm/vmscan.c b/mm/vmscan.c
  	cgroup_lock();
  	cpus_read_lock();
  	get_online_mems();
-@@ -5325,6 +5541,11 @@
+@@ -5325,6 +5540,11 @@
  
  	if (enabled == lru_gen_enabled())
  		goto unlock;
@@ -10815,7 +10944,7 @@ diff --git a/mm/vmscan.c b/mm/vmscan.c
  
  	if (enabled)
  		static_branch_enable_cpuslocked(&lru_gen_caps[LRU_GEN_CORE]);
-@@ -5361,6 +5582,8 @@
+@@ -5361,6 +5581,8 @@
  	put_online_mems();
  	cpus_read_unlock();
  	cgroup_unlock();
@@ -10824,7 +10953,7 @@ diff --git a/mm/vmscan.c b/mm/vmscan.c
  }
  
  /******************************************************************************
-@@ -5421,9 +5644,12 @@
+@@ -5421,9 +5643,12 @@
  	for (i = 0; i < NR_LRU_GEN_CAPS; i++) {
  		bool enabled = caps & BIT(i);
  
@@ -10840,7 +10969,7 @@ diff --git a/mm/vmscan.c b/mm/vmscan.c
  			static_branch_enable(&lru_gen_caps[i]);
  		else
  			static_branch_disable(&lru_gen_caps[i]);
-@@ -5885,6 +6111,16 @@
+@@ -5885,6 +6110,16 @@
  	debugfs_create_file("lru_gen", 0644, NULL, NULL, &lru_gen_rw_fops);
  	debugfs_create_file("lru_gen_full", 0444, NULL, NULL, &lru_gen_ro_fops);
  
@@ -10857,7 +10986,7 @@ diff --git a/mm/vmscan.c b/mm/vmscan.c
  	return 0;
  };
  late_initcall(init_lru_gen);
-@@ -5945,13 +6181,19 @@
+@@ -5945,13 +6180,19 @@
  				sc->priority == DEF_PRIORITY);
  
  	blk_start_plug(&plug);
@@ -10878,7 +11007,7 @@ diff --git a/mm/vmscan.c b/mm/vmscan.c
  		unsigned long nr_anon, nr_file, percentage;
  		unsigned long nr_scanned;
  
-@@ -6029,9 +6271,10 @@
+@@ -6029,9 +6270,10 @@
  
  	/*
  	 * Even if we did not try to evict anon pages at all, we want to
@@ -10892,7 +11021,7 @@ diff --git a/mm/vmscan.c b/mm/vmscan.c
  	    inactive_is_low(lruvec, LRU_INACTIVE_ANON))
  		shrink_active_list(SWAP_CLUSTER_MAX, lruvec,
  				   sc, LRU_ACTIVE_ANON);
-@@ -6922,6 +7165,10 @@
+@@ -6922,6 +7164,10 @@
  		return;
  	}
  
@@ -10903,7 +11032,7 @@ diff --git a/mm/vmscan.c b/mm/vmscan.c
  	if (!can_age_anon_pages(pgdat, sc))
  		return;
  
-@@ -7671,6 +7918,9 @@
+@@ -7671,6 +7917,9 @@
  void __meminit kswapd_run(int nid)
  {
  	pg_data_t *pgdat = NODE_DATA(nid);
@@ -10913,7 +11042,7 @@ diff --git a/mm/vmscan.c b/mm/vmscan.c
  
  	pgdat_kswapd_lock(pgdat);
  	if (!pgdat->kswapd) {
-@@ -7682,7 +7932,32 @@
+@@ -7682,7 +7931,32 @@
  			BUG_ON(system_state < SYSTEM_RUNNING);
  			pgdat->kswapd = NULL;
  		}
@@ -10947,7 +11076,7 @@ diff --git a/mm/vmscan.c b/mm/vmscan.c
  	pgdat_kswapd_unlock(pgdat);
  }
  
-@@ -7701,6 +7976,13 @@
+@@ -7701,6 +7975,13 @@
  		kthread_stop(kswapd);
  		pgdat->kswapd = NULL;
  	}

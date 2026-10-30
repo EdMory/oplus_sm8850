@@ -6,7 +6,7 @@ env:
   KERNEL_VERSION: '6.12'
   SUB_VERSION: '69_gki'
   KERNEL_NAME: 'android16-6-g242e1a07f878-ab15865446-4k'
-  CCACHE_KEY: ccache-ecsv4-gki-6.12.69
+  CCACHE_KEY: ccache-ecsv5-clang20-gki-6.12.69
 
 on:
   workflow_dispatch:
@@ -157,7 +157,7 @@ jobs:
       actions: write
       contents: read
     steps:
-      - name: 安装环境依赖+初始化源码仓库及llvm-clang19工具链
+      - name: 安装环境依赖+初始化源码仓库及llvm-clang20工具链
         run: |
           rm -rf kernel_workspace
           mkdir kernel_workspace
@@ -186,25 +186,39 @@ jobs:
           mv "android_gki_kernel_common-android16-6.12-2026-03" common &&
           rm -rf common.zip &
           
-          echo "正在克隆llvm-clang19工具链..." &&
-          mkdir -p clang19 &&
-          aria2c -s16 -x16 -k1M https://github.com/cctv18/oneplus_sm8650_toolchain/releases/download/LLVM-Clang19-r536225/clang-r536225.zip -o clang.zip &&
-          unzip -q clang.zip -d clang19 &&
+          echo "正在克隆llvm-clang20工具链..." &&
+          mkdir -p clang20 &&
+          aria2c -s16 -x16 -k1M https://github.com/cctv18/oneplus_sm8650_toolchain/releases/download/LLVM-Clang20-r547379/clang-r547379.zip -o clang.zip &&
+          unzip -q clang.zip -d clang20 &&
+          # 兼容 zip 内存在多级顶层目录的情况：统一归一化到 clang20/{bin,lib,...}
+          if [ ! -x clang20/bin/clang ] && [ ! -f clang20/bin/clang ]; then
+            inner=$(find clang20 -maxdepth 3 -type d -name bin | head -n 1)
+            if [ -n "$inner" ]; then
+              top=$(dirname "$inner")
+              echo "检测到压缩包顶层目录为 $top，执行归一化..."
+              mv "$top"/* clang20/ 2>/dev/null || true
+              rmdir "$top" 2>/dev/null || true
+            fi
+          fi
+          test -f clang20/bin/clang || { echo "clang 解压异常：未找到 clang20/bin/clang"; exit 1; }
+          ./clang20/bin/clang --version | head -n 1 &&
           rm -rf clang.zip &
           
           echo "正在克隆Rust 1.82.0工具链..." &&
           mkdir -p rust &&
+          # 注：LLVM-Clang20-r547379 release 未提供 rust.zip，Rust 工具链与 clang 版本无关，继续沿用 r536225
           aria2c -s16 -x16 -k1M https://github.com/cctv18/oneplus_sm8650_toolchain/releases/download/LLVM-Clang19-r536225/rust.zip -o rust.zip &&
           unzip -q rust.zip -d rust &&
           rm -rf rust.zip &
           
           echo "正在克隆构建工具..." &&
+          # 注：build-tools（pahole/bindgen 等辅助工具）沿用 r536225，避免跨版本二进制兼容问题
           aria2c -s16 -x16 -k1M https://github.com/cctv18/oneplus_sm8650_toolchain/releases/download/LLVM-Clang19-r536225/build-tools.zip -o build-tools.zip &&
           unzip -q build-tools.zip &&
           rm -rf build-tools.zip &
           
           wait
-          echo "所有源码及llvm-clang19工具链初始化完成！"
+          echo "所有源码及llvm-clang20工具链初始化完成！"
           echo "正在去除 dirty 后缀..."
           for f in common/scripts/setlocalversion; do
             sed -i 's/ -dirty//g' "$f"
@@ -555,7 +569,7 @@ jobs:
             exit 1
           fi
           patch -p1 --no-backup-if-mismatch -F 0 < lru_cast-6.12.69.patch
-          echo "lru_cast 补丁应用成功"
+          echo "lru_cast 补丁应用成功"      
             
       - name: 应用 PMICWD 修复补丁
         run: |
@@ -1525,10 +1539,10 @@ jobs:
         run: |
           WORKDIR="$(pwd)"
           export PATH="/usr/lib/ccache:$PATH"
-          export PATH="$WORKDIR/kernel_workspace/clang19/bin:$PATH"
+          export PATH="$WORKDIR/kernel_workspace/clang20/bin:$PATH"
           export PATH="$WORKDIR/kernel_workspace/build-tools/bin:$PATH"
           export PATH="$WORKDIR/kernel_workspace/rust/bin:$PATH"
-          export CLANG_DIR="$WORKDIR/kernel_workspace/clang19/bin"
+          export CLANG_DIR="$WORKDIR/kernel_workspace/clang20/bin"
           CLANG_VERSION="$($CLANG_DIR/clang --version | head -n 1)"
           LLD_VERSION="$($CLANG_DIR/ld.lld --version | head -n 1)"
           RUSTC_VERSION="$(rustc -V 2>/dev/null | head -n1)"
@@ -1560,7 +1574,7 @@ jobs:
           echo "FAKETIME=$FAKETIME" >> $GITHUB_ENV
           SO_DIR=$(pwd)
           export PRELOAD_LIBS="$SO_DIR/libfakestat.so $SO_DIR/libfaketimeMT.so"
-          export REAL_CLANG_PATH="$WORKDIR/kernel_workspace/clang19/bin/clang"
+          export REAL_CLANG_PATH="$WORKDIR/kernel_workspace/clang20/bin/clang"
           #创建 CC (编译器) 包装器
           echo '#!/bin/bash' > cc-wrapper
           echo 'export LD_PRELOAD="'$PRELOAD_LIBS'"' >> cc-wrapper
@@ -1604,7 +1618,7 @@ jobs:
           export RUSTC="rustc"
           export BINDGEN="bindgen"
           export CC="clang"
-          export LIBCLANG_PATH="$WORKDIR/kernel_workspace/clang19/lib"
+          export LIBCLANG_PATH="$WORKDIR/kernel_workspace/clang20/lib"
           # 3. 配置KCFLAGS
           KCFLAGS+=" -no-canonical-prefixes"
           KCFLAGS+=" -O2"

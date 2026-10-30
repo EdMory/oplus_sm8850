@@ -2,7 +2,7 @@ diff --git a/include/linux/lru_cast.h b/include/linux/lru_cast.h
 new file mode 100644
 --- /dev/null
 +++ b/include/linux/lru_cast.h
-@@ -0,0 +1,495 @@
+@@ -0,0 +1,508 @@
 +/* SPDX-License-Identifier: GPL-2.0 */
 +/*
 + * CAST -- what the rest of the kernel sees (mm/lru_cast/).
@@ -29,6 +29,19 @@ new file mode 100644
 +#define LRU_CAST_NONE		(-1)
 +#define LRU_CAST_EQUAL		3	/* both, by size */
 +#define LRU_CAST_BOTH		4	/* both, each pressed by the weight handed back */
++
++/*
++ * A debug build says, per CPU, which hold of the lru_lock it is inside of
++ * (mm/lru_cast/dbg.c): a CPU that never gives the lock back is one whose own
++ * timers do not run, so another CPU is the one that reports it.
++ */
++#ifdef CONFIG_LRU_CAST_DEBUG
++void lru_cast_dbg_hold_begin(struct lruvec *lruvec, const char *where);
++void lru_cast_dbg_hold_end(void);
++#else
++#define lru_cast_dbg_hold_begin(lruvec, where)	do { } while (0)
++#define lru_cast_dbg_hold_end()			do { } while (0)
++#endif
 +
 +#ifdef CONFIG_LRU_CAST
 +
@@ -650,6 +663,12 @@ diff --git a/kernel/sched/core.c b/kernel/sched/core.c
 diff --git a/mm/Kconfig b/mm/Kconfig
 --- a/mm/Kconfig
 +++ b/mm/Kconfig
+@@ -1,4 +1,4 @@
+-# SPDX-License-Identifier: GPL-2.0-only
++﻿# SPDX-License-Identifier: GPL-2.0-only
+ 
+ menu "Memory Management options"
+ 
 @@ -1327,7 +1327,8 @@
  	bool "Enable by default"
  	depends on LRU_GEN
@@ -660,7 +679,7 @@ diff --git a/mm/Kconfig b/mm/Kconfig
  
  config LRU_GEN_STATS
  	bool "Full stats for debugging"
-@@ -1379,3 +1380,20 @@
+@@ -1379,3 +1380,37 @@
  source "mm/damon/Kconfig"
  
  endmenu
@@ -681,6 +700,23 @@ diff --git a/mm/Kconfig b/mm/Kconfig
 +	  multi-gen LRU is as LRU_GEN_ENABLED says. At run time, one is
 +	  switched off before the other is switched on:
 +	  /sys/kernel/mm/lru_cast/enabled, /sys/kernel/mm/lru_gen/enabled.
++
++config LRU_CAST_DEBUG
++	bool "CAST: watch the lru_lock"
++	depends on LRU_CAST
++	default y
++	help
++	  Says, per CPU, which hold of the lru_lock it is inside of, and from
++	  a timer on another CPU reports one held longer than lru_cast_hold_ms
++	  (2000 by default), with a backtrace of every CPU: with
++	  CONFIG_ARM64_PSEUDO_NMI that reaches one spinning with interrupts
++	  off, whose own timers do not run. lru_cast_hold_panic=1 ends the
++	  kernel there, for a capture a reset would otherwise take with it.
++	  It also says which of lockdep, DEBUG_LIST, DEBUG_VM and the lockup
++	  detectors the image was built with, at boot.
++
++	  A hang of the lru_lock otherwise leaves nothing behind: this is
++	  what leaves something. It costs two words per hold.
 diff --git a/mm/Makefile b/mm/Makefile
 --- a/mm/Makefile
 +++ b/mm/Makefile
@@ -830,7 +866,7 @@ diff --git a/mm/lru_cast/Makefile b/mm/lru_cast/Makefile
 new file mode 100644
 --- /dev/null
 +++ b/mm/lru_cast/Makefile
-@@ -0,0 +1,31 @@
+@@ -0,0 +1,33 @@
 +# SPDX-License-Identifier: GPL-2.0
 +#
 +# CAST. Reached from mm/Makefile via obj-$(CONFIG_LRU_CAST) += lru_cast/.
@@ -861,6 +897,8 @@ new file mode 100644
 +obj-y	+= tune/tune.o tune/sim.o tune/world.o tune/sample.o tune/readahead.o
 +obj-y	+= tune/evidence.o tune/decay.o tune/wshare.o tune/share.o tune/cost.o tune/protect.o
 +obj-y	+= hooks.o control.o sysfs.o
++# what a debug build watches: an lru_lock held too long (dbg.c)
++obj-$(CONFIG_LRU_CAST_DEBUG)	+= dbg.o
 +
 diff --git a/mm/lru_cast/check-layers.sh b/mm/lru_cast/check-layers.sh
 new file mode 100644
@@ -1260,7 +1298,7 @@ diff --git a/mm/lru_cast/control.c b/mm/lru_cast/control.c
 new file mode 100644
 --- /dev/null
 +++ b/mm/lru_cast/control.c
-@@ -0,0 +1,283 @@
+@@ -0,0 +1,303 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * CAST -- switching it on and off.
@@ -1361,7 +1399,9 @@ new file mode 100644
 +/* @child's folios spliced onto @parent's lists, both lru_locks held */
 +void lru_cast_reparent(struct lruvec *child, struct lruvec *parent)
 +{
++	lru_cast_dbg_hold_begin(child, "reparent");
 +	lru_cast_ring_reparent(child, parent);
++	lru_cast_dbg_hold_end();
 +}
 +
 +/*
@@ -1389,6 +1429,7 @@ new file mode 100644
 +	 * the lock held all through, a folio is on a list the lock's, or none
 +	 * and not of the LRU, at every point the lock is let go.
 +	 */
++	lru_cast_dbg_hold_begin(lruvec, "take");
 +	while (!list_empty(list)) {
 +		struct folio *folio;
 +
@@ -1402,10 +1443,13 @@ new file mode 100644
 +		if (list_empty(list))
 +			break;
 +		/* a CPU waited for meanwhile: the lock given back, the rest still listed */
++		lru_cast_dbg_hold_end();
 +		spin_unlock_irq(&lruvec->lru_lock);
 +		cond_resched();
 +		spin_lock_irq(&lruvec->lru_lock);
++		lru_cast_dbg_hold_begin(lruvec, "take");
 +	}
++	lru_cast_dbg_hold_end();
 +}
 +
 +static void lru_cast_fill(struct lruvec *lruvec)
@@ -1448,8 +1492,10 @@ new file mode 100644
 +	if (!lru_cast_state_here(lruvec))
 +		return;
 +	spin_lock_irq(&lruvec->lru_lock);
++	lru_cast_dbg_hold_begin(lruvec, "drain");
 +	lru_cast_state_on_set(lruvec, false);
 +	lru_cast_ring_reset(lruvec);
++	lru_cast_dbg_hold_end();
 +	spin_unlock_irq(&lruvec->lru_lock);
 +}
 +
@@ -1524,6 +1570,18 @@ new file mode 100644
 +{
 +	lru_cast_key_init();
 +	lru_cast_prefetch_init();
++	/*
++	 * The two run on the lists legacy reclaim leaves, and never at once:
++	 * MGLRU, on from boot (LRU_GEN_ENABLED, or lru_gen=1), leaves CAST off
++	 * rather than have both reclaim one list between them. lru_cast=1 does
++	 * not override that; lru_gen=0 does. The switch at run time is the
++	 * other way round -- -EBUSY, either way -- so neither comes on while
++	 * the other is.
++	 */
++	if (lru_cast_active && lru_gen_enabled()) {
++		pr_warn(LRU_CAST_PROGNAME ": MGLRU is on, CAST stays off (lru_gen=0 to have it)\n");
++		lru_cast_active = false;
++	}
 +	if (lru_cast_active && (lru_cast_store_init() || lru_cast_tune_init())) {
 +		pr_warn(LRU_CAST_PROGNAME ": no memory to run on, off\n");
 +		lru_cast_set_enabled(false);
@@ -3165,6 +3223,185 @@ new file mode 100644
 +
 +#endif /* _MM_LRU_CAST_CORE_STORE_H */
 +
+diff --git a/mm/lru_cast/dbg.c b/mm/lru_cast/dbg.c
+new file mode 100644
+--- /dev/null
++++ b/mm/lru_cast/dbg.c
+@@ -0,0 +1,174 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * CAST -- what a debug build watches: an lru_lock held too long.
++ *
++ * The lru_lock is taken with interrupts off, so a CPU that keeps it holds a
++ * CPU whose own timers do not run: no watchdog of ours can be the one to say
++ * so from that CPU. Each CPU does say where it is, though, before it takes
++ * the lock and after it gives it back; a CPU still taking its timers reads
++ * those words and reports -- and asks for a backtrace of every CPU, which
++ * with pseudo-NMIs reaches the ones spinning with interrupts off.
++ *
++ * When the only CPU left taking timers is one that has the lock itself,
++ * nothing here runs at all. What catches that case is the hard lockup
++ * detector -- a perf NMI, CONFIG_ARM64_PSEUDO_NMI with
++ * CONFIG_HARDLOCKUP_DETECTOR -- panicking: the notifier below then says what
++ * each CPU last took the lock for.
++ *
++ * It says nothing until there is something to say: one timer a second, one
++ * compare per online CPU, and two words written per hold. A build with
++ * CONFIG_LRU_CAST_DEBUG=n has none of it: the calls below are empty.
++ */
++#include <linux/cpumask.h>
++#include <linux/jiffies.h>
++#include <linux/kernel.h>
++#include <linux/mm.h>
++#include <linux/moduleparam.h>
++#include <linux/nmi.h>
++#include <linux/panic.h>
++#include <linux/panic_notifier.h>
++#include <linux/percpu.h>
++#include <linux/sched.h>
++#include <linux/spinlock.h>
++#include <linux/timer.h>
++
++#include "control.h"
++#include "core/core.h"
++#include "version.h"
++
++struct lru_cast_hold {
++	bool held;
++	unsigned long stamp;	/* when the lock was taken */
++	unsigned long lruvec;
++	const char *where;
++	int pid;
++};
++
++static DEFINE_PER_CPU(struct lru_cast_hold, lru_cast_holds);
++
++/* how long a hold is one worth reporting: 2s is a stall reclaim never takes */
++static unsigned int lru_cast_hold_ms __read_mostly = 2000;
++core_param(lru_cast_hold_ms, lru_cast_hold_ms, uint, 0644);
++
++/* and whether it ends the kernel, for a capture a reset would take with it */
++static bool lru_cast_hold_panic __read_mostly;
++core_param(lru_cast_hold_panic, lru_cast_hold_panic, bool, 0644);
++
++/* a CPU about to take the lock, or just given it back */
++void lru_cast_dbg_hold_begin(struct lruvec *lruvec, const char *where)
++{
++	struct lru_cast_hold *h = this_cpu_ptr(&lru_cast_holds);
++
++	h->lruvec = (unsigned long)lruvec;
++	h->where = where;
++	h->pid = current->pid;
++	WRITE_ONCE(h->stamp, jiffies);
++	/* last: a reader that sees it held sees the rest of it */
++	WRITE_ONCE(h->held, true);
++}
++
++void lru_cast_dbg_hold_end(void)
++{
++	struct lru_cast_hold *h = this_cpu_ptr(&lru_cast_holds);
++
++	WRITE_ONCE(h->held, false);
++}
++
++static struct timer_list lru_cast_dbg_timer;
++
++static bool lru_cast_dbg_scan(bool report)
++{
++	unsigned long now = jiffies;
++	unsigned long limit = msecs_to_jiffies(READ_ONCE(lru_cast_hold_ms));
++	bool stale = false;
++	int cpu;
++
++	for_each_online_cpu(cpu) {
++		struct lru_cast_hold *h = per_cpu_ptr(&lru_cast_holds, cpu);
++		unsigned long stamp;
++
++		if (!READ_ONCE(h->held))
++			continue;
++		stamp = READ_ONCE(h->stamp);
++		if (time_before(now, stamp + limit))
++			continue;
++		stale = true;
++		if (!report)
++			continue;
++		pr_emerg(LRU_CAST_PROGNAME ": cpu%d in %s: lru_lock held %ums, lruvec %px, pid %d%s\n",
++			 cpu, h->where ? h->where : "?", jiffies_to_msecs(now - stamp),
++			 (void *)READ_ONCE(h->lruvec), READ_ONCE(h->pid),
++			 READ_ONCE(lru_cast_hold_panic) ? ", panicking" : "");
++		/* said once a window, not once a tick */
++		WRITE_ONCE(h->stamp, now);
++	}
++
++	return stale;
++}
++
++static void lru_cast_dbg_check(struct timer_list *t)
++{
++	if (lru_cast_dbg_scan(true)) {
++		pr_emerg(LRU_CAST_PROGNAME ": a backtrace of every CPU follows\n");
++		trigger_all_cpu_backtrace();
++		/*
++		 * A capture that says where it was stuck is worth more than a
++		 * board that resets with nothing in the log: the arch's
++		 * backtraces go to the console first, then this.
++		 */
++		if (READ_ONCE(lru_cast_hold_panic))
++			panic(LRU_CAST_PROGNAME ": lru_lock held past %ums\n",
++			      READ_ONCE(lru_cast_hold_ms));
++	}
++	mod_timer(t, jiffies + msecs_to_jiffies(1000));
++}
++
++static int lru_cast_dbg_panic(struct notifier_block *nb, unsigned long action,
++			      void *data)
++{
++	unsigned long now = jiffies;
++	bool said = false;
++	int cpu;
++
++	for_each_online_cpu(cpu) {
++		struct lru_cast_hold *h = per_cpu_ptr(&lru_cast_holds, cpu);
++		unsigned long stamp;
++
++		if (!READ_ONCE(h->held))
++			continue;
++		if (!said)
++			pr_emerg(LRU_CAST_PROGNAME ": what each CPU had of the lru_lock:\n");
++		said = true;
++		stamp = READ_ONCE(h->stamp);
++		pr_emerg(LRU_CAST_PROGNAME ":   cpu%d %s, %ums in, lruvec %px, pid %d\n",
++			 cpu, h->where ? h->where : "?", jiffies_to_msecs(now - stamp),
++			 (void *)READ_ONCE(h->lruvec), READ_ONCE(h->pid));
++	}
++	return NOTIFY_OK;
++}
++
++static struct notifier_block lru_cast_dbg_panic_nb = {
++	.notifier_call = lru_cast_dbg_panic,
++};
++
++static int __init lru_cast_dbg_init(void)
++{
++	/*
++	 * The build, in its own log: the knobs below are the ones the freeze is
++	 * being hunted with, and a defconfig that dropped one says so here
++	 * rather than in a capture that took a reboot to get.
++	 */
++	pr_info(LRU_CAST_PROGNAME ": debug: lockdep %d, debug_list %d, spinlock_debug %d, debug_vm %d, pseudo_nmi %d, hardlockup %d\n",
++		IS_ENABLED(CONFIG_PROVE_LOCKING), IS_ENABLED(CONFIG_DEBUG_LIST),
++		IS_ENABLED(CONFIG_DEBUG_SPINLOCK), IS_ENABLED(CONFIG_DEBUG_VM),
++		IS_ENABLED(CONFIG_ARM64_PSEUDO_NMI), IS_ENABLED(CONFIG_HARDLOCKUP_DETECTOR));
++	pr_info(LRU_CAST_PROGNAME ": debug: lru_lock watch at %ums, panic %d\n",
++		READ_ONCE(lru_cast_hold_ms), READ_ONCE(lru_cast_hold_panic));
++
++	timer_setup(&lru_cast_dbg_timer, lru_cast_dbg_check, 0);
++	mod_timer(&lru_cast_dbg_timer, jiffies + msecs_to_jiffies(1000));
++	atomic_notifier_chain_register(&panic_notifier_list,
++				       &lru_cast_dbg_panic_nb);
++	return 0;
++}
++late_initcall(lru_cast_dbg_init);
 diff --git a/mm/lru_cast/hooks.c b/mm/lru_cast/hooks.c
 new file mode 100644
 --- /dev/null
@@ -3790,7 +4027,7 @@ diff --git a/mm/lru_cast/policy/reclaim.c b/mm/lru_cast/policy/reclaim.c
 new file mode 100644
 --- /dev/null
 +++ b/mm/lru_cast/policy/reclaim.c
-@@ -0,0 +1,236 @@
+@@ -0,0 +1,239 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * CAST -- the choice of victims.
@@ -3902,6 +4139,8 @@ new file mode 100644
 +	lru_cast_ring_prepare(lruvec, s->type);
 +	/* the hold this scan takes: what its sweeps may read in all */
 +	lru_cast_ring_hold();
++	/* and, in a debug build, the hold it says it is in: this one is the long one */
++	lru_cast_dbg_hold_begin(lruvec, "isolate");
 +
 +	while (scan < s->nr_to_scan) {
 +		struct folio *folio;
@@ -4001,6 +4240,7 @@ new file mode 100644
 +	list_splice_tail(&aside_m, m);
 +	if (s->nr_taken)
 +		lru_cast_evicted(lruvec_pgdat(lruvec), s->type, s->nr_taken);
++	lru_cast_dbg_hold_end();
 +	return s->nr_taken;
 +}
 +
@@ -8111,7 +8351,7 @@ new file mode 100644
 +#define LRU_CAST_PROGNAME	"lru_cast"
 +#define LRU_CAST_AUTHOR	"Masahito Suzuki"
 +
-+#define LRU_CAST_VERSION	"0.2.8"
++#define LRU_CAST_VERSION	"0.3.0-dbg"
 +
 +#endif /* _MM_LRU_CAST_VERSION_H */
 diff --git a/mm/lru_cast/walk/bloom.c b/mm/lru_cast/walk/bloom.c
@@ -9429,7 +9669,45 @@ diff --git a/mm/memcontrol.c b/mm/memcontrol.c
  #include <linux/page_counter.h>
  #include <linux/memcontrol.h>
  #include <linux/cgroup.h>
-@@ -3523,6 +3524,7 @@
+@@ -3158,6 +3159,7 @@
+ static void memcg_offline_kmem(struct mem_cgroup *memcg)
+ {
+ 	struct mem_cgroup *parent;
++	int node;
+ 
+ 	if (mem_cgroup_kmem_disabled())
+ 		return;
+@@ -3178,6 +3180,29 @@
+ 	 * memcg_reparent_list_lrus().
+ 	 */
+ 	memcg_reparent_list_lrus(memcg, parent);
++
++	/*
++	 * CAST's side of the same handover: the lists now spliced onto the
++	 * parent's, the ring numbers @memcg's lruvecs held are the parent's to
++	 * have, so that the folios that came over are found again from its
++	 * rings rather than from a list no reclaim is handed any more. Taken
++	 * under the child's lru_lock, as a splice is.
++	 */
++	for_each_node(node) {
++		struct mem_cgroup_per_node *pn = memcg->nodeinfo[node];
++		struct mem_cgroup_per_node *ppn = parent->nodeinfo[node];
++		struct lruvec *lruvec, *plruvec;
++
++		if (!pn || !ppn)
++			continue;
++		lruvec = &pn->lruvec;
++		plruvec = &ppn->lruvec;
++		if (!lru_cast_on(lruvec))
++			continue;
++		spin_lock_irq(&lruvec->lru_lock);
++		lru_cast_reparent(lruvec, plruvec);
++		spin_unlock_irq(&lruvec->lru_lock);
++	}
+ }
+ 
+ #ifdef CONFIG_CGROUP_WRITEBACK
+@@ -3523,6 +3548,7 @@
  	if (!pn)
  		return;
  

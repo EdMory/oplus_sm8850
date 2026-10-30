@@ -1622,6 +1622,7 @@ jobs:
           # 3. 配置KCFLAGS
           KCFLAGS+=" -no-canonical-prefixes"
           KCFLAGS+=" -O2"
+          KCFLAGS+=" -mcpu=oryon-1"
           KCFLAGS+=" -pipe"
           KCFLAGS+=" -Wno-error"
           KCFLAGS+=" -fno-stack-protector"

@@ -830,7 +830,7 @@ diff --git a/mm/lru_cast/Makefile b/mm/lru_cast/Makefile
 new file mode 100644
 --- /dev/null
 +++ b/mm/lru_cast/Makefile
-@@ -0,0 +1,31 @@
+@@ -0,0 +1,32 @@
 +# SPDX-License-Identifier: GPL-2.0
 +#
 +# CAST. Reached from mm/Makefile via obj-$(CONFIG_LRU_CAST) += lru_cast/.
@@ -851,6 +851,7 @@ new file mode 100644
 +ccflags-y += -I$(src) -I$(srctree)/mm
 +
 +obj-y	+= core/store.o core/state.o core/clock.o core/nia_state.o core/key.o core/prefetch.o
++obj-y	+= core/diag.o
 +obj-y	+= policy/params.o policy/ring.o policy/reclaim.o policy/ghost.o policy/balance.o
 +obj-y	+= walk/walk.o walk/bloom.o walk/lookaround.o
 +ifdef CONFIG_X86_64
@@ -862,6 +863,7 @@ new file mode 100644
 +obj-y	+= tune/evidence.o tune/decay.o tune/wshare.o tune/share.o tune/cost.o tune/protect.o
 +obj-y	+= hooks.o control.o sysfs.o
 +
+
 diff --git a/mm/lru_cast/check-layers.sh b/mm/lru_cast/check-layers.sh
 new file mode 100644
 --- /dev/null
@@ -1759,7 +1761,7 @@ diff --git a/mm/lru_cast/core/core.h b/mm/lru_cast/core/core.h
 new file mode 100644
 --- /dev/null
 +++ b/mm/lru_cast/core/core.h
-@@ -0,0 +1,240 @@
+@@ -0,0 +1,250 @@
 +/* SPDX-License-Identifier: GPL-2.0 */
 +/*
 + * CAST -- the core: what a folio's reads were, and when.
@@ -1999,7 +2001,128 @@ new file mode 100644
 +void lru_cast_hook_read(struct folio *folio, enum lru_cast_read how);
 +void lru_cast_hook_installed(long nr, unsigned long size);
 +
++/*
++ * diag.c: how long the lru_lock is held, at those of CAST's entries that run
++ * under it. Reporting only; a kernel that is not built for a hang pays for
++ * one clock read at each entry.
++ */
++u64 lru_cast_diag_now(void);
++void lru_cast_diag_enter(const char *where, const void *lruvec);
++void lru_cast_diag_leave(const char *where, u64 t0, unsigned long units,
++			 const void *lruvec);
++
 +#endif /* _MM_LRU_CAST_CORE_H */
+
+diff --git a/mm/lru_cast/core/diag.c b/mm/lru_cast/core/diag.c
+new file mode 100644
+--- /dev/null
++++ b/mm/lru_cast/core/diag.c
+@@ -0,0 +1,104 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * CAST: how long the lruvec's lru_lock is held, and by what.
++ *
++ * Nothing here is needed to run CAST. It is what a kernel is built with
++ * when a hang is to be found, and it only reports.
++ *
++ * A hold is seen from inside CAST at the functions reclaim calls under the
++ * lock. With interrupts off, as the lock is taken while reclaim runs, the
++ * entries that come closer together than LRU_CAST_DIAG_GAP_NS are read as
++ * one hold: its length is measured from its first entry, and once it passes
++ * LRU_CAST_DIAG_HOLD_NS the line names the entry it was last seen at. So a
++ * hold that calls in at all is timed, and one that is long because CAST
++ * itself is looping is timed too, one line per LRU_CAST_DIAG_HOLD_NS.
++ *
++ * A hold that never returns cannot report itself: that is what the
++ * watchdogs are for (watchdog_thresh=, soft_watchdog_panic=), and what
++ * hung_task_panic= is for when a holder stops being scheduled. Set those
++ * on the command line: this file cannot, and should not, change them.
++ *
++ * printk_deferred(), never printk(): this runs with interrupts off and the
++ * lru_lock held, from reclaim and from the fault path.
++ */
++#include <linux/atomic.h>
++#include <linux/irqflags.h>
++#include <linux/ktime.h>
++#include <linux/percpu.h>
++#include <linux/printk.h>
++#include <linux/sched.h>
++#include <linux/smp.h>
++
++#include "core/core.h"
++
++#define LRU_CAST_DIAG_HOLD_NS	(200ULL * NSEC_PER_USEC)	/* a hold this long is reported */
++#define LRU_CAST_DIAG_LEAVE_NS	(500ULL * NSEC_PER_USEC)	/* one call this long likewise */
++#define LRU_CAST_DIAG_GAP_NS	(1000ULL * NSEC_PER_USEC)	/* entries this far apart: another hold */
++#define LRU_CAST_DIAG_REPORTS	64				/* lines before it goes quiet */
++
++struct lru_cast_diag {
++	u64		start;		/* the hold being timed: its first entry, 0 for none */
++	u64		last;		/* its last entry */
++	unsigned long	entries;	/* entries seen in it */
++};
++
++static DEFINE_PER_CPU(struct lru_cast_diag, lru_cast_diag);
++static atomic_t lru_cast_diag_left = ATOMIC_INIT(LRU_CAST_DIAG_REPORTS);
++
++/*
++ * At most LRU_CAST_DIAG_REPORTS lines in all: a machine already in trouble
++ * is not to be flooded, and the first lines are the ones that matter.
++ */
++static bool lru_cast_diag_speak(void)
++{
++	return atomic_dec_if_positive(&lru_cast_diag_left) >= 0;
++}
++
++u64 lru_cast_diag_now(void)
++{
++	return ktime_get_mono_fast_ns();
++}
++
++/* one of CAST's entries under the lruvec's lru_lock */
++void lru_cast_diag_enter(const char *where, const void *lruvec)
++{
++	struct lru_cast_diag *d = this_cpu_ptr(&lru_cast_diag);
++	u64 now = lru_cast_diag_now();
++
++	/* interrupts on: the lock is not held here, nothing to time */
++	if (!irqs_disabled()) {
++		d->start = 0;
++		return;
++	}
++	if (!d->start || now - d->last > LRU_CAST_DIAG_GAP_NS) {
++		d->start = now;			/* another hold: timed from here */
++		d->entries = 0;
++	}
++	d->last = now;
++	d->entries++;
++	if (now - d->start < LRU_CAST_DIAG_HOLD_NS)
++		return;
++	if (!lru_cast_diag_speak())
++		return;
++	printk_deferred("lru_cast-diag: lru_lock held %llu us over %lu entries, last at %s(), lruvec %px, cpu %u, %s/%d\n",
++			(now - d->start) / NSEC_PER_USEC, d->entries, where, lruvec,
++			raw_smp_processor_id(), current->comm, current->pid);
++}
++
++/* one call under the lock: @t0 its start from lru_cast_diag_now(), 0 for none */
++void lru_cast_diag_leave(const char *where, u64 t0, unsigned long units,
++			 const void *lruvec)
++{
++	u64 took;
++
++	if (!t0 || !irqs_disabled())
++		return;
++	took = lru_cast_diag_now() - t0;
++	if (took < LRU_CAST_DIAG_LEAVE_NS)
++		return;
++	if (!lru_cast_diag_speak())
++		return;
++	printk_deferred("lru_cast-diag: %s() %llu us under the lru_lock (%lu frames), lruvec %px, cpu %u, %s/%d\n",
++			where, took / NSEC_PER_USEC, units, lruvec,
++			raw_smp_processor_id(), current->comm, current->pid);
++}
+
 diff --git a/mm/lru_cast/core/key.c b/mm/lru_cast/core/key.c
 new file mode 100644
 --- /dev/null
@@ -3787,7 +3910,7 @@ diff --git a/mm/lru_cast/policy/reclaim.c b/mm/lru_cast/policy/reclaim.c
 new file mode 100644
 --- /dev/null
 +++ b/mm/lru_cast/policy/reclaim.c
-@@ -0,0 +1,209 @@
+@@ -0,0 +1,211 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * CAST -- the choice of victims.
@@ -3845,6 +3968,7 @@ new file mode 100644
 +
 +	if (*nr_w <= target + slack)
 +		return 0;
++	lru_cast_diag_enter("w_admit", lruvec);
 +	lru_cast_ring_prepare(lruvec, type);
 +	while (budget && *nr_w > target && !list_empty(w)) {
 +		struct folio *folio = lru_to_folio(w);
@@ -3888,6 +4012,7 @@ new file mode 100644
 +	if (!lru_cast_on(lruvec))
 +		return 0;
 +
++	lru_cast_diag_enter("isolate", lruvec);
 +	lru_cast_w_admit(lruvec, s->type, &nr_w, &nr_m, 0, s->nr_to_scan * LRU_CAST_ADMIT);
 +	lru_cast_ring_prepare(lruvec, s->type);
 +
@@ -3997,11 +4122,12 @@ new file mode 100644
 +	return still;
 +}
 +
+
 diff --git a/mm/lru_cast/policy/ring.c b/mm/lru_cast/policy/ring.c
 new file mode 100644
 --- /dev/null
 +++ b/mm/lru_cast/policy/ring.c
-@@ -0,0 +1,793 @@
+@@ -0,0 +1,799 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * CAST -- keys, and M's lowest found by a sweep.
@@ -4543,10 +4669,13 @@ new file mode 100644
 +	unsigned int shift = lru_cast_blocks(lruvec, k), nb = LRU_CAST_BLOCKS;
 +	long clean = -1;			/* a block read from its start, none found yet */
 +	int le = k->ring_le, wraps = 0;
++	u64 diag_t0;
 +
 +	k->ncand = k->pos = 0;
 +	if (end <= start)
 +		return;
++	diag_t0 = lru_cast_diag_now();		/* a sweep holds the lock once: timed here */
++	lru_cast_diag_enter("sweep", lruvec);
 +	if (k->cursor < start || k->cursor > end)
 +		k->cursor = start;
 +	if (!k->tau_ok)
@@ -4626,6 +4755,7 @@ new file mode 100644
 +	sw_add(SW_SWEEPS, 1);
 +	sw_add(SW_FRAMES, frames);
 +	sw_add(SW_WORDS, words);
++	lru_cast_diag_leave("sweep", diag_t0, frames, lruvec);
 +}
 +
 +/*
@@ -4676,6 +4806,7 @@ new file mode 100644
 +
 +	if (list_empty(m))
 +		return NULL;
++	lru_cast_diag_enter("ring_min", lruvec);
 +	for (;;) {
 +		while (k->pos < k->ncand) {
 +			struct lru_cast_cand *c = &k->cand[k->pos++];
@@ -4737,6 +4868,7 @@ new file mode 100644
 + */
 +bool __lru_cast_add_folio(struct lruvec *lruvec, struct folio *folio, bool tail)
 +{
++	lru_cast_diag_enter("add_folio", lruvec);
 +	if (folio_test_unevictable(folio)) {
 +		lru_cast_ring_out(folio);
 +		return false;
@@ -4795,6 +4927,7 @@ new file mode 100644
 +		k->victim = LONG_MIN;
 +	}
 +}
+
 diff --git a/mm/lru_cast/sysfs.c b/mm/lru_cast/sysfs.c
 new file mode 100644
 --- /dev/null

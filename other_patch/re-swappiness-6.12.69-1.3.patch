@@ -139,7 +139,7 @@ diff -ruN a/include/linux/mmzone.h b/include/linux/mmzone.h
  	/* to batch promoted pages */
 diff -ruN a/mm/vmscan.c b/mm/vmscan.c
 --- a/mm/vmscan.c	2026-10-31 11:03:00.023839300 +0800
-+++ b/mm/vmscan.c	2026-10-31 11:20:52.640812900 +0800
++++ b/mm/vmscan.c	2026-10-31 19:23:47.941897000 +0800
 @@ -885,6 +885,12 @@
  };
  
@@ -645,15 +645,6 @@ diff -ruN a/mm/vmscan.c b/mm/vmscan.c
  	int gen = lru_gen_from_seq(max_seq);
  
  	lockdep_assert_held(pvmw->ptl);
-@@ -4415,7 +4431,7 @@
- 
- 	/* feedback from rmap walkers to page table walkers */
- 	if (mm_state && suitable_to_scan(i, young))
--		update_bloom_filter(mm_state, max_seq, pvmw->pmd);
-+		update_bloom_filter(mm_state, max_seq[ftype], pvmw->pmd);
- 
- 	return true;
- }
 @@ -4743,7 +4759,10 @@
  	 * There might not be eligible folios due to reclaim_idx. Check the
  	 * remaining to prevent livelock if it's not making progress.

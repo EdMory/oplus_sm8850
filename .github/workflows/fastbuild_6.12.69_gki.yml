@@ -58,17 +58,7 @@ on:
         type: boolean
         default: 'true'
       le9uo_enable:
-        description: '是否安装 LE9UO 补丁'
-        required: true
-        type: boolean
-        default: 'true'
-      reswappiness_enable:
-        description: '是否安装 Re-swappiness 补丁'
-        required: true
-        type: boolean
-        default: 'true'
-      kcompressd_enable:
-        description: '是否安装 Kcompressd 补丁'
+        description: '是否安装 LE9UO, Re-swappiness 和 Kcompressd 补丁'
         required: true
         type: boolean
         default: 'true'
@@ -574,7 +564,7 @@ jobs:
           patch -p1 --no-backup-if-mismatch -F 0 < le9uo.patch
 
       - name: 应用 Re-swappiness (MGLRU anon/file 独立 aging)
-        if: inputs.reswappiness_enable
+        if: inputs.le9uo_enable
         run: |
           cd kernel_workspace/common
           wget -O rs71.patch https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/re-swappiness-6.12.69-1.3.patch
@@ -584,7 +574,7 @@ jobs:
           patch -p1 --no-backup-if-mismatch -F 0 < rs71.patch
 
       - name: 应用 Kcompressd
-        if: inputs.kcompressd_enable
+        if: inputs.le9uo_enable
         run: |
           cd kernel_workspace/common
           wget -O kcompressd.patch https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/kcompressd-unofficial-6.12.69-0.5.patch

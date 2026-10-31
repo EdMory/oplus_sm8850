@@ -23,7 +23,7 @@ diff --git a/kernel/sysctl.c b/kernel/sysctl.c
  #endif
  };
  
-+int vm_kcompressd;
++int vm_kcompressd = 24;
 +static int SYSCTL_KCOMPRESS_FIFO_SIZE = KCOMPRESS_FIFO_SIZE;
 +
  static struct ctl_table vm_table[] = {
@@ -172,7 +172,7 @@ diff --git a/mm/page_io.c b/mm/page_io.c
  	if (zswap_store(folio)) {
  		folio_unlock(folio);
  		return 0;
-@@ -690,3 +793,47 @@
+@@ -690,3 +793,48 @@
  	if (ret != -EIOCBQUEUED)
  		sio_read_complete(&sio->iocb, ret);
  }
@@ -216,7 +216,8 @@ diff --git a/mm/page_io.c b/mm/page_io.c
 +	}
 +
 +	kcompressd_task = task;
-+	pr_info("kcompressd: v0.8 ready (KABI-safe, disabled by default)\n");
++	pr_info("kcompressd: v0.9 ready (KABI-safe, upstream default %d)\n",
++			vm_kcompressd);
 +	return 0;
 +}
 +late_initcall(kcompressd_init);

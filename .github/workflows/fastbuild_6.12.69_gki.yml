@@ -57,6 +57,11 @@ on:
         required: true
         type: boolean
         default: 'true'
+      le9uo_enable:
+        description: '是否安装 LE9UO 补丁'
+        required: true
+        type: boolean
+        default: 'true'
       droidspaces_enable:
         description: '是否开启 Droidspaces 容器支持(轻量化的完整Linux容器支持)'
         required: true
@@ -548,6 +553,15 @@ jobs:
             || echo "CONFIG_LZ4K_OPLUS_COMPRESS=y" >> arch/arm64/configs/gki_defconfig
           grep -q 'CONFIG_LZ4K_OPLUS_DECOMPRESS=y' arch/arm64/configs/gki_defconfig \
             || echo "CONFIG_LZ4K_OPLUS_DECOMPRESS=y" >> arch/arm64/configs/gki_defconfig
+
+      - name: 应用 le9uo 工作集保护补丁
+        if: inputs.le9uo_enable
+        run: |
+          cd kernel_workspace/common
+          curl -L -o le9uo.patch \
+            https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/le9uo-6.12.69-gki-1.15.patch
+          patch -p1 --dry-run -F 0 < le9uo.patch
+          patch -p1 --no-backup-if-mismatch -F 0 < le9uo.patch
             
       - name: 应用 PMICWD 修复补丁
         run: |

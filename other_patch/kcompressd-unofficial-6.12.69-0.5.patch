@@ -1,7 +1,7 @@
 From e4d131aaa669b78184ef919136b27a618896299b Mon Sep 17 00:00:00 2001
 From: Masahito S <firelzrd@gmail.com>
 Date: Sun, 27 Jul 2025 01:49:55 +0900
-Subject: [PATCH] linux6.12.69-gki-kcompressd-unofficial-0.5
+Subject: [PATCH] linux6.12.69-gki-kcompressd-unofficial-0.5-diagoff
 
 Ported to Android GKI 6.12.69 (cctv18/android_gki_kernel_common,
 android16-6.12-2026-03) with zero-fuzz context.
@@ -48,7 +48,7 @@ diff --git a/kernel/sysctl.c b/kernel/sysctl.c
  #endif
  };
  
-+int vm_kcompressd = 24;
++int vm_kcompressd;   /* diag: default OFF, enable via sysctl vm.kcompressd */
 +static int SYSCTL_KCOMPRESS_FIFO_SIZE = KCOMPRESS_FIFO_SIZE;
 +
  static struct ctl_table vm_table[] = {

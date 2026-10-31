@@ -67,6 +67,11 @@ on:
         required: true
         type: boolean
         default: 'true'
+      kcompressd_enable:
+        description: '是否安装 Kcompressd 补丁'
+        required: true
+        type: boolean
+        default: 'true'
       droidspaces_enable:
         description: '是否开启 Droidspaces 容器支持(轻量化的完整Linux容器支持)'
         required: true
@@ -577,6 +582,14 @@ jobs:
           grep -q '^SUBLEVEL = 69' Makefile || { echo "基线非 6.12.69，拒绝应用"; exit 1; }
           patch -p1 --dry-run -F 0 < rs71.patch
           patch -p1 --no-backup-if-mismatch -F 0 < rs71.patch
+
+      - name: 应用 Kcompressd
+        if: inputs.kcompressd_enable
+        run: |
+          cd kernel_workspace/common
+          wget -O kcompressd.patch https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/kcompressd-unofficial-6.12.69-0.5.patch
+          patch -p1 --dry-run -F 0 < kcompressd.patch
+          patch -p1 --no-backup-if-mismatch -F 0 < kcompressd.patch
             
       - name: 应用 PMICWD 修复补丁
         run: |

@@ -23,7 +23,7 @@ diff --git a/kernel/sysctl.c b/kernel/sysctl.c
  #endif
  };
  
-+int vm_kcompressd = 24;
++int vm_kcompressd;
 +static int SYSCTL_KCOMPRESS_FIFO_SIZE = KCOMPRESS_FIFO_SIZE;
 +
  static struct ctl_table vm_table[] = {
@@ -57,7 +57,7 @@ diff --git a/mm/page_io.c b/mm/page_io.c
  #include "swap.h"
  
  #undef CREATE_TRACE_POINTS
-@@ -238,6 +240,99 @@
+@@ -238,6 +240,105 @@
  }
  
  /*
@@ -131,17 +131,29 @@ diff --git a/mm/page_io.c b/mm/page_io.c
 +	    !data_race(swp_swap_info(folio->swap)->flags & SWP_SYNCHRONOUS_IO))
 +		return false;
 +
-+	/* If the queue is full, swap out the head folio to make space */
++	/*
++	 * If the queue is full, swap out the head folio to make space.
++	 *
++	 * The depth check, the head dequeue AND the enqueue must all be
++	 * done under kcompress_fifo_lock: kcompressd consumes the FIFO
++	 * with kfifo_out_locked(), so doing kfifo_in() outside the lock
++	 * races with the consumer and can corrupt the FIFO indices.  A
++	 * corrupted entry means a folio pinned by folio_get() is never
++	 * written out nor put back: it stays locked forever and leaks its
++	 * swap slot, eventually stalling the whole swap path.  (Observed
++	 * on SM8850: system freeze ~1 min after desktop with
++	 * vm.kcompressd=24, 100% reproducible; kcompressd=0 is stable.)
++	 */
 +	scoped_guard(spinlock_irqsave, &kcompress_fifo_lock) {
 +		if (kfifo_len(&kcompress_fifo) >= sysctl_kcompressd &&
 +		    unlikely(!kfifo_out(&kcompress_fifo, &head, 1)))
 +			return false;
++
++		/* Pin the folio until kcompressd has written it out */
++		folio_get(folio);
++		ret = kfifo_in(&kcompress_fifo, &folio, 1);
 +	}
 +
-+	/* Pin the folio until kcompressd has written it out */
-+	folio_get(folio);
-+
-+	ret = kfifo_in(&kcompress_fifo, &folio, 1);
 +	if (likely(ret))
 +		wake_up_interruptible(&kcompressd_wait);
 +	else
@@ -172,7 +184,7 @@ diff --git a/mm/page_io.c b/mm/page_io.c
  	if (zswap_store(folio)) {
  		folio_unlock(folio);
  		return 0;
-@@ -690,3 +793,48 @@
+@@ -690,3 +793,47 @@
  	if (ret != -EIOCBQUEUED)
  		sio_read_complete(&sio->iocb, ret);
  }
@@ -216,8 +228,7 @@ diff --git a/mm/page_io.c b/mm/page_io.c
 +	}
 +
 +	kcompressd_task = task;
-+	pr_info("kcompressd: v0.9 ready (KABI-safe, upstream default %d)\n",
-+			vm_kcompressd);
++	pr_info("kcompressd: v0.8 ready (KABI-safe, disabled by default)\n");
 +	return 0;
 +}
 +late_initcall(kcompressd_init);

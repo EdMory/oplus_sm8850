@@ -559,7 +559,7 @@ jobs:
         run: |
           cd kernel_workspace/common
           curl -L -o le9uo.patch \
-            https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/le9uo-6.12.69-gki-1.15.patch
+            https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/le9uo-6.12.69-1.15.patch
           patch -p1 --dry-run -F 0 < le9uo.patch
           patch -p1 --no-backup-if-mismatch -F 0 < le9uo.patch
             

@@ -23,7 +23,7 @@ diff --git a/kernel/sysctl.c b/kernel/sysctl.c
  #endif
  };
  
-+int vm_kcompressd;
++int vm_kcompressd = 24;
 +static int SYSCTL_KCOMPRESS_FIFO_SIZE = KCOMPRESS_FIFO_SIZE;
 +
  static struct ctl_table vm_table[] = {
@@ -57,7 +57,7 @@ diff --git a/mm/page_io.c b/mm/page_io.c
  #include "swap.h"
  
  #undef CREATE_TRACE_POINTS
-@@ -238,6 +240,105 @@
+@@ -238,6 +240,114 @@
  }
  
  /*
@@ -108,6 +108,7 @@ diff --git a/mm/page_io.c b/mm/page_io.c
 +static bool kcompressd_store(struct folio *folio)
 +{
 +	unsigned int ret, sysctl_kcompressd = vm_kcompressd;
++	unsigned long flags;
 +	struct folio *head = NULL;
 +
 +	/* Only kswapd can use kcompressd */
@@ -132,28 +133,30 @@ diff --git a/mm/page_io.c b/mm/page_io.c
 +		return false;
 +
 +	/*
-+	 * If the queue is full, swap out the head folio to make space.
-+	 *
-+	 * The depth check, the head dequeue AND the enqueue must all be
-+	 * done under kcompress_fifo_lock: kcompressd consumes the FIFO
-+	 * with kfifo_out_locked(), so doing kfifo_in() outside the lock
-+	 * races with the consumer and can corrupt the FIFO indices.  A
-+	 * corrupted entry means a folio pinned by folio_get() is never
-+	 * written out nor put back: it stays locked forever and leaks its
-+	 * swap slot, eventually stalling the whole swap path.  (Observed
-+	 * on SM8850: system freeze ~1 min after desktop with
-+	 * vm.kcompressd=24, 100% reproducible; kcompressd=0 is stable.)
++	 * The producer side must be atomic: sampling the queue depth, evicting
++	 * the head, pinning the folio and enqueueing it have to share one
++	 * critical section.  Otherwise the depth read here can go stale before
++	 * kfifo_in(), and a folio already drained by kcompressd can be dropped
++	 * by the eviction path -- leaking the reference taken for the swapout
++	 * and eventually starving the swap path.
 +	 */
-+	scoped_guard(spinlock_irqsave, &kcompress_fifo_lock) {
-+		if (kfifo_len(&kcompress_fifo) >= sysctl_kcompressd &&
-+		    unlikely(!kfifo_out(&kcompress_fifo, &head, 1)))
-+			return false;
++	spin_lock_irqsave(&kcompress_fifo_lock, flags);
 +
-+		/* Pin the folio until kcompressd has written it out */
-+		folio_get(folio);
-+		ret = kfifo_in(&kcompress_fifo, &folio, 1);
++	if (kfifo_len(&kcompress_fifo) >= sysctl_kcompressd) {
++		if (unlikely(!kfifo_out(&kcompress_fifo, &head, 1))) {
++			spin_unlock_irqrestore(&kcompress_fifo_lock, flags);
++			return false;
++		}
 +	}
 +
++	/* Pin the folio until kcompressd has written it out */
++	folio_get(folio);
++
++	ret = kfifo_in(&kcompress_fifo, &folio, 1);
++
++	spin_unlock_irqrestore(&kcompress_fifo_lock, flags);
++
++	/* Waking the consumer and dropping the pin must stay outside the lock */
 +	if (likely(ret))
 +		wake_up_interruptible(&kcompressd_wait);
 +	else
@@ -169,7 +172,7 @@ diff --git a/mm/page_io.c b/mm/page_io.c
   * We may have stale swap cache pages in memory: notice
   * them here and get rid of the unnecessary final write.
   */
-@@ -279,6 +374,14 @@
+@@ -279,6 +389,14 @@
  		 */
  		swap_zeromap_folio_clear(folio);
  	}
@@ -184,7 +187,7 @@ diff --git a/mm/page_io.c b/mm/page_io.c
  	if (zswap_store(folio)) {
  		folio_unlock(folio);
  		return 0;
-@@ -690,3 +793,47 @@
+@@ -690,3 +808,48 @@
  	if (ret != -EIOCBQUEUED)
  		sio_read_complete(&sio->iocb, ret);
  }
@@ -228,7 +231,8 @@ diff --git a/mm/page_io.c b/mm/page_io.c
 +	}
 +
 +	kcompressd_task = task;
-+	pr_info("kcompressd: v0.8 ready (KABI-safe, disabled by default)\n");
++	pr_info("kcompressd: v0.10 ready (KABI-safe, upstream default %d)\n",
++			vm_kcompressd);
 +	return 0;
 +}
 +late_initcall(kcompressd_init);

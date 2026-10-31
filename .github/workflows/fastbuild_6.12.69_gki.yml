@@ -563,15 +563,13 @@ jobs:
           patch -p1 --dry-run -F 0 < le9uo.patch
           patch -p1 --no-backup-if-mismatch -F 0 < le9uo.patch
           
-      - name: 应用 Re-swappiness (MGLRU anon/file 独立 aging)
+      - name: 应用 Kcompressd
         if: inputs.le9uo_enable
         run: |
           cd kernel_workspace/common
-          wget -O rs71.patch https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/re-swappiness-6.12.69-1.3.patch
-          # 版本锚点校验：补丁仅对 6.12.69 零 fuzz
-          grep -q '^SUBLEVEL = 69' Makefile || { echo "基线非 6.12.69，拒绝应用"; exit 1; }
-          patch -p1 --dry-run -F 0 < rs71.patch
-          patch -p1 --no-backup-if-mismatch -F 0 < rs71.patch
+          wget -O kcompressd.patch https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/kcompressd-unofficial-6.12.69-0.5.patch
+          patch -p1 --dry-run -F 0 < kcompressd.patch
+          patch -p1 --no-backup-if-mismatch -F 0 < kcompressd.patch
             
       - name: 应用 PMICWD 修复补丁
         run: |

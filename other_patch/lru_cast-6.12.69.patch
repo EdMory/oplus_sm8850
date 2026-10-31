@@ -1260,7 +1260,7 @@ diff --git a/mm/lru_cast/control.c b/mm/lru_cast/control.c
 new file mode 100644
 --- /dev/null
 +++ b/mm/lru_cast/control.c
-@@ -0,0 +1,276 @@
+@@ -0,0 +1,259 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * CAST -- switching it on and off.
@@ -1319,25 +1319,13 @@ new file mode 100644
 +void lru_cast_init_lruvec(struct lruvec *lruvec)
 +{
 +	/*
-+	 * A state made here, where the lruvec is, so that every lruvec runs
-+	 * CAST from its first folio: a memcg made while CAST runs -- an app's,
-+	 * made as it starts -- would otherwise run without it for as long as
-+	 * it lives, and reclaim two ways in one kernel.
-+	 *
-+	 * Not the ones made before the kernel has slabs, the node's own: they
-+	 * are made that early, and lru_cast_init() fills them. One that cannot
-+	 * be had here is made later, by lru_cast_fill().
++	 * No state made here: one is some 3 KiB for each of the two types, made
++	 * for every lruvec of every memcg whether CAST ever runs it or not. It
++	 * is made where CAST is switched on (lru_cast_fill()), where room is at
++	 * hand, and until then the lruvec runs without CAST rather than on
++	 * another's rings; an lruvec made while CAST runs stays without.
 +	 */
-+	if (!slab_is_available() || !lru_cast_enabled())
-+		return;
-+	if (lru_cast_state_alloc(lruvec, GFP_KERNEL))
-+		return;
-+	if (lru_cast_state_claim(lruvec)) {
-+		lru_cast_ring_init(lruvec);
-+		lru_cast_ring_reset(lruvec);
-+	}
-+	/* made empty: nothing to take, and CAST runs this lruvec from now */
-+	lru_cast_state_on_set(lruvec, true);
++	lru_cast_state_on_set(lruvec, lru_cast_active);
 +}
 +
 +/* an lruvec freed (its memcg's): no folio is left on it */
@@ -1377,17 +1365,12 @@ new file mode 100644
 +static void lru_cast_take(struct lruvec *lruvec, struct list_head *list, int type,
 +			  bool active)
 +{
++	LIST_HEAD(todo);
 +	int n = 0;
 +
-+	/*
-+	 * In place: a folio stays on @list until it is taken, so that while
-+	 * the lock is let go every folio left is still on the lruvec's own
-+	 * list -- where another CPU's isolate, or a del, may find and unlink
-+	 * it. Spliced off to a list of our own, they would be unlinked there
-+	 * instead: off this stack.
-+	 */
-+	while (!list_empty(list)) {
-+		struct folio *folio = lru_to_folio(list);
++	list_splice_init(list, &todo);
++	while (!list_empty(&todo)) {
++		struct folio *folio = lru_to_folio(&todo);
 +
 +		list_del(&folio->lru);
 +		if (active && !(lru_cast_read(folio) >> 24))

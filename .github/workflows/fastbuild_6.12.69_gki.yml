@@ -562,6 +562,10 @@ jobs:
             https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/le9uo-6.12.69-1.15.patch
           patch -p1 --dry-run -F 0 < le9uo.patch
           patch -p1 --no-backup-if-mismatch -F 0 < le9uo.patch
+          echo "CONFIG_ANON_MIN_RATIO=8" >> ./common/arch/arm64/configs/gki_defconfig
+          echo "CONFIG_CLEAN_MIN_RATIO=8" >> ./common/arch/arm64/configs/gki_defconfig
+          echo "ANON_MIN_RATIO与CONFIG_CLEAN_MIN_RATIO默认设为8以避免内存高压时把 zram 回收通道锁死，导致回收活锁"
+          echo "LE9UO 集成完成"
           
       - name: 应用 Re-swappiness (MGLRU anon/file 独立 aging)
         if: inputs.le9uo_enable

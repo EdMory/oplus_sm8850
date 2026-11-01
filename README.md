@@ -18,17 +18,18 @@
 - 修复官方代码部分bug/未及时更新的补丁，并引入诸多第三方更新/功能支持；
 - 提供 Github Action 在线编译/shell本地编译双版本脚本。
 ## 已实现：
-- [x] 骁龙 SM8850 通用OKI内核（基于一加Ace 6T源码的 6.12.38 ，其他同内核版本非SM8850机型可自行测试，部分机型可完全兼容）
+- [x] 骁龙 SM8850 通用GKI内核（基于谷歌源码的 6.12.69 ，其他同内核版本非SM8850机型可自行测试，部分机型可完全兼容）
 - [x] ReSukiSU/SukiSU Ultra/KernelSU Next/原版KernelSU多版本KSU可选
 - [x] cctv18独家设计的 [ccache-ECS](https://github.com/cctv18/ccache-ECS) 缓存及大量编译流程优化，编译时间可稳定在约6min *(首次编译时会拉取公共预置ccache，从第二次开始没有大量配置改动的情况下，单次编译时间约6min；距离上一次调用两周未调用后缓存会被自动清除，此时编译会自动重建缓存)*
-- [x] 引入O3编译优化，改善内核运行性能
 - [x] 引入[Optprobe](https://lkml.rescloud.iu.edu/hypermail/linux/kernel/2503.3/02174.html)
+- [x] 引入 Clang20 与 [Oryon编译优化]([https://lkml.rescloud.iu.edu/hypermail/linux/kernel/2503.3/02174.html](https://lists.llvm.org/pipermail/cfe-commits/Week-of-Mon-20240603/585645.html))
 - [x] LZ4 1.10.0 & ZSTD 1.5.7 算法更新&优化补丁(来自[@ferstar](https://github.com/ferstar), 移植by [@Xiaomichael](https://github.com/Xiaomichael), 6.12版本补丁重制by [@cctv18](https://github.com/cctv18))
 - [x] 移植LZ4KD支持到6.12内核(可选补丁)
-- [x] 移植LZ4KDR支持到6.12内核(可选补丁)
+- [x] 移植[LE9UO](https://github.com/firelzrd/le9uo)与[Re-swappiness](https://github.com/firelzrd/re-swappiness)支持到6.12内核(可选补丁)
 - [x] 可选加入 BBR/Brutal 及一系列 tcp 拥塞控制算法
 - [x] [INTFP](https://github.com/firelzrd/intfp),[ISQRT](https://github.com/firelzrd/isqrt)移植
-- [x] [ADIOS](https://github.com/firelzrd/adios),[BORE](https://github.com/firelzrd/bore)移植
+- [x] [ADIOS](https://github.com/firelzrd/adios),[BORE](https://github.com/firelzrd/bore),[Cambyses](https://github.com/firelzrd/cambyses)移植
+- [x] CherryPick了部分来自6.12.92基线提交，优化了调度器表现
 - [x] 加入一些网络连接性能优化配置选项（用于为 ipset 及需要 iptables 等高级网络功能内核支持的程序提供支持）
 - [x] Droidspaces 容器化支持（比传统 Docker/LXC 更轻量化，便于移植的完整 Linux 环境容器实现）
 - [x] 添加了对[Mountify](https://github.com/backslashxx/mountify),[NoMount](https://[https://github.com/maxsteeel/nomount])模块的支持
@@ -37,17 +38,17 @@
 ##### 
 ##### 
 ##### 
-## 鸣谢
+## 鸣谢（排名不分先后）
+- firelzrd：[firelzrd](https://github.com/firelzrd)
 - WildKernel的一加系列内核构建脚本：[WildKernels/OnePlus_KernelSU_SUSFS](https://github.com/WildKernels/OnePlus_KernelSU_SUSFS)
 - cctv18的欧加真米系列内核构建脚本：[oppo_oplus_realme_sm8850](https://github.com/cctv18/oppo_oplus_realme_sm8850)
-- ReSukiSU：[ReSukiSU/ReSukiSU](https://github.com/ReSukiSU/ReSukiSU)
+- BakaSU：[BakaSU/BakaSU](https://github.com/ReSukiSU/ReSukiSU)
 - SukiSU Ultra：[SukiSU-Ultra/SukiSU-Ultra](https://github.com/SukiSU-Ultra/SukiSU-Ultra)
 - susfs4ksu：[ShirkNeko/susfs4ksu](https://github.com/ShirkNeko/susfs4ksu)
 - pershoot维护的KernelSU Next仓库：[pershoot/KernelSU-Next](https://github.com/pershoot/KernelSU-Next)
 - 原版KernelSU: [tiann/KernelSU](https://github.com/tiann/KernelSU)
 - 内核防格基带保护模块：[vc-teahouse/Baseband-guard](https://github.com/vc-teahouse/Baseband-guard)
 - KSUN的多管理器补丁：[WildKernels/kernel_patches](https://github.com/WildKernels/kernel_patches)
-- firelzrd：[firelzrd](https://github.com/firelzrd)
 
 <!-- 这是一个访客统计，用来看看我的项目主页有多少人访问过 -->
 <div align="center">

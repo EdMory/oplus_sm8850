@@ -1830,10 +1830,10 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           cat << 'EOF' > release_notes.md
-          ### 📱  ${{ env.KSU_TYPENAME }} sm8850 通用内核 | 构建信息
+          ### 📱  ${{ env.KSU_TYPENAME }} SM8850 通用内核 | 构建信息
           - 内核版本号: ${{ env.FULL_VERSION }}
           - 编译时间: ${{ env.TIME_FORM }}
-          - 机型：骁龙8E Gen5通用 ${{ env.KERNEL_VERSION }}.${{ env.SUB_VERSION }} 内核（基于一加Ace6t ${{ env.KERNEL_VERSION }}.${{ env.SUB_VERSION }} 版官方源码）
+          - 机型：骁龙8E Gen5通用 ${{ env.KERNEL_VERSION }}.${{ env.SUB_VERSION }} 内核
           - KSU分支：${{ env.KSU_TYPENAME }}
           - SuSFS支持：${{ github.event.inputs.susfs_enable }}
           - NoMount支持：${{ github.event.inputs.nomount_enable }}

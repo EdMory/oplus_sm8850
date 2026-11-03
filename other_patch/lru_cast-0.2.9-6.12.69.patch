@@ -10267,12 +10267,12 @@ diff --git a/mm/vmscan.c b/mm/vmscan.c
  
  	/* Always discard instead of demoting to lower tier memory */
  	unsigned int no_demotion:1;
-@@ -215,7 +215,7 @@
+@@ -213,7 +218,7 @@
  /*
   * From 0 .. MAX_SWAPPINESS.  Higher means more swappy.
   */
 -int vm_swappiness = 60;
-+int vm_swappiness = 0;
++int vm_swappiness = 0;	/* CAST: disable classic swap-out (lru_cast.h) */
  
  #ifdef CONFIG_MEMCG
  
@@ -10440,7 +10440,8 @@ diff --git a/mm/vmscan.c b/mm/vmscan.c
  /**
   * folio_isolate_lru() - Try to isolate a folio from its LRU list.
   * @folio: Folio to isolate from its LRU list.
-@@ -1933,8 +1934,9 @@
+@@ -1933,9 +2053,10 @@
+  * the LRU list will go small and be scanned faster than necessary, leading to
   * unnecessary swapping, thrashing and OOM.
   */
 -static bool too_many_isolated(struct pglist_data *pgdat, int file,
@@ -10451,21 +10452,21 @@ diff --git a/mm/vmscan.c b/mm/vmscan.c
  	unsigned long inactive, isolated;
  	bool too_many;
  
-@@ -1951,18 +1958,24 @@
-+	}
+@@ -1953,6 +2074,13 @@
+ 		isolated = node_page_state(pgdat, NR_ISOLATED_ANON);
+ 	}
+ 
 +	/* CAST weighs the pages in flight by how many will come back (lru_cast.h) */
 +	if (lru_cast_on(lruvec)) {
 +		too_many = lru_cast_too_many_isolated(pgdat, file, isolated,
 +						      gfp_has_io_fs(sc->gfp_mask));
 +		goto out;
- 	}
- 
++	}
++
  	/*
  	 * GFP_NOIO/GFP_NOFS callers are allowed to isolate more pages, so they
  	 * won't get blocked by normal direct-reclaimers, forming a circular
- 	 * deadlock.
- 	 */
- 	if (gfp_has_io_fs(sc->gfp_mask))
+@@ -1962,7 +2090,7 @@
  		inactive >>= 3;
  
  	too_many = isolated > inactive;
@@ -10474,11 +10475,7 @@ diff --git a/mm/vmscan.c b/mm/vmscan.c
  	/* Wake up tasks throttled due to too_many_isolated. */
  	if (!too_many)
  		wake_throttle_isolated(pgdat);
- 
- 	return too_many;
- }
-@@ -2072,8 +2079,8 @@
- 	enum vm_event_item item;
+@@ -2071,7 +2199,7 @@
  	struct pglist_data *pgdat = lruvec_pgdat(lruvec);
  	bool stalled = false;
  
@@ -10487,7 +10484,7 @@ diff --git a/mm/vmscan.c b/mm/vmscan.c
  		if (stalled)
  			return 0;
  
-@@ -2088,8 +2208,12 @@
+@@ -2088,8 +2216,12 @@
  
  	spin_lock_irq(&lruvec->lru_lock);
  
@@ -10502,7 +10499,7 @@ diff --git a/mm/vmscan.c b/mm/vmscan.c
  
  	__mod_node_page_state(pgdat, NR_ISOLATED_ANON + file, nr_taken);
  	item = PGSCAN_KSWAPD + reclaimer_offset();
-@@ -2356,6 +2480,33 @@
+@@ -2356,6 +2488,33 @@
  	return nr_reclaimed;
  }
  
@@ -10536,7 +10533,7 @@ diff --git a/mm/vmscan.c b/mm/vmscan.c
  unsigned long reclaim_pages(struct list_head *folio_list)
  {
  	return __reclaim_pages(folio_list, NULL);
-@@ -2365,6 +2516,11 @@
+@@ -2365,6 +2524,11 @@
  static unsigned long shrink_list(enum lru_list lru, unsigned long nr_to_scan,
  				 struct lruvec *lruvec, struct scan_control *sc)
  {
@@ -10548,7 +10545,7 @@ diff --git a/mm/vmscan.c b/mm/vmscan.c
  	if (is_active_lru(lru)) {
  		if (sc->may_deactivate & (1 << is_file_lru(lru)))
  			shrink_active_list(nr_to_scan, lruvec, sc, lru);
-@@ -2551,6 +2707,13 @@
+@@ -2551,6 +2715,13 @@
  			anon >> sc->priority;
  	}
  
@@ -10562,7 +10559,7 @@ diff --git a/mm/vmscan.c b/mm/vmscan.c
  	customize_sc_file_is_tiny(sc);
  }
  
-@@ -2574,6 +2737,43 @@
+@@ -2574,6 +2745,43 @@
  	unsigned long ap, fp;
  	enum lru_list lru;
  	bool balance_anon_file_reclaim = false;
@@ -10606,7 +10603,7 @@ diff --git a/mm/vmscan.c b/mm/vmscan.c
  
  	/* If we have no swap space, do not bother scanning anon folios. */
  	if (!sc->may_swap || !can_reclaim_anon_pages(memcg, pgdat->node_id, sc)) {
-@@ -2734,6 +2934,11 @@
+@@ -2734,6 +2942,11 @@
  		if (!scan && !mem_cgroup_online(memcg))
  			scan = min(lruvec_size, SWAP_CLUSTER_MAX);
  
@@ -10618,7 +10615,7 @@ diff --git a/mm/vmscan.c b/mm/vmscan.c
  		switch (scan_balance) {
  		case SCAN_EQUAL:
  			/* Scan lists relative to size */
-@@ -2783,7 +2988,8 @@
+@@ -2783,7 +2996,8 @@
  
  #ifdef CONFIG_LRU_GEN
  
@@ -10628,7 +10625,7 @@ diff --git a/mm/vmscan.c b/mm/vmscan.c
  DEFINE_STATIC_KEY_ARRAY_TRUE(lru_gen_caps, NR_LRU_GEN_CAPS);
  #define get_cap(cap)	static_branch_likely(&lru_gen_caps[cap])
  #else
-@@ -5312,12 +5518,15 @@
+@@ -5312,12 +5526,15 @@
  	return true;
  }
  
@@ -10646,7 +10643,7 @@ diff --git a/mm/vmscan.c b/mm/vmscan.c
  	cgroup_lock();
  	cpus_read_lock();
  	get_online_mems();
-@@ -5325,6 +5534,11 @@
+@@ -5325,6 +5542,11 @@
  
  	if (enabled == lru_gen_enabled())
  		goto unlock;
@@ -10658,7 +10655,7 @@ diff --git a/mm/vmscan.c b/mm/vmscan.c
  
  	if (enabled)
  		static_branch_enable_cpuslocked(&lru_gen_caps[LRU_GEN_CORE]);
-@@ -5361,6 +5575,8 @@
+@@ -5361,6 +5583,8 @@
  	put_online_mems();
  	cpus_read_unlock();
  	cgroup_unlock();
@@ -10667,7 +10664,7 @@ diff --git a/mm/vmscan.c b/mm/vmscan.c
  }
  
  /******************************************************************************
-@@ -5421,9 +5637,12 @@
+@@ -5421,9 +5645,12 @@
  	for (i = 0; i < NR_LRU_GEN_CAPS; i++) {
  		bool enabled = caps & BIT(i);
  
@@ -10683,7 +10680,7 @@ diff --git a/mm/vmscan.c b/mm/vmscan.c
  			static_branch_enable(&lru_gen_caps[i]);
  		else
  			static_branch_disable(&lru_gen_caps[i]);
-@@ -5885,6 +6104,16 @@
+@@ -5885,6 +6112,16 @@
  	debugfs_create_file("lru_gen", 0644, NULL, NULL, &lru_gen_rw_fops);
  	debugfs_create_file("lru_gen_full", 0444, NULL, NULL, &lru_gen_ro_fops);
  
@@ -10700,7 +10697,7 @@ diff --git a/mm/vmscan.c b/mm/vmscan.c
  	return 0;
  };
  late_initcall(init_lru_gen);
-@@ -5945,13 +6174,19 @@
+@@ -5945,13 +6182,19 @@
  				sc->priority == DEF_PRIORITY);
  
  	blk_start_plug(&plug);
@@ -10721,7 +10718,7 @@ diff --git a/mm/vmscan.c b/mm/vmscan.c
  		unsigned long nr_anon, nr_file, percentage;
  		unsigned long nr_scanned;
  
-@@ -6029,9 +6264,10 @@
+@@ -6029,9 +6272,10 @@
  
  	/*
  	 * Even if we did not try to evict anon pages at all, we want to
@@ -10735,7 +10732,7 @@ diff --git a/mm/vmscan.c b/mm/vmscan.c
  	    inactive_is_low(lruvec, LRU_INACTIVE_ANON))
  		shrink_active_list(SWAP_CLUSTER_MAX, lruvec,
  				   sc, LRU_ACTIVE_ANON);
-@@ -6922,6 +7158,10 @@
+@@ -6922,6 +7166,10 @@
  		return;
  	}
  
@@ -10746,7 +10743,7 @@ diff --git a/mm/vmscan.c b/mm/vmscan.c
  	if (!can_age_anon_pages(pgdat, sc))
  		return;
  
-@@ -7671,6 +7911,9 @@
+@@ -7671,6 +7919,9 @@
  void __meminit kswapd_run(int nid)
  {
  	pg_data_t *pgdat = NODE_DATA(nid);
@@ -10756,7 +10753,7 @@ diff --git a/mm/vmscan.c b/mm/vmscan.c
  
  	pgdat_kswapd_lock(pgdat);
  	if (!pgdat->kswapd) {
-@@ -7682,7 +7925,32 @@
+@@ -7682,7 +7933,32 @@
  			BUG_ON(system_state < SYSTEM_RUNNING);
  			pgdat->kswapd = NULL;
  		}
@@ -10790,7 +10787,7 @@ diff --git a/mm/vmscan.c b/mm/vmscan.c
  	pgdat_kswapd_unlock(pgdat);
  }
  
-@@ -7701,6 +7969,13 @@
+@@ -7701,6 +7977,13 @@
  		kthread_stop(kswapd);
  		pgdat->kswapd = NULL;
  	}

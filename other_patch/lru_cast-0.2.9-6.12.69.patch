@@ -557,43 +557,39 @@ diff --git a/include/linux/mm_inline.h b/include/linux/mm_inline.h
  static inline bool lru_gen_enabled(void)
  {
  	DECLARE_STATIC_KEY_TRUE(lru_gen_caps[NR_LRU_GEN_CAPS]);
-@@ -352,15 +354,18 @@
+@@ -352,15 +354,17 @@
  static __always_inline
  void lruvec_add_folio(struct lruvec *lruvec, struct folio *folio)
  {
--	enum lru_list lru = folio_lru_list(folio);
+ 	enum lru_list lru = folio_lru_list(folio);
  	bool skip = false;
  
  	trace_android_vh_lruvec_add_folio(lruvec, folio, lru, false, &skip);
  	if (skip)
  		return;
-+	enum lru_list lru;
  
  	if (lru_gen_add_folio(lruvec, folio, false))
  		return;
 +	if (lru_cast_add_folio(lruvec, folio, false))
 +		return;
-+	lru = folio_lru_list(folio);
  
  	update_lru_size(lruvec, lru, folio_zonenum(folio),
  			folio_nr_pages(folio));
-@@ -371,15 +376,18 @@
+@@ -371,15 +375,17 @@
  static __always_inline
  void lruvec_add_folio_tail(struct lruvec *lruvec, struct folio *folio)
  {
--	enum lru_list lru = folio_lru_list(folio);
+ 	enum lru_list lru = folio_lru_list(folio);
  	bool skip = false;
  
  	trace_android_vh_lruvec_add_folio(lruvec, folio, lru, true, &skip);
  	if (skip)
  		return;
-+	enum lru_list lru;
  
  	if (lru_gen_add_folio(lruvec, folio, true))
  		return;
 +	if (lru_cast_add_folio(lruvec, folio, true))
 +		return;
-+	lru = folio_lru_list(folio);
  
  	update_lru_size(lruvec, lru, folio_zonenum(folio),
  			folio_nr_pages(folio));
@@ -847,7 +843,7 @@ diff --git a/include/trace/events/mmflags.h b/include/trace/events/mmflags.h
  IF_HAVE_PG_IDLE(young)							\
  IF_HAVE_PG_ARCH_2(arch_2)						\
  IF_HAVE_PG_ARCH_3(arch_3)						\
-+IF_HAVE_PG_REKEY(rekey)
++IF_HAVE_PG_REKEY(rekey)							\
  IF_HAVE_PG_OEM_RESERVED(oem_reserved_1)					\
  IF_HAVE_PG_OEM_RESERVED(oem_reserved_2)					\
  IF_HAVE_PG_OEM_RESERVED(oem_reserved_3)					\

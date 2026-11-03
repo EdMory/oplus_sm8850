@@ -867,7 +867,7 @@ diff --git a/kernel/sched/core.c b/kernel/sched/core.c
  
  	psi_account_irqtime(rq, donor, NULL);
 +	/* a task that runs on without switching still sets young bits */
-+	lru_cast_use_mm(curr->mm);
++	lru_cast_use_mm(donor->mm);
  
  	update_rq_clock(rq);
  	trace_android_rvh_tick_entry(rq);

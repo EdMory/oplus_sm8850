@@ -1,0 +1,311 @@
+diff --git a/include/linux/lru_cast_vendor.h b/include/linux/lru_cast_vendor.h
+new file mode 100644
+--- /dev/null
++++ b/include/linux/lru_cast_vendor.h
+@@ -0,0 +1,48 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/*
++ * CAST -- the vendor modules the swap path is not shared with
++ * (mm/lru_cast/core/vendor.c).
++ *
++ * The loader asks here before a module is laid out: a tree that brings its
++ * own zram stack is refused, and what is refused costs nothing since the
++ * GKI zram and zsmalloc take the swap path. A tree that gets one in anyway
++ * is reported, and kcompressd then writes what it is given itself.
++ */
++#ifndef _LINUX_LRU_CAST_VENDOR_H
++#define _LINUX_LRU_CAST_VENDOR_H
++
++#include <linux/types.h>
++
++#ifdef CONFIG_LRU_CAST_VENDOR_GUARD
++
++/* the loader, before layout: true for the modules that are kept out */
++bool lru_cast_vendor_module_blocked(const char *name);
++/* the loader, once linked in: watch what was not kept out */
++void lru_cast_vendor_module_loaded(const char *name);
++
++/* a vendor zram stack is on the swap path: kcompressd stays synchronous */
++bool lru_cast_vendor_swap_mixed(void);
++
++/* /sys/kernel/mm/lru_cast/vendor: -1 as found, 0 as if absent, 1 synchronous */
++int lru_cast_vendor_guard_set(int value);
++int lru_cast_vendor_guard_show(char *buf);
++
++#else
++
++static inline bool lru_cast_vendor_module_blocked(const char *name)
++{
++	return false;
++}
++
++static inline void lru_cast_vendor_module_loaded(const char *name)
++{
++}
++
++static inline bool lru_cast_vendor_swap_mixed(void)
++{
++	return false;
++}
++
++#endif /* CONFIG_LRU_CAST_VENDOR_GUARD */
++
++#endif /* _LINUX_LRU_CAST_VENDOR_H */
+diff --git a/mm/lru_cast/core/vendor.c b/mm/lru_cast/core/vendor.c
+new file mode 100644
+--- /dev/null
++++ b/mm/lru_cast/core/vendor.c
+@@ -0,0 +1,117 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * CAST -- the vendor modules the swap path is not shared with.
++ *
++ * An OnePlus/OPPO tree carries its own zram stack beside the GKI one:
++ * oplus_bsp_hybridswap_zram, oplus_bsp_zram_opt and oplus_bsp_zsmalloc.
++ * They take a folio handed to writeback as theirs alone, while CAST's
++ * kcompressd hands kswapd's folio to a thread and gets to it later: two
++ * owners for one folio, and the vendor side's LRU and accounting bookkeeping
++ * drifts, which is how the handoff came out as a boot that never finishes.
++ *
++ * So the loader refuses those three before a byte is laid out --
++ * early_mod_check() in kernel/module/main.c. With them gone the swap path is
++ * the GKI zram and zsmalloc, and kcompressd runs. oplus_bsp_fg_protect and
++ * oplus_exit_mm_optimize are left alone here; the T2 increment takes them
++ * too, once swap and OOM have been seen to work without them.
++ *
++ * A tree that keeps the vendor stack under another name is not refused, and
++ * the loader cannot refuse zram on sight: the GKI module has that name too.
++ * What is loaded is reported instead, and kcompressd_active() in
++ * include/linux/lru_cast.h then answers no, which is the same synchronous
++ * write v0.2.9 does without this file.
++ *
++ * /sys/kernel/mm/lru_cast/vendor: -1 what the loader found, 0 as if the
++ * vendor stack were absent, 1 always synchronous.
++ */
++#include <linux/errno.h>
++#include <linux/kernel.h>
++#include <linux/lru_cast_vendor.h>
++#include <linux/string.h>
++#include <linux/sysfs.h>
++
++#define VENDOR_NAME_MAX	48
++
++/* refused outright: names no GKI module has */
++static const char *const vendor_keep_out[] = {
++	"oplus_bsp_hybridswap_zram",
++	"oplus_bsp_zram_opt",
++	"oplus_bsp_zsmalloc",
++};
++
++/* watched when loaded anyway: a vendor zram stack under any of its names */
++static const char *const vendor_swap_marks[] = {
++	"zram",
++	"zsmalloc",
++	"hybridswap",
++};
++
++static bool vendor_mixed;
++static int vendor_override = -1;
++static char vendor_mixed_name[VENDOR_NAME_MAX];
++
++static bool vendor_named(const char *name, const char *const *set, int n)
++{
++	int i;
++
++	for (i = 0; i < n; i++)
++		if (!strcmp(name, set[i]))
++			return true;
++	return false;
++}
++
++/* oplus, and about the swap path: what the GKI modules are not */
++static bool vendor_swap_like(const char *name)
++{
++	int i;
++
++	if (strncmp(name, "oplus", 5))
++		return false;
++	for (i = 0; i < ARRAY_SIZE(vendor_swap_marks); i++)
++		if (strstr(name, vendor_swap_marks[i]))
++			return true;
++	return false;
++}
++
++bool lru_cast_vendor_module_blocked(const char *name)
++{
++	if (!name || !vendor_named(name, vendor_keep_out,
++				   ARRAY_SIZE(vendor_keep_out)))
++		return false;
++
++	pr_info("lru_cast: %s stays out, the swap path is CAST's\n", name);
++	return true;
++}
++
++void lru_cast_vendor_module_loaded(const char *name)
++{
++	if (!name || !vendor_swap_like(name) || READ_ONCE(vendor_mixed))
++		return;
++
++	strscpy(vendor_mixed_name, name, sizeof(vendor_mixed_name));
++	WRITE_ONCE(vendor_mixed, true);
++	pr_warn("lru_cast: vendor %s is loaded, kcompressd stays synchronous\n",
++		name);
++}
++
++bool lru_cast_vendor_swap_mixed(void)
++{
++	int override = READ_ONCE(vendor_override);
++
++	return override < 0 ? READ_ONCE(vendor_mixed) : override;
++}
++
++int lru_cast_vendor_guard_show(char *buf)
++{
++	return sysfs_emit(buf, "%d %s\n", lru_cast_vendor_swap_mixed(),
++			  vendor_mixed_name[0] ? vendor_mixed_name : "-");
++}
++
++int lru_cast_vendor_guard_set(int value)
++{
++	if (value < -1 || value > 1)
++		return -EINVAL;
++
++	WRITE_ONCE(vendor_override, value);
++	return 0;
++}
+diff --git a/include/linux/lru_cast.h b/include/linux/lru_cast.h
+--- a/include/linux/lru_cast.h
++++ b/include/linux/lru_cast.h
+@@ -12,6 +12,7 @@
+ #include <linux/xarray.h>
+ #include <linux/sched.h>
+ #include <linux/wait.h>
++#include <linux/lru_cast_vendor.h>
+ 
+ struct folio;
+ struct page;
+@@ -67,6 +68,12 @@
+ 
+ static inline bool kcompressd_active(void)
+ {
++	/*
++	 * A vendor zram stack is on the swap path and would be handed a
++	 * folio it does not own: write it here, as it comes.
++	 */
++	if (lru_cast_vendor_swap_mixed())
++		return false;
+ 	if (!static_branch_likely(&kcompressd_enabled_key))
+ 		return false;
+ 	if (static_branch_unlikely(&kcompressd_force_key))
+diff --git a/mm/lru_cast/Makefile b/mm/lru_cast/Makefile
+--- a/mm/lru_cast/Makefile
++++ b/mm/lru_cast/Makefile
+@@ -18,6 +18,7 @@
+ ccflags-y += -I$(src) -I$(srctree)/mm
+ 
+ obj-y	+= core/store.o core/state.o core/clock.o core/nia_state.o core/key.o core/prefetch.o
++obj-$(CONFIG_LRU_CAST_VENDOR_GUARD) += core/vendor.o
+ obj-y	+= policy/params.o policy/ring.o policy/reclaim.o policy/ghost.o policy/balance.o
+ obj-y	+= walk/walk.o walk/bloom.o walk/lookaround.o
+ ifdef CONFIG_X86_64
+diff --git a/mm/lru_cast/sysfs.c b/mm/lru_cast/sysfs.c
+--- a/mm/lru_cast/sysfs.c
++++ b/mm/lru_cast/sysfs.c
+@@ -244,6 +244,25 @@
+ static struct kobj_attribute kcompressd_attr = __ATTR_RW(kcompressd);
+ #endif
+ 
++#ifdef CONFIG_LRU_CAST_VENDOR_GUARD
++static ssize_t vendor_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
++{
++	return lru_cast_vendor_guard_show(buf);
++}
++
++static ssize_t vendor_store(struct kobject *kobj, struct kobj_attribute *attr,
++			    const char *buf, size_t len)
++{
++	int v;
++
++	if (kstrtoint(buf, 10, &v) || lru_cast_vendor_guard_set(v))
++		return -EINVAL;
++	return len;
++}
++
++static struct kobj_attribute vendor_attr = __ATTR_RW(vendor);
++#endif
++
+ static struct kobj_attribute sweep_attr = __ATTR_RO(sweep);
+ static struct kobj_attribute version_attr = __ATTR_RO(version);
+ static struct kobj_attribute enabled_attr = __ATTR_RW(enabled);
+@@ -279,6 +298,9 @@
+ #ifdef CONFIG_SWAP
+ 	&kcompressd_attr.attr,
+ #endif
++#ifdef CONFIG_LRU_CAST_VENDOR_GUARD
++	&vendor_attr.attr,
++#endif
+ 	NULL,
+ };
+ 
+diff --git a/mm/Kconfig b/mm/Kconfig
+--- a/mm/Kconfig
++++ b/mm/Kconfig
+@@ -1397,3 +1397,28 @@
+ 	  multi-gen LRU is as LRU_GEN_ENABLED says. At run time, one is
+ 	  switched off before the other is switched on:
+ 	  /sys/kernel/mm/lru_cast/enabled, /sys/kernel/mm/lru_gen/enabled.
++
++config LRU_CAST_VENDOR_GUARD
++	bool "CAST: keep the vendor zram stack out"
++	depends on LRU_CAST
++	default y
++	help
++	  An OnePlus/OPPO tree ships its own zram stack beside the GKI one:
++	  oplus_bsp_hybridswap_zram, oplus_bsp_zram_opt and
++	  oplus_bsp_zsmalloc. They take a folio handed to writeback as theirs
++	  alone, while CAST's kcompressd hands kswapd's folio to a thread and
++	  gets to it later, so the two disagree about who owns it and the boot
++	  after the handoff never finishes.
++
++	  With this on the module loader refuses those three before a byte is
++	  laid out: the swap path stays with the GKI zram and zsmalloc, and
++	  kcompressd runs. A tree that keeps the vendor stack under another
++	  name is not refused but reported, and kcompressd writes
++	  synchronously there, as it does with this off.
++
++	  oplus_bsp_fg_protect and oplus_exit_mm_optimize are not named here;
++	  the T2 increment adds them once swap and OOM have been seen to work
++	  without them.
++
++	  /sys/kernel/mm/lru_cast/vendor settles it by hand: -1 what the
++	  loader found, 0 run kcompressd, 1 write synchronously.
+diff --git a/kernel/module/main.c b/kernel/module/main.c
+--- a/kernel/module/main.c
++++ b/kernel/module/main.c
+@@ -56,6 +56,7 @@
+ #include <linux/dynamic_debug.h>
+ #include <linux/audit.h>
+ #include <linux/cfi.h>
++#include <linux/lru_cast_vendor.h>
+ #include <linux/codetag.h>
+ #include <linux/debugfs.h>
+ #include <linux/execmem.h>
+@@ -3287,6 +3288,10 @@
+ 		return -EPERM;
+ 	}
+ 
++	/* CAST: a swap path of its own, a folio handed on is not shared */
++	if (lru_cast_vendor_module_blocked(info->name))
++		return -ENOENT;
++
+ 	err = rewrite_section_headers(info, flags);
+ 	if (err)
+ 		return err;
+@@ -3463,6 +3468,7 @@
+ 	codetag_load_module(mod);
+ 
+ 	/* Done! */
++	lru_cast_vendor_module_loaded(mod->name);
+ 	trace_module_load(mod);
+ 
+ 	return do_init_module(mod);

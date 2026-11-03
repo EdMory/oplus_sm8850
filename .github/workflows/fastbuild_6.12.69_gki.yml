@@ -560,13 +560,6 @@ jobs:
           echo "正在下载并应用 lru_cast 补丁..."
           cd kernel_workspace/common
           wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/lru_cast-0.2.9-6.12.69.patch
-          # 严格零 fuzz 预演, 任一 Hunk FAILED / with fuzz 立即中止
-          patch -p1 --dry-run -F 0 < lru_cast-0.2.9-6.12.69.patch > /tmp/lrucast_dryrun.log 2>&1
-          cat /tmp/lrucast_dryrun.log
-          if grep -qE 'Hunk #[0-9]+ FAILED|with fuzz|[0-9]+ out of [0-9]+ hunk' /tmp/lrucast_dryrun.log; then
-            echo "::error::lru_cast 补丁 dry-run 出现 FAILED/fuzz, 中止构建"
-            exit 1
-          fi
           patch -p1 --no-backup-if-mismatch -F 0 < lru_cast-0.2.9-6.12.69.patch
           echo 'CONFIG_LRU_CAST=y' >> arch/arm64/configs/gki_defconfig
           echo "lru_cast 补丁应用成功"      

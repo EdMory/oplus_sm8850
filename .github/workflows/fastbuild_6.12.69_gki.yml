@@ -560,7 +560,9 @@ jobs:
           echo "正在下载并应用 lru_cast 补丁..."
           cd kernel_workspace/common
           wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/lru_cast-0.2.9-6.12.69.patch
+          wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/vendor-guard.patch
           patch -p1 --no-backup-if-mismatch -F 0 < lru_cast-0.2.9-6.12.69.patch
+          patch -p1 --no-backup-if-mismatch -F 0 < vendor-guard.patch
           echo 'CONFIG_LRU_CAST=y' >> arch/arm64/configs/gki_defconfig
           echo "lru_cast 补丁应用成功"      
           

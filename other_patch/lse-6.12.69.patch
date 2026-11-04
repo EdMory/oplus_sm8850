@@ -1603,10 +1603,10 @@ index 0000000..6cb3085
 +}
 diff --git a/kernel/sched/lse/lse_sysctl.c b/kernel/sched/lse/lse_sysctl.c
 new file mode 100644
-index 0000000..e5c9cc0
+index 0000000..5c29439
 --- /dev/null
 +++ b/kernel/sched/lse/lse_sysctl.c
-@@ -0,0 +1,103 @@
+@@ -0,0 +1,107 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * Copyright (C) 2025, LunarKernel Project. All rights reserved.
@@ -1631,9 +1631,15 @@ index 0000000..e5c9cc0
 +static int window_stats_policy_minval = WINDOW_STATS_RECENT;
 +static int window_stats_policy_maxval = WINDOW_STATS_INVALID_POLICY;
 +
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0)
++static int lse_proc_sched_ravg_window_update(const struct ctl_table *table,
++				int write, void *buffer, size_t *lenp,
++				loff_t *ppos)
++#else
 +static int lse_proc_sched_ravg_window_update(struct ctl_table *table,
 +				int write, void __user *buffer, size_t *lenp,
 +				loff_t *ppos)
++#endif
 +{
 +	int ret = -EPERM;
 +	int val;
@@ -1666,11 +1672,9 @@ index 0000000..e5c9cc0
 +        .data         = &slim_walt_ctrl,
 +        .maxlen       = sizeof(int),
 +        .mode         = 0644,
-+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0)
-+        .proc_handler = proc_dobool,
-+#else
-+        .proc_handler = proc_dointvec,
-+#endif
++        .extra1       = SYSCTL_ZERO,
++        .extra2       = SYSCTL_ONE,
++        .proc_handler = proc_dointvec_minmax,
 +    },
 +    {
 +        .procname     = "slim_walt_policy",

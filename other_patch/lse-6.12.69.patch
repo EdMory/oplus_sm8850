@@ -1,0 +1,2571 @@
+diff --git a/kernel/sched/Makefile b/kernel/sched/Makefile
+index 012d8c7..b2bb1d4 100644
+--- a/kernel/sched/Makefile
++++ b/kernel/sched/Makefile
+@@ -34,3 +34,6 @@ obj-y += build_policy.o
+ obj-y += build_utility.o
+ obj-$(CONFIG_ANDROID_VENDOR_HOOKS) += vendor_hooks.o
+ obj-$(CONFIG_SCHED_RT_INVARIANT_TEST) += test_ksched_football.o
++
++# LunarKernel Scheduling Extention (LSE)
++obj-$(CONFIG_SMP) += lse/
+diff --git a/kernel/sched/lse/Makefile b/kernel/sched/lse/Makefile
+new file mode 100644
+index 0000000..a8e932c
+--- /dev/null
++++ b/kernel/sched/lse/Makefile
+@@ -0,0 +1,14 @@
++# SPDX-License-Identifier: GPL-2.0-only
++#
++# LunarKernel Scheduling Extention (LSE)
++# WALT style per-task windowed util tracking + frequency governor.
++#
++obj-y				+= lunar_bsp_ext_sched.o
++
++lunar_bsp_ext_sched-y		:= cpufreq_lse.o
++lunar_bsp_ext_sched-y		+= lse_cfs.o
++lunar_bsp_ext_sched-y		+= lse_main.o
++lunar_bsp_ext_sched-y		+= lse_sched_cluster.o
++lunar_bsp_ext_sched-y		+= lse_sysctl.o
++lunar_bsp_ext_sched-y		+= lse_task_struct_ext.o
++lunar_bsp_ext_sched-y		+= lse_util_track.o
+diff --git a/kernel/sched/lse/cpufreq_lse.c b/kernel/sched/lse/cpufreq_lse.c
+new file mode 100644
+index 0000000..9c307d4
+--- /dev/null
++++ b/kernel/sched/lse/cpufreq_lse.c
+@@ -0,0 +1,764 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Copyright (C) 2025, LunarKernel Project. All rights reserved.
++ *
++ * This code is part of LunarKernel.
++ * cpufreq governor.
++ *
++ * File name: cpufreq_lse.c
++ * Author: Cloud_Yun <1770669041@qq.com>
++ * Version: v251003_Dev
++ * Date: 2025/10/3 Friday
++ */
++
++#include <linux/kmemleak.h>
++#include <linux/cpufreq.h>
++#include <linux/sched.h>
++#include <linux/sched/cputime.h>
++#include <uapi/linux/sched/types.h>
++#include <trace/hooks/sched.h>
++
++#include "lse_main.h"
++
++unsigned int sysctl_lse_gov_debug;
++static int cpufreq_gov_debug(void) {return sysctl_lse_gov_debug;}
++
++/*debug level for lse_gov*/
++#define DEBUG_SYSTRACE (1 << 0)
++#define DEBUG_FTRACE   (1 << 1)
++#define DEBUG_KMSG     (1 << 2)
++
++#define lse_gov_debug(fmt, ...) \
++	pr_info("[lse_gov][%s] "fmt, __func__, ##__VA_ARGS__)
++
++#define lse_gov_err(fmt, ...) \
++	pr_err("[lse_gov][%s] "fmt, __func__, ##__VA_ARGS__)
++
++#define gov_trace_printk(fmt, args...)	\
++do {										\
++		trace_printk("[lse_gov] "fmt, args);	\
++} while (0)
++
++#define DEFAULT_TARGET_LOAD 90
++
++static int gov_flag[MAX_LSE_CLUSTERS] = {0};
++
++struct lse_gov_tunables {
++	struct gov_attr_set		attr_set;
++	unsigned int			target_loads;
++	int				soft_freq_max;
++	int				soft_freq_min;
++	bool				apply_freq_immediately;
++};
++
++struct lse_gov_policy {
++	struct cpufreq_policy	*policy;
++
++	struct lse_gov_tunables	*tunables;
++	struct list_head	tunables_hook;
++
++	raw_spinlock_t		update_lock;	/* For shared policies */
++	unsigned int		next_freq;
++	unsigned int		freq_cached;
++	/* The next fields are only needed if fast switch cannot be used: */
++	struct kthread_work	work;
++	struct mutex		work_lock;
++	struct kthread_worker	worker;
++	struct task_struct	*thread;
++	bool			work_in_progress;
++	unsigned int	target_load;
++    bool            backup_efficiencies_available;
++};
++
++struct lse_gov_cpu {
++	struct update_util_data update_util;
++	unsigned int		reasons;
++	struct lse_gov_policy	*lg_policy;
++	unsigned int		cpu;
++
++	unsigned long		util;
++	unsigned int		flags;
++};
++
++static DEFINE_PER_CPU(struct lse_gov_cpu, lse_gov_cpu);
++static DEFINE_PER_CPU(struct lse_gov_tunables *, cached_tunables);
++static DEFINE_MUTEX(global_tunables_lock);
++static struct lse_gov_tunables *global_tunables;
++
++static void lse_gov_work(struct kthread_work *work)
++{
++	struct lse_gov_policy *lg_policy = container_of(work, struct lse_gov_policy, work);
++	unsigned int freq;
++	unsigned long flags;
++
++	/*
++	 * Hold lg_policy->update_lock shortly to handle the case where:
++	 * incase lg_policy->next_freq is read here, and then updated by
++	 * lse_gov_deferred_update() just before work_in_progress is set to false
++	 * here, we may miss queueing the new update.
++	 *
++	 * Note: If a work was queued after the update_lock is released,
++	 * lse_gov_work() will just be called again by kthread_work code; and the
++	 * request will be proceed before the lse_gov thread sleeps.
++	 */
++	raw_spin_lock_irqsave(&lg_policy->update_lock, flags);
++	freq = lg_policy->next_freq;
++	raw_spin_unlock_irqrestore(&lg_policy->update_lock, flags);
++
++	mutex_lock(&lg_policy->work_lock);
++	__cpufreq_driver_target(lg_policy->policy, freq, CPUFREQ_RELATION_L);
++	mutex_unlock(&lg_policy->work_lock);
++}
++
++/* next_freq = (max_freq * scale_time* 100)/(window_size * TL * arch_scale_cpu_capacity) */
++static unsigned int get_next_freq(struct lse_gov_policy *lg_policy, u64 prev_runnable_sum)
++{
++	struct cpufreq_policy *policy = lg_policy->policy;
++	unsigned int freq = policy->cpuinfo.max_freq, next_f;
++	unsigned int window_size_tl, cluster_tl;
++	u64 divisor;
++	int cpu = cpumask_first(policy->cpus);
++	cluster_tl = DEFAULT_TARGET_LOAD;
++	if (lg_policy->tunables) {
++		cluster_tl = lg_policy->tunables->target_loads;
++	}
++
++	window_size_tl = mult_frac(lse_sched_ravg_window, cluster_tl, 100);
++	divisor = DIV64_U64_ROUNDUP(window_size_tl * arch_scale_cpu_capacity(cpu), freq);
++	next_f = DIV64_U64_ROUNDUP(prev_runnable_sum << SCHED_CAPACITY_SHIFT, divisor);
++
++	if (cpufreq_gov_debug() & DEBUG_FTRACE)
++		gov_trace_printk("cluster[%d] max_freq[%d] win_tl[%d] cpu_cap[%lu] divisor[%llu] next_f[%d]\n",
++			cpu, freq, window_size_tl, arch_scale_cpu_capacity(cpu), divisor, next_f);
++	return next_f;
++}
++
++static unsigned int soft_freq_clamp(struct lse_gov_policy *lg_policy, unsigned int target_freq)
++{
++	struct cpufreq_policy *policy = lg_policy->policy;
++	int soft_freq_max = lg_policy->tunables->soft_freq_max;
++	int soft_freq_min = lg_policy->tunables->soft_freq_min;
++
++	if (soft_freq_min >= 0 && soft_freq_min > target_freq) {
++		target_freq = soft_freq_min;
++	}
++	if (soft_freq_max >= 0 && soft_freq_max < target_freq) {
++		target_freq = soft_freq_max;
++	}
++
++	if (cpufreq_gov_debug() & DEBUG_FTRACE)
++		gov_trace_printk("cluster[%d] max_freq[%d] min_freq[%d] freq[%d]\n",
++			policy->cpu, soft_freq_max, soft_freq_min, target_freq);
++
++	return target_freq;
++}
++
++void lse_gov_update_cpufreq(struct cpufreq_policy *policy, u64 prev_runnable_sum)
++{
++	unsigned int next_f;
++	struct lse_gov_policy *lg_policy = policy->governor_data;
++	unsigned long irq_flags;
++
++	raw_spin_lock_irqsave(&lg_policy->update_lock, irq_flags);
++
++	next_f = get_next_freq(lg_policy, prev_runnable_sum);
++	next_f = soft_freq_clamp(lg_policy, next_f);
++	next_f = cpufreq_driver_resolve_freq(policy, next_f);
++	lg_policy->freq_cached = lg_policy->next_freq ? lg_policy->next_freq : next_f;
++	if (lg_policy->next_freq == next_f)
++		goto unlock;
++	lg_policy->next_freq = next_f;
++	if (cpufreq_gov_debug() & DEBUG_FTRACE)
++		gov_trace_printk("cluster[%d] freq[%d] fast[%d]\n", policy->cpu, next_f, policy->fast_switch_enabled);
++	if (policy->fast_switch_enabled)
++		cpufreq_driver_fast_switch(policy, next_f);
++	else
++		kthread_queue_work(&lg_policy->worker, &lg_policy->work);
++
++unlock:
++	raw_spin_unlock_irqrestore(&lg_policy->update_lock, irq_flags);
++}
++
++void lse_gov_update_soft_limit_cpufreq(struct lse_gov_policy *lg_policy)
++{
++	unsigned int next_f;
++	struct cpufreq_policy *policy = lg_policy->policy;
++	unsigned long irq_flags;
++
++	raw_spin_lock_irqsave(&lg_policy->update_lock, irq_flags);
++
++	next_f = soft_freq_clamp(lg_policy, lg_policy->next_freq);
++	next_f = cpufreq_driver_resolve_freq(policy, next_f);
++	if (lg_policy->next_freq == next_f)
++		goto unlock;
++	lg_policy->next_freq = next_f;
++	if (cpufreq_gov_debug() & DEBUG_FTRACE)
++		gov_trace_printk("cluster[%d] freq[%d] fast[%d]\n",
++			policy->cpu, next_f, policy->fast_switch_enabled);
++	if (policy->fast_switch_enabled)
++		cpufreq_driver_fast_switch(policy, next_f);
++	else
++		kthread_queue_work(&lg_policy->worker, &lg_policy->work);
++
++unlock:
++	raw_spin_unlock_irqrestore(&lg_policy->update_lock, irq_flags);
++}
++
++/************************** sysfs interface ************************/
++static inline struct lse_gov_tunables *to_lse_gov_tunables(struct gov_attr_set *attr_set)
++{
++	return container_of(attr_set, struct lse_gov_tunables, attr_set);
++}
++
++static DEFINE_MUTEX(min_rate_lock);
++
++
++static ssize_t target_loads_show(struct gov_attr_set *attr_set, char *buf)
++{
++	struct lse_gov_tunables *tunables = to_lse_gov_tunables(attr_set);
++	return sprintf(buf, "%d\n", tunables->target_loads);
++}
++
++static ssize_t target_loads_store(struct gov_attr_set *attr_set, const char *buf,
++					size_t count)
++{
++	struct lse_gov_tunables *tunables = to_lse_gov_tunables(attr_set);
++	unsigned int new_target_loads = DEFAULT_TARGET_LOAD;
++
++	if (kstrtouint(buf, 10, &new_target_loads))
++		return -EINVAL;
++
++	tunables->target_loads = new_target_loads;
++	return count;
++}
++
++static ssize_t soft_freq_max_show(struct gov_attr_set *attr_set, char *buf)
++{
++	struct lse_gov_tunables *tunables = to_lse_gov_tunables(attr_set);
++	int soft_freq_max = tunables->soft_freq_max;
++
++	if (soft_freq_max < 0) {
++		return sprintf(buf, "max\n");
++	} else {
++		return sprintf(buf, "%d\n", soft_freq_max);
++	}
++}
++
++static ssize_t soft_freq_max_store(struct gov_attr_set *attr_set, const char *buf, size_t count)
++{
++	struct lse_gov_tunables *tunables = to_lse_gov_tunables(attr_set);
++	struct lse_gov_policy *lg_policy = list_first_entry(&attr_set->policy_list, struct lse_gov_policy, tunables_hook);
++	int new_soft_freq_max = -1;
++
++	if (kstrtoint(buf, 10, &new_soft_freq_max))
++		return -EINVAL;
++
++	if (tunables->soft_freq_max == new_soft_freq_max) {
++		return count;
++	}
++
++	tunables->soft_freq_max = new_soft_freq_max;
++	if (tunables->apply_freq_immediately) {
++		lse_gov_update_soft_limit_cpufreq(lg_policy);
++	}
++
++	return count;
++}
++
++static ssize_t soft_freq_min_show(struct gov_attr_set *attr_set, char *buf)
++{
++	struct lse_gov_tunables *tunables = to_lse_gov_tunables(attr_set);
++	int soft_freq_min = tunables->soft_freq_min;
++
++	if (soft_freq_min < 0) {
++		return sprintf(buf, "0\n");
++	} else {
++		return sprintf(buf, "%d\n", soft_freq_min);
++	}
++}
++
++static ssize_t soft_freq_min_store(struct gov_attr_set *attr_set, const char *buf, size_t count)
++{
++	struct lse_gov_tunables *tunables = to_lse_gov_tunables(attr_set);
++	struct lse_gov_policy *lg_policy = list_first_entry(&attr_set->policy_list, struct lse_gov_policy, tunables_hook);
++	int new_soft_freq_min = -1;
++
++	if (kstrtoint(buf, 10, &new_soft_freq_min))
++		return -EINVAL;
++
++	if (tunables->soft_freq_min == new_soft_freq_min) {
++		return count;
++	}
++
++	tunables->soft_freq_min = new_soft_freq_min;
++	if (tunables->apply_freq_immediately) {
++		lse_gov_update_soft_limit_cpufreq(lg_policy);
++	}
++
++	return count;
++}
++
++static ssize_t soft_freq_cur_show(struct gov_attr_set *attr_set __maybe_unused, char *buf)
++{
++	return sprintf(buf, "none\n");
++}
++
++static ssize_t soft_freq_cur_store(struct gov_attr_set *attr_set, const char *buf, size_t count)
++{
++	struct lse_gov_tunables *tunables = to_lse_gov_tunables(attr_set);
++	struct lse_gov_policy *lg_policy = list_first_entry(&attr_set->policy_list, struct lse_gov_policy, tunables_hook);
++	int new_soft_freq_cur = -1;
++
++	if (kstrtoint(buf, 10, &new_soft_freq_cur))
++		return -EINVAL;
++
++	if (tunables->soft_freq_max == new_soft_freq_cur && tunables->soft_freq_min == new_soft_freq_cur) {
++		return count;
++	}
++
++	tunables->soft_freq_max = new_soft_freq_cur;
++	tunables->soft_freq_min = new_soft_freq_cur;
++	if (tunables->apply_freq_immediately) {
++		lse_gov_update_soft_limit_cpufreq(lg_policy);
++	}
++
++	return count;
++}
++
++static ssize_t apply_freq_immediately_show(struct gov_attr_set *attr_set, char *buf)
++{
++	struct lse_gov_tunables *tunables = to_lse_gov_tunables(attr_set);
++	return sprintf(buf, "%d\n", (int)tunables->apply_freq_immediately);
++}
++
++static ssize_t apply_freq_immediately_store(struct gov_attr_set *attr_set, const char *buf, size_t count)
++{
++	struct lse_gov_tunables *tunables = to_lse_gov_tunables(attr_set);
++	int new_apply_freq_immediately = 0;
++
++	if (kstrtoint(buf, 10, &new_apply_freq_immediately))
++		return -EINVAL;
++
++	tunables->apply_freq_immediately = new_apply_freq_immediately > 0;
++	return count;
++}
++
++static struct governor_attr target_loads =
++	__ATTR(target_loads, 0664, target_loads_show, target_loads_store);
++
++static struct governor_attr soft_freq_max =
++	__ATTR(soft_freq_max, 0664, soft_freq_max_show, soft_freq_max_store);
++
++static struct governor_attr soft_freq_min =
++	__ATTR(soft_freq_min, 0664, soft_freq_min_show, soft_freq_min_store);
++
++static struct governor_attr soft_freq_cur =
++	__ATTR(soft_freq_cur, 0664, soft_freq_cur_show, soft_freq_cur_store);
++
++static struct governor_attr apply_freq_immediately =
++	__ATTR(apply_freq_immediately, 0664, apply_freq_immediately_show, apply_freq_immediately_store);
++
++static struct attribute *lse_gov_attrs[] = {
++	&target_loads.attr,
++	&soft_freq_max.attr,
++	&soft_freq_min.attr,
++	&soft_freq_cur.attr,
++	&apply_freq_immediately.attr,
++	NULL
++};
++ATTRIBUTE_GROUPS(lse_gov);
++
++static struct kobj_type lse_gov_tunables_ktype = {
++	.default_groups = lse_gov_groups,
++	.sysfs_ops = &governor_sysfs_ops,
++};
++
++/********************** cpufreq governor interface *********************/
++
++struct cpufreq_governor cpufreq_lse_gov;
++
++static struct lse_gov_policy *lse_gov_policy_alloc(struct cpufreq_policy *policy)
++{
++	struct lse_gov_policy *lg_policy;
++
++	lg_policy = kzalloc(sizeof(*lg_policy), GFP_KERNEL);
++	if (!lg_policy)
++		return NULL;
++
++	lg_policy->policy = policy;
++	raw_spin_lock_init(&lg_policy->update_lock);
++	return lg_policy;
++}
++
++static inline void lse_gov_cpu_reset(struct lse_gov_policy *lg_policy)
++{
++	unsigned int cpu;
++
++	for_each_cpu(cpu, lg_policy->policy->cpus) {
++		struct lse_gov_cpu *lg_cpu = &per_cpu(lse_gov_cpu, cpu);
++
++		lg_cpu->lg_policy = NULL;
++	}
++}
++
++static void lse_gov_policy_free(struct lse_gov_policy *lg_policy)
++{
++	kfree(lg_policy);
++}
++
++static void lsegov_update_freq(struct update_util_data *cb, u64 time, unsigned int flags)
++{
++	struct lse_sched_cluster *cluster;
++	struct cpufreq_policy *policy;
++	struct lse_rq *lrq;
++	int cpu;
++
++	if (flags & LSE_CPUFREQ_WINDOW_ROLLOVER) {
++		for_each_lse_cluster(cluster) {
++			cpumask_t cluster_online_cpus;
++			u64 prev_runnable_sum = 0;
++			if (gov_flag[cluster->id] == 0)
++				continue;
++			cpumask_and(&cluster_online_cpus, &cluster->cpus, cpu_online_mask);
++			for_each_cpu(cpu, &cluster_online_cpus) {
++				lrq = &per_cpu(lse_rq, cpu);
++				if (cpufreq_gov_debug() & DEBUG_FTRACE)
++					gov_trace_printk("cpu[%d] prev_runnable_sum[%llu]\n", cpu, lrq->prev_runnable_sum);
++				prev_runnable_sum = max(prev_runnable_sum, lrq->prev_runnable_sum);
++			}
++
++			policy = cpufreq_cpu_get_raw(cpumask_first(&cluster_online_cpus));
++			if (policy == NULL)
++				lse_gov_err("NULL policy [%d]\n", cpumask_first(&cluster_online_cpus));
++			lse_gov_update_cpufreq(policy, prev_runnable_sum);
++		}
++	}
++}
++
++static int lse_gov_kthread_create(struct lse_gov_policy *lg_policy)
++{
++	struct task_struct *thread;
++	struct sched_attr attr = {
++		.size		= sizeof(struct sched_attr),
++		.sched_policy	= SCHED_DEADLINE,
++		.sched_flags	= SCHED_FLAG_SUGOV,
++		.sched_nice	= 0,
++		.sched_priority	= 0,
++		/*
++		 * Fake (unused) bandwidth; workaround to "fix"
++		 * priority inheritance.
++		 */
++		.sched_runtime	=  1000000,
++		.sched_deadline = 10000000,
++		.sched_period	= 10000000,
++	};
++	struct cpufreq_policy *policy = lg_policy->policy;
++	int ret;
++
++	/* kthread only required for slow path */
++	if (policy->fast_switch_enabled)
++		return 0;
++
++	kthread_init_work(&lg_policy->work, lse_gov_work);
++	kthread_init_worker(&lg_policy->worker);
++	thread = kthread_create(kthread_worker_fn, &lg_policy->worker,
++				"lse_gov:%d",
++				cpumask_first(policy->related_cpus));
++	if (IS_ERR(thread)) {
++		pr_err("failed to create lse_gov thread: %ld\n", PTR_ERR(thread));
++		return PTR_ERR(thread);
++	}
++
++	ret = sched_setattr_nocheck(thread, &attr);
++	if (ret) {
++		kthread_stop(thread);
++		pr_warn("%s: failed to set SCHED_DEADLINE\n", __func__);
++		return ret;
++	}
++
++	lg_policy->thread = thread;
++	kthread_bind_mask(thread, policy->related_cpus);
++	mutex_init(&lg_policy->work_lock);
++
++	wake_up_process(thread);
++
++	return 0;
++}
++
++static void lse_gov_kthread_stop(struct lse_gov_policy *lg_policy)
++{
++	/* kthread only required for slow path */
++	if (lg_policy->policy->fast_switch_enabled)
++		return;
++
++	kthread_flush_worker(&lg_policy->worker);
++	kthread_stop(lg_policy->thread);
++	mutex_destroy(&lg_policy->work_lock);
++}
++
++static struct lse_gov_tunables *lse_gov_tunables_alloc(struct lse_gov_policy *lg_policy)
++{
++	struct lse_gov_tunables *tunables;
++
++	tunables = kzalloc(sizeof(*tunables), GFP_KERNEL);
++	if (tunables) {
++		gov_attr_set_init(&tunables->attr_set, &lg_policy->tunables_hook);
++		if (!have_governor_per_policy())
++			global_tunables = tunables;
++	}
++	return tunables;
++}
++
++static void lse_gov_tunables_free(struct lse_gov_tunables *tunables)
++{
++	if (!have_governor_per_policy())
++		global_tunables = NULL;
++
++	kfree(tunables);
++}
++
++#define DEFAULT_HISPEED_LOAD 90
++static void lse_gov_tunables_save(struct cpufreq_policy *policy,
++		struct lse_gov_tunables *tunables)
++{
++	int cpu;
++	struct lse_gov_tunables *cached = per_cpu(cached_tunables, policy->cpu);
++
++	if (!cached) {
++		cached = kzalloc(sizeof(*tunables), GFP_KERNEL);
++		if (!cached)
++			return;
++
++		for_each_cpu(cpu, policy->related_cpus)
++			per_cpu(cached_tunables, cpu) = cached;
++	}
++}
++
++static int lse_gov_init(struct cpufreq_policy *policy)
++{
++	struct lse_gov_policy *lg_policy;
++	struct lse_gov_tunables *tunables;
++	int ret = 0;
++
++	/* State should be equivalent to EXIT */
++	if (policy->governor_data)
++		return -EBUSY;
++
++	cpufreq_enable_fast_switch(policy);
++
++	lg_policy = lse_gov_policy_alloc(policy);
++	if (!lg_policy) {
++		ret = -ENOMEM;
++		goto disable_fast_switch;
++	}
++
++	ret = lse_gov_kthread_create(lg_policy);
++	if (ret)
++		goto free_lg_policy;
++
++	mutex_lock(&global_tunables_lock);
++
++	if (global_tunables) {
++		if (WARN_ON(have_governor_per_policy())) {
++			ret = -EINVAL;
++			goto stop_kthread;
++		}
++		policy->governor_data = lg_policy;
++		lg_policy->tunables = global_tunables;
++
++		gov_attr_set_get(&global_tunables->attr_set, &lg_policy->tunables_hook);
++		goto out;
++	}
++
++	tunables = lse_gov_tunables_alloc(lg_policy);
++	if (!tunables) {
++		ret = -ENOMEM;
++		goto stop_kthread;
++	}
++
++	tunables->target_loads = DEFAULT_TARGET_LOAD;
++	tunables->soft_freq_max = -1;
++	tunables->soft_freq_min = -1;
++	tunables->apply_freq_immediately = true;
++
++	policy->governor_data = lg_policy;
++	lg_policy->tunables = tunables;
++
++	ret = kobject_init_and_add(&tunables->attr_set.kobj, &lse_gov_tunables_ktype,
++				   get_governor_parent_kobj(policy), "%s",
++				   cpufreq_lse_gov.name);
++	if (ret)
++		goto fail;
++
++	policy->dvfs_possible_from_any_cpu = 1;
++
++out:
++	mutex_unlock(&global_tunables_lock);
++	return 0;
++
++fail:
++	kobject_put(&tunables->attr_set.kobj);
++	policy->governor_data = NULL;
++	lse_gov_tunables_free(tunables);
++
++stop_kthread:
++	lse_gov_kthread_stop(lg_policy);
++	mutex_unlock(&global_tunables_lock);
++
++free_lg_policy:
++	lse_gov_policy_free(lg_policy);
++
++disable_fast_switch:
++	cpufreq_disable_fast_switch(policy);
++
++	pr_err("initialization failed (error %d)\n", ret);
++	return ret;
++}
++
++static void lse_gov_exit(struct cpufreq_policy *policy)
++{
++	struct lse_gov_policy *lg_policy = policy->governor_data;
++	struct lse_gov_tunables *tunables = lg_policy->tunables;
++	unsigned int count;
++
++	mutex_lock(&global_tunables_lock);
++
++	count = gov_attr_set_put(&tunables->attr_set, &lg_policy->tunables_hook);
++	policy->governor_data = NULL;
++	if (!count) {
++		lse_gov_tunables_save(policy, tunables);
++		lse_gov_tunables_free(tunables);
++	}
++
++	mutex_unlock(&global_tunables_lock);
++
++	lse_gov_kthread_stop(lg_policy);
++	lse_gov_cpu_reset(lg_policy);
++	lse_gov_policy_free(lg_policy);
++	cpufreq_disable_fast_switch(policy);
++}
++
++static int lse_gov_start(struct cpufreq_policy *policy)
++{
++	struct lse_gov_policy *lg_policy = policy->governor_data;
++	unsigned int cpu, cluster_id;
++
++	lg_policy->next_freq = 0;
++
++	for_each_cpu(cpu, policy->cpus) {
++		struct lse_gov_cpu *lg_cpu = &per_cpu(lse_gov_cpu, cpu);
++
++		memset(lg_cpu, 0, sizeof(*lg_cpu));
++		lg_cpu->cpu			= cpu;
++		lg_cpu->lg_policy		= lg_policy;
++		cpufreq_add_update_util_hook(cpu, &lg_cpu->update_util, lsegov_update_freq);
++	}
++	cpu = cpumask_first(policy->related_cpus);
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
++	cluster_id = topology_cluster_id(cpu);
++#else
++    cluster_id = topology_physical_package_id(cpu);
++#endif
++	lse_gov_debug("start cluster[%d] cluster_id[%d] gov\n", cpu, cluster_id);
++
++	/* backup efficiencies_available, set lse efficiencies_available is false*/
++	lg_policy->backup_efficiencies_available = policy->efficiencies_available;
++	policy->efficiencies_available = false;
++
++	if (cluster_id < MAX_LSE_CLUSTERS)
++		gov_flag[cluster_id] = 1;
++
++	return 0;
++}
++
++static void lse_gov_stop(struct cpufreq_policy *policy)
++{
++	struct lse_gov_policy *lg_policy = policy->governor_data;
++	unsigned int cpu, cluster_id;
++
++	for_each_cpu(cpu, policy->cpus)
++		cpufreq_remove_update_util_hook(cpu);
++
++	if (!policy->fast_switch_enabled)
++		kthread_cancel_work_sync(&lg_policy->work);
++
++	/* restore efficiencies_available */
++	policy->efficiencies_available = lg_policy->backup_efficiencies_available;
++
++	cpu = cpumask_first(policy->related_cpus);
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
++	cluster_id = topology_cluster_id(cpu);
++#else
++    cluster_id = topology_physical_package_id(cpu);
++#endif
++	if (cluster_id < MAX_LSE_CLUSTERS)
++		gov_flag[cluster_id] = 0;
++	synchronize_rcu();
++}
++
++static void lse_gov_limits(struct cpufreq_policy *policy)
++{
++	struct lse_gov_policy *lg_policy = policy->governor_data;
++	unsigned long flags, now;
++	unsigned int freq, final_freq;
++
++	if (!policy->fast_switch_enabled) {
++		mutex_lock(&lg_policy->work_lock);
++		cpufreq_policy_apply_limits(policy);
++		mutex_unlock(&lg_policy->work_lock);
++	} else {
++		raw_spin_lock_irqsave(&lg_policy->update_lock, flags);
++
++		freq = lg_policy->next_freq;
++		/*
++		 * we have serval resources to update freq
++		 * (1) scheduler to run callback
++		 * (2) cpufreq_set_policy to call governor->limtis here
++		 * so we have serveral times here and we must to keep them same
++		 * here we using walt_sched_clock() to keep same with walt scheduler
++		 */
++		now = ktime_get_ns();
++
++		/*
++		 * cpufreq_driver_resolve_freq() has a clamp, so we do not need
++		 * to do any sort of additional validation here.
++		 */
++		final_freq = cpufreq_driver_resolve_freq(policy, freq);
++		cpufreq_driver_fast_switch(policy, final_freq);
++
++		raw_spin_unlock_irqrestore(&lg_policy->update_lock, flags);
++	}
++}
++
++struct cpufreq_governor cpufreq_lse_gov = {
++	.name			= "lunar_ext_gov",
++	.owner			= THIS_MODULE,
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
++	.flags			= CPUFREQ_GOV_DYNAMIC_SWITCHING,
++#else
++    .dynamic_switching	= true,
++#endif
++	.init			= lse_gov_init,
++	.exit			= lse_gov_exit,
++	.start			= lse_gov_start,
++	.stop			= lse_gov_stop,
++	.limits			= lse_gov_limits,
++};
++
++int lse_cpufreq_init(void)
++{
++	int ret = 0;
++	struct lse_sched_cluster *cluster = NULL;
++
++	ret = cpufreq_register_governor(&cpufreq_lse_gov);
++	if (ret)
++		return ret;
++
++	for_each_lse_cluster(cluster)
++		lse_gov_debug("num_cluster=%d id=%d cpumask=%*pbl capacity=%lu num_cpus=%d\n",
++			lse_num_sched_clusters, cluster->id, cpumask_pr_args(&cluster->cpus),
++			arch_scale_cpu_capacity(cpumask_first(&cluster->cpus)),
++			num_possible_cpus());
++
++	return ret;
++}
+diff --git a/kernel/sched/lse/lse_cfs.c b/kernel/sched/lse/lse_cfs.c
+new file mode 100644
+index 0000000..3140cb9
+--- /dev/null
++++ b/kernel/sched/lse/lse_cfs.c
+@@ -0,0 +1,120 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Copyright (C) 2025, LunarKernel Project. All rights reserved.
++ *
++ * This code is part of LunarKernel.
++ * cfs hooks.
++ *
++ * File name: lse_cfs.c
++ * Author: Cloud_Yun <1770669041@qq.com>
++ * Version: v251004_Dev
++ * Date: 2025/10/4 Saturday
++ */
++
++#include <trace/hooks/sched.h>
++
++#include "lse_main.h"
++
++static inline u64 lse_rq_clock(struct rq *rq)
++{
++	struct lse_rq *lrq = &per_cpu(lse_rq, cpu_of(rq));
++
++	if (unlikely(lse_clock_suspended))
++		return lse_clock_last;
++
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0)
++	if (unlikely(!raw_spin_is_locked(&rq->__lock)))
++#else
++	if (unlikely(!raw_spin_is_locked(&rq->lock)))
++#endif
++		LSE_BUG("on CPU%d: %s task %s(%d) unlocked access"
++				 "for cpu=%d stack[%pS <== %pS <== %pS]\n",
++				 raw_smp_processor_id(), __func__,
++				 current->comm, current->pid, rq->cpu,
++				 (void *)CALLER_ADDR0,
++				 (void *)CALLER_ADDR1, (void *)CALLER_ADDR2);
++
++	if (!(rq->clock_update_flags & RQCF_UPDATED))
++		update_rq_clock(rq);
++
++	return max(rq_clock(rq), lrq->latest_clock);
++}
++
++void lse_scheduler_tick(void)
++{
++	int cpu = smp_processor_id();
++	struct rq *rq = cpu_rq(cpu);
++
++	if (!slim_walt_ctrl)
++		return;
++
++	if (unlikely(!tick_sched_clock)) {
++		/*
++		 * Let the window begin 20us prior to the tick,
++		 * that way we are guaranteed a rollover when the tick occurs.
++		 * Use rq->clock directly instead of rq_clock() since
++		 * we do not have the rq lock and
++		 * rq->clock was updated in the tick callpath.
++		 */
++		if (cmpxchg64(&tick_sched_clock, 0, rq->clock - 20000))
++			return;
++
++		for_each_possible_cpu(cpu) {
++		    struct lse_rq *lrq = &per_cpu(lse_rq, cpu);
++
++			lrq->window_start = tick_sched_clock;
++		}
++
++		atomic64_set(&lse_run_rollover_lastq_ws, tick_sched_clock);
++	}
++}
++
++static void lse_scheduler_tick_cb(void *unused, struct rq *rq)
++{
++	lse_scheduler_tick();
++}
++
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0) && LINUX_VERSION_CODE < KERNEL_VERSION(6, 6, 0)
++static void lse_schedule(void *unused, unsigned int sched_mode, struct task_struct *prev,
++	            struct task_struct *next, struct rq *rq)
++#else
++static void lse_schedule(void *unused, struct task_struct *prev, struct task_struct *next,
++	            struct rq *rq)
++#endif
++{
++	struct lse_task_struct *prev_lts, *next_lts;
++
++	if (!slim_walt_ctrl)
++		return;
++
++	prev_lts = get_lse_task_struct(prev);
++	if (likely(prev != next)) {
++		next_lts = get_lse_task_struct(next);
++
++		if (prev_lts)
++			lse_update_task_ravg(prev_lts, prev, rq, PUT_PREV_TASK, lse_rq_clock(rq));
++
++		if (next_lts)
++			lse_update_task_ravg(next_lts, next, rq, PICK_NEXT_TASK, lse_rq_clock(rq));
++	} else if (prev_lts)
++		lse_update_task_ravg(prev_lts, prev, rq, TASK_UPDATE, lse_rq_clock(rq));
++}
++
++void lse_tick_entry(void *unused, struct rq *rq)
++{
++	struct lse_task_struct *curr_lts;
++
++	if (!slim_walt_ctrl)
++		return;
++
++	curr_lts = get_lse_task_struct(rq->curr);
++	if (curr_lts)
++		lse_update_task_ravg(curr_lts, rq->curr, rq, TASK_UPDATE, lse_rq_clock(rq));
++}
++
++void lse_cfs_hooks_register(void)
++{
++    register_trace_android_vh_scheduler_tick(lse_scheduler_tick_cb, NULL);
++    register_trace_android_rvh_schedule(lse_schedule, NULL);
++    register_trace_android_rvh_tick_entry(lse_tick_entry, NULL);
++}
+diff --git a/kernel/sched/lse/lse_main.c b/kernel/sched/lse/lse_main.c
+new file mode 100644
+index 0000000..0a2eddc
+--- /dev/null
++++ b/kernel/sched/lse/lse_main.c
+@@ -0,0 +1,71 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Copyright (C) 2025, LunarKernel Project. All rights reserved.
++ *
++ * This code is part of LunarKernel.
++ * module init.
++ *
++ * File name: lse_main.c
++ * Author: Cloud_Yun <1770669041@qq.com>
++ * Version: v251003_Dev
++ * Date: 2025/10/3 Friday
++ */
++
++#include <linux/module.h>
++#include <linux/syscore_ops.h>
++
++#include "lse_main.h"
++
++#define CREATE_TRACE_POINTS
++#include "trace_lse.h"
++
++bool lse_clock_suspended;
++u64 lse_clock_last;
++unsigned int dump_info = LSE_DEBUG_PANIC;
++
++noinline int lse_tracing_mark_write(const char *buf)
++{
++	trace_printk(buf);
++	return 0;
++}
++
++u64 lse_sched_clock(void)
++{
++	if (unlikely(lse_clock_suspended))
++		return lse_clock_last;
++	return sched_clock();
++}
++static void lse_resume(void)
++{
++	lse_clock_suspended = false;
++}
++
++static int lse_suspend(void)
++{
++	lse_clock_last = sched_clock();
++	lse_clock_suspended = true;
++	return 0;
++}
++
++static struct syscore_ops lse_syscore_ops = {
++	.resume		= lse_resume,
++	.suspend	= lse_suspend
++};
++
++static int __init lunar_sched_ext_init(void)
++{
++    register_syscore_ops(&lse_syscore_ops);
++    lse_task_struct_ext_init();
++	lse_sched_cluster_init();
++    lse_sysctl_init();
++	lse_sched_stats_init();
++    lse_cfs_hooks_register();
++    lse_cpufreq_init();
++	return 0;
++}
++
++module_init(lunar_sched_ext_init);
++
++MODULE_LICENSE("GPL v2");
++MODULE_AUTHOR("Cloud_Yun <1770669041@qq.com>");
++MODULE_DESCRIPTION("LunarKernel Scheduling Extention");
+diff --git a/kernel/sched/lse/lse_main.h b/kernel/sched/lse/lse_main.h
+new file mode 100644
+index 0000000..7dcc237
+--- /dev/null
++++ b/kernel/sched/lse/lse_main.h
+@@ -0,0 +1,215 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Copyright (C) 2025, LunarKernel Project. All rights reserved.
++ */
++
++#ifndef _LSE_MAIN_H_
++#define _LSE_MAIN_H_
++
++#include <asm/processor.h>
++#include <linux/list.h>
++#include <linux/types.h>
++#include <linux/atomic.h>
++#include <linux/cgroup-defs.h>
++#include <linux/kernel.h>
++#include <linux/cpufreq.h>
++#include <linux/cpumask.h>
++#include <linux/cgroup.h>
++#include <linux/tick.h>
++#include <linux/kmemleak.h>
++#include <linux/percpu.h>
++#include <linux/version.h>
++#include <linux/list_sort.h>
++#include <linux/notifier.h>
++#include <linux/slab.h>
++#include <linux/sched/clock.h>
++#include <linux/sched/cputime.h>
++#include <trace/hooks/sched.h>
++
++#include <../kernel/sched/sched.h>
++#include <linux/cpufreq.h>
++#include <linux/irq_work.h>
++#include <linux/kmemleak.h>
++#include <linux/kobject.h>
++#include <linux/kthread.h>
++#include <linux/sched/cpufreq.h>
++#include <linux/sysfs.h>
++#include <../kernel/time/tick-sched.h>
++
++#define LSE_DEBUG_FTRACE		(1 << 0)
++#define LSE_DEBUG_SYSTRACE		(1 << 1)
++#define LSE_DEBUG_PRINTK		(1 << 2)
++#define LSE_DEBUG_PANIC			(1 << 3)
++
++#define LSE_BUG(fmt, ...)		\
++do {										\
++	printk_deferred("lunar_sched_ext[%s]:"fmt, __func__, ##__VA_ARGS__);	\
++	if (dump_info & LSE_DEBUG_PANIC)			\
++		BUG_ON(-1);								\
++} while (0)
++
++#define DIV64_U64_ROUNDUP(X, Y) div64_u64((X) + (Y - 1), Y)
++
++
++/*Sysctl related interface*/
++#define WINDOW_STATS_RECENT		0
++#define WINDOW_STATS_MAX		1
++#define WINDOW_STATS_MAX_RECENT_AVG	2
++#define WINDOW_STATS_AVG		3
++#define WINDOW_STATS_INVALID_POLICY	4
++
++#define LSE_CPUFREQ_WINDOW_ROLLOVER BIT(31)
++#define SCHED_ACCOUNT_WAIT_TIME 0
++
++#define lts_to_ts(lts)	(lts->task)
++/*
++ * Slot of task_struct::android_vendor_data1[] used as the LSE anchor.
++ *
++ * Upstream LSE is written against the OPlus 6.6 tree, whose vendor data array
++ * is large enough to keep the anchor in slot 63. The GKI 6.12 task_struct only
++ * carries ANDROID_VENDOR_DATA_ARRAY(1, 6), i.e. slots 0..5, so the anchor is
++ * moved into the last slot to stay clear of vendor modules, which usually
++ * allocate from the bottom. Bump LTS_SLOT_COUNT if the ABI ever grows.
++ */
++#define LTS_IDX				5
++#define LTS_SLOT_COUNT			6
++#define RAVG_HIST_SIZE	5
++
++#define DEFAULT_SCHED_RAVG_WINDOW 8000000
++#define MAX_LSE_CLUSTERS 4
++
++enum task_event {
++	PUT_PREV_TASK   = 0,
++	PICK_NEXT_TASK  = 1,
++	TASK_WAKE       = 2,
++	TASK_MIGRATE    = 3,
++	TASK_UPDATE     = 4,
++	IRQ_UPDATE      = 5,
++};
++
++struct lse_task_struct {
++	struct task_struct *task;
++
++	u64	mark_start;
++	u64	window_start;
++	u32	sum;
++	u32	sum_history[RAVG_HIST_SIZE];
++	int	cidx;
++	u32	demand;
++	u16	demand_scaled;
++} ____cacheline_aligned;
++
++struct lse_sched_cluster {
++	raw_spinlock_t load_lock;
++	struct list_head list;
++	struct cpumask cpus;
++	int id;
++	int max_possible_capacity;
++	unsigned int cur_freq, max_freq, min_freq;
++	unsigned int capacity_margin;
++	unsigned int sd_capacity_margin;
++	struct notifier_block nb_min;
++	struct notifier_block nb_max;
++	bool freq_init_done;
++};
++
++struct lse_rq {
++	struct lse_sched_cluster *cluster;
++    struct cpumask freq_domain_cpumask;
++
++	u64			window_start;
++	u64			latest_clock;
++	u32			prev_window_size;
++	u64			task_exec_scale;
++	u64			prev_runnable_sum;
++	u64			curr_runnable_sum;
++};
++DECLARE_PER_CPU(struct lse_rq, lse_rq);
++
++/* lse_main.c */
++extern bool lse_clock_suspended;
++extern u64 lse_clock_last;
++extern unsigned int dump_info;
++extern noinline int lse_tracing_mark_write(const char *buf);
++extern u64 lse_sched_clock(void);
++
++/* lse_task_struct_ext.c */
++static inline struct lse_task_struct *get_lse_task_struct(struct task_struct *t)
++{
++    struct lse_task_struct *lts = NULL;
++
++    if (!t)
++        return NULL;
++
++    lts = (struct lse_task_struct *)smp_load_acquire(&t->android_vendor_data1[LTS_IDX]);
++    if (!lts)
++        return NULL;
++
++    return lts;
++}
++extern int lse_task_struct_ext_init(void);
++
++/* lse_sched_cluster.c */
++extern int lse_num_sched_clusters;
++extern struct list_head lse_cluster_head;
++extern void lse_sched_cluster_init(void);
++
++/* Iterate in increasing order of cluster max possible capacity */
++#define for_each_lse_cluster(cluster) \
++	list_for_each_entry(cluster, &lse_cluster_head, list)
++
++#define for_each_lse_cluster_reverse(cluster) \
++	list_for_each_entry_reverse(cluster, &lse_cluster_head, list)
++
++#define min_cap_cluster()	\
++	list_first_entry(&lse_cluster_head, struct lse_sched_cluster, list)
++#define max_cap_cluster()	\
++	list_last_entry(&lse_cluster_head, struct lse_sched_cluster, list)
++
++
++/* lse_sysctl.c */
++extern int slim_walt_ctrl;
++extern int frame_per_sec;
++extern void lse_sysctl_init(void);
++
++/* lse_util_track.c */
++extern atomic64_t lse_run_rollover_lastq_ws;
++extern int sched_window_stats_policy;
++extern u64 tick_sched_clock;
++extern unsigned int lse_sched_ravg_window;
++extern unsigned int new_lse_sched_ravg_window;
++extern unsigned int lse_scale_demand_divisor;
++extern spinlock_t new_sched_ravg_window_lock;
++extern void lse_update_task_ravg(struct lse_task_struct *lts, struct task_struct *p, struct rq *rq, int event, u64 wallclock);
++extern u16 lse_cpu_util(int cpu);
++extern void lse_sched_stats_init(void);
++extern void sched_ravg_window_change(int frame_per_sec);
++
++/*util = runtime * 1024 / window_size */
++static inline u64 lse_scale_time_to_util(u64 d)
++{
++	/*
++	 * The denominator at most could be (8 * tick_size) >> SCHED_CAPACITY_SHIFT,
++	 * a value that easily fits a 32bit integer.
++	 */
++	do_div(d, lse_scale_demand_divisor);
++	return d;
++}
++
++static inline void lse_fixup_window_dep(void)
++{
++	lse_scale_demand_divisor = lse_sched_ravg_window >> SCHED_CAPACITY_SHIFT;
++}
++
++
++/* lse_cfs.c */
++extern void lse_scheduler_tick(void);
++extern void lse_tick_entry(void *unused, struct rq *rq);
++extern void lse_cfs_hooks_register(void);
++
++/* cpufreq_lse.c */
++extern unsigned int sysctl_lse_gov_debug;
++extern void run_lse_irq_work_rollover(void);
++extern int lse_cpufreq_init(void);
++
++#endif /* _LSE_MAIN_H_ */
+diff --git a/kernel/sched/lse/lse_sched_cluster.c b/kernel/sched/lse/lse_sched_cluster.c
+new file mode 100644
+index 0000000..6cb3085
+--- /dev/null
++++ b/kernel/sched/lse/lse_sched_cluster.c
+@@ -0,0 +1,372 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Copyright (C) 2025, LunarKernel Project. All rights reserved.
++ *
++ * This code is part of LunarKernel.
++ * sched topology.
++ *
++ * File name: lse_sched_cluster.c
++ * Author: Cloud_Yun <1770669041@qq.com>
++ * Version: v251003_Dev
++ * Date: 2025/10/3 Friday
++ */
++
++#include <linux/slab.h>
++#include <linux/cpufreq.h>
++
++#include "lse_main.h"
++
++int __read_mostly lse_num_sched_clusters;
++struct list_head lse_cluster_head;
++
++static int cpufreq_update_min(struct notifier_block *nb, unsigned long freq,
++			      void *data)
++{
++	struct lse_sched_cluster *cluster = container_of(nb, struct lse_sched_cluster, nb_min);
++
++	cluster->min_freq = freq;
++	return 0;
++}
++
++static int cpufreq_update_max(struct notifier_block *nb, unsigned long freq,
++			      void *data)
++{
++	struct lse_sched_cluster *cluster = container_of(nb, struct lse_sched_cluster, nb_max);
++
++	cluster->max_freq = freq;
++	return 0;
++}
++
++static struct lse_sched_cluster init_cluster = {
++	.list = LIST_HEAD_INIT(init_cluster.list),
++	.id = 0,
++	.max_possible_capacity = SCHED_CAPACITY_SCALE,
++	.cur_freq = 1,
++	.max_freq = 1,
++	.min_freq = 1,
++	.capacity_margin = 1280,
++	.sd_capacity_margin = 1280,
++	.nb_min = {
++		.notifier_call = cpufreq_update_min,
++	},
++	.nb_max = {
++		.notifier_call = cpufreq_update_max,
++	},
++};
++
++static void init_clusters(void)
++{
++    int cpu;
++	struct lse_rq *lrq;
++
++	init_cluster.cpus = *cpu_possible_mask;
++	raw_spin_lock_init(&init_cluster.load_lock);
++	INIT_LIST_HEAD(&lse_cluster_head);
++	list_add(&init_cluster.list, &lse_cluster_head);
++
++    for_each_possible_cpu(cpu) {
++		lrq = &per_cpu(lse_rq, cpu);
++        lrq->cluster = &init_cluster;
++        cpumask_copy(&lrq->freq_domain_cpumask, cpumask_of(cpu));
++    }
++}
++
++static void
++insert_cluster(struct lse_sched_cluster *cluster, struct list_head *head)
++{
++	struct lse_sched_cluster *tmp;
++	struct list_head *iter = head;
++
++	list_for_each_entry(tmp, head, list) {
++		if (arch_scale_cpu_capacity(cpumask_first(&cluster->cpus))
++			    < arch_scale_cpu_capacity(cpumask_first(&tmp->cpus)))
++			break;
++		iter = &tmp->list;
++	}
++
++	list_add(&cluster->list, iter);
++}
++
++static struct lse_sched_cluster *alloc_new_cluster(const struct cpumask *cpus)
++{
++	struct lse_sched_cluster *cluster = NULL;
++
++	cluster = kzalloc(sizeof(struct lse_sched_cluster), GFP_ATOMIC);
++	BUG_ON(!cluster);
++
++	INIT_LIST_HEAD(&cluster->list);
++	cluster->max_possible_capacity = arch_scale_cpu_capacity(cpumask_first(cpus));
++	cluster->nb_min.notifier_call = cpufreq_update_min;
++	cluster->nb_max.notifier_call = cpufreq_update_max;
++	cluster->cur_freq = 1;
++	cluster->max_freq = 1;
++	cluster->min_freq = 1;
++	cluster->freq_init_done = false;
++	cluster->capacity_margin = 1280;
++	cluster->sd_capacity_margin = 1280;
++	cluster->cpus = *cpus;
++	raw_spin_lock_init(&cluster->load_lock);
++
++	return cluster;
++}
++
++static void add_cluster(const struct cpumask *cpus, struct list_head *head)
++{
++	struct lse_sched_cluster *cluster = alloc_new_cluster(cpus);
++	struct lse_rq *lrq;
++	int i;
++
++    BUG_ON(lse_num_sched_clusters >= MAX_LSE_CLUSTERS);
++
++	for_each_cpu(i, cpus) {
++		lrq = &per_cpu(lse_rq, i);
++		lrq->cluster = cluster;
++	}
++
++	insert_cluster(cluster, head);
++	lse_num_sched_clusters++;
++}
++
++static void cleanup_clusters(struct list_head *head)
++{
++	struct lse_sched_cluster *cluster, *tmp;
++	struct lse_rq *lrq;
++	int i;
++
++	list_for_each_entry_safe(cluster, tmp, head, list) {
++		for_each_cpu(i, &cluster->cpus) {
++		    lrq = &per_cpu(lse_rq, i);
++            lrq->cluster = &init_cluster;
++		}
++		list_del(&cluster->list);
++		lse_num_sched_clusters--;
++		kfree(cluster);
++	}
++}
++
++static inline void align_clusters(struct list_head *head)
++{
++	struct lse_sched_cluster *tmp;
++	struct list_head *cluster1 = head, *cluster2 = head;
++	unsigned long capacity1 = 0, capacity2 = 0;
++	int i = 0;
++
++	if (lse_num_sched_clusters != 4)
++		return;
++
++	list_for_each_entry(tmp, head, list) {
++		if (i == 1) {
++			cluster1 = &tmp->list;
++			capacity1 = arch_scale_cpu_capacity(cpumask_first(&tmp->cpus));
++		}
++		if (i == 2) {
++			cluster2 = &tmp->list;
++			capacity2 = arch_scale_cpu_capacity(cpumask_first(&tmp->cpus));
++		}
++		i++;
++	}
++
++	if (capacity1 < capacity2)
++		list_swap(cluster1, cluster2);
++}
++
++static inline void assign_cluster_ids(struct list_head *head)
++{
++	struct lse_sched_cluster *cluster;
++	unsigned int cpu;
++
++	list_for_each_entry(cluster, head, list) {
++		cpu = cpumask_first(&cluster->cpus);
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
++		cluster->id = topology_cluster_id(cpu);
++#else
++		cluster->id = topology_physical_package_id(cpu);
++#endif
++	}
++}
++
++static void
++move_list(struct list_head *dst, struct list_head *src, bool sync_rcu)
++{
++	struct list_head *first, *last;
++
++	first = src->next;
++	last = src->prev;
++
++	if (sync_rcu) {
++		INIT_LIST_HEAD_RCU(src);
++		synchronize_rcu();
++	}
++
++	first->prev = dst;
++	dst->prev = last;
++	last->next = dst;
++
++	/* Ensure list sanity before making the head visible to all CPUs. */
++	smp_mb();
++	dst->next = first;
++}
++
++static void get_possible_siblings(int cpuid, struct cpumask *cluster_cpus)
++{
++	int cpu;
++	struct cpu_topology *cpu_topo, *cpuid_topo = &cpu_topology[cpuid];
++
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
++	if (cpuid_topo->cluster_id == -1)
++#else
++	if (cpuid_topo->package_id == -1)
++#endif
++		return;
++
++	for_each_possible_cpu(cpu) {
++		cpu_topo = &cpu_topology[cpu];
++
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
++		if (cpuid_topo->cluster_id != cpu_topo->cluster_id)
++#else
++		if (cpuid_topo->package_id != cpu_topo->package_id)
++#endif
++			continue;
++		cpumask_set_cpu(cpu, cluster_cpus);
++	}
++}
++
++static void update_cluster_topology(void)
++{
++	struct cpumask cpus = *cpu_possible_mask;
++	struct cpumask cluster_cpus;
++	struct list_head new_head;
++	int i;
++
++	INIT_LIST_HEAD(&new_head);
++
++	for_each_cpu(i, &cpus) {
++		cpumask_clear(&cluster_cpus);
++		get_possible_siblings(i, &cluster_cpus);
++		if (cpumask_empty(&cluster_cpus)) {
++			cleanup_clusters(&new_head);
++			return;
++		}
++		cpumask_andnot(&cpus, &cpus, &cluster_cpus);
++		add_cluster(&cluster_cpus, &new_head);
++	}
++
++	align_clusters(&new_head);
++	assign_cluster_ids(&new_head);
++
++	/*
++	 * Ensure cluster ids are visible to all CPUs before making
++	 * lse_cluster_head visible.
++	 */
++	move_list(&lse_cluster_head, &new_head, false);
++}
++
++static int cpufreq_notifier_policy(struct notifier_block *nb,
++				   unsigned long val, void *data)
++{
++	struct cpufreq_policy *policy = (struct cpufreq_policy *)data;
++	struct cpumask policy_cluster = *policy->related_cpus;
++	struct lse_sched_cluster *cluster = NULL;
++	int ret, i, j;
++
++	switch (val) {
++	case CPUFREQ_CREATE_POLICY:
++		for_each_cpu(i, &policy_cluster) {
++			struct lse_rq *lrq = &per_cpu(lse_rq, i);
++			cluster = lrq->cluster;
++			cpumask_andnot(&policy_cluster, &policy_cluster,
++				       &cluster->cpus);
++
++			if (!cluster->freq_init_done) {
++				for_each_cpu(j, &cluster->cpus) {
++					struct lse_rq *lrq = &per_cpu(lse_rq, j);
++					cpumask_copy(&lrq->freq_domain_cpumask,
++						     policy->related_cpus);
++				}
++
++				cluster->min_freq = policy->min;
++				cluster->max_freq = policy->max;
++				cluster->freq_init_done = true;
++			}
++		}
++
++		ret = freq_qos_add_notifier(&policy->constraints, FREQ_QOS_MIN,
++					    &cluster->nb_min);
++		if (ret)
++			pr_err("Failed to register MIN QoS notifier: %d (%*pbl)\n",
++			       ret, cpumask_pr_args(policy->cpus));
++
++		ret = freq_qos_add_notifier(&policy->constraints, FREQ_QOS_MAX,
++					    &cluster->nb_max);
++		if (ret)
++			pr_err("Failed to register MAX QoS notifier: %d (%*pbl)\n",
++			       ret, cpumask_pr_args(policy->cpus));
++
++		break;
++	case CPUFREQ_REMOVE_POLICY:
++		freq_qos_remove_notifier(&policy->constraints, FREQ_QOS_MAX,
++					 &cluster->nb_max);
++		freq_qos_remove_notifier(&policy->constraints, FREQ_QOS_MIN,
++					 &cluster->nb_min);
++		ret = 0;
++		break;
++	default:
++		ret = -EINVAL;
++	}
++
++	return ret;
++}
++
++static int cpufreq_notifier_trans(struct notifier_block *nb,
++				  unsigned long val, void *data)
++{
++	struct cpufreq_freqs *freq = (struct cpufreq_freqs *)data;
++	unsigned int cpu = freq->policy->cpu;
++	unsigned int new_freq = freq->new;
++	struct lse_sched_cluster *cluster = NULL;
++	struct lse_rq *lrq = &per_cpu(lse_rq, cpu);
++	struct cpumask policy_cpus = lrq->freq_domain_cpumask;
++	int i;
++
++	if (val != CPUFREQ_POSTCHANGE)
++		return 0;
++
++	BUG_ON(new_freq == 0);
++
++	for_each_cpu(i, &policy_cpus) {
++		cluster = lrq->cluster;
++		cluster->cur_freq = new_freq;
++		cpumask_andnot(&policy_cpus, &policy_cpus, &cluster->cpus);
++	}
++
++	return 0;
++}
++
++static struct notifier_block notifier_policy_block = {
++	.notifier_call = cpufreq_notifier_policy
++};
++
++static struct notifier_block notifier_trans_block = {
++	.notifier_call = cpufreq_notifier_trans
++};
++
++static int register_sched_callback(void)
++{
++	int ret;
++
++	ret = cpufreq_register_notifier(&notifier_policy_block,
++					CPUFREQ_POLICY_NOTIFIER);
++	if (!ret)
++		ret = cpufreq_register_notifier(&notifier_trans_block,
++						CPUFREQ_TRANSITION_NOTIFIER);
++
++	return ret;
++}
++
++void lse_sched_cluster_init(void)
++{
++    init_clusters();
++    update_cluster_topology();
++    register_sched_callback();
++}
+diff --git a/kernel/sched/lse/lse_sysctl.c b/kernel/sched/lse/lse_sysctl.c
+new file mode 100644
+index 0000000..e5c9cc0
+--- /dev/null
++++ b/kernel/sched/lse/lse_sysctl.c
+@@ -0,0 +1,103 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Copyright (C) 2025, LunarKernel Project. All rights reserved.
++ *
++ * This code is part of LunarKernel.
++ * sysctl interface.
++ *
++ * File name: lse_sysctl.c
++ * Author: Cloud_Yun <1770669041@qq.com>
++ * Version: v251003_Dev
++ * Date: 2025/10/3 Friday
++ */
++
++#include <linux/kernel.h>
++#include <linux/sysctl.h>
++
++#include "lse_main.h"
++
++int slim_walt_ctrl = 1;
++int frame_per_sec = 120;
++
++static int window_stats_policy_minval = WINDOW_STATS_RECENT;
++static int window_stats_policy_maxval = WINDOW_STATS_INVALID_POLICY;
++
++static int lse_proc_sched_ravg_window_update(struct ctl_table *table,
++				int write, void __user *buffer, size_t *lenp,
++				loff_t *ppos)
++{
++	int ret = -EPERM;
++	int val;
++	static DEFINE_MUTEX(mutex);
++
++	struct ctl_table tmp = {
++		.data	= &val,
++		.maxlen	= sizeof(val),
++		.mode	= table->mode,
++	};
++
++	mutex_lock(&mutex);
++
++	val = frame_per_sec;
++	ret = proc_dointvec(&tmp, write, buffer, lenp, ppos);
++	if (ret || !write || (val == frame_per_sec))
++		goto unlock;
++	frame_per_sec = val;
++
++	sched_ravg_window_change(frame_per_sec);
++
++unlock:
++	mutex_unlock(&mutex);
++	return ret;
++}
++
++struct ctl_table lse_table[] = {
++    {
++        .procname     = "slim_walt_ctrl",
++        .data         = &slim_walt_ctrl,
++        .maxlen       = sizeof(int),
++        .mode         = 0644,
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0)
++        .proc_handler = proc_dobool,
++#else
++        .proc_handler = proc_dointvec,
++#endif
++    },
++    {
++        .procname     = "slim_walt_policy",
++        .data         = &sched_window_stats_policy,
++        .maxlen       = sizeof(int),
++        .mode         = 0644,
++        .proc_handler = proc_dointvec_minmax,
++        .extra1       = &window_stats_policy_minval,
++        .extra2       = &window_stats_policy_maxval,
++    },
++    {
++        .procname     = "sched_ravg_window_frame_per_sec",
++        .data         = &frame_per_sec,
++        .maxlen       = sizeof(int),
++        .mode         = 0644,
++        .proc_handler = lse_proc_sched_ravg_window_update,
++        .extra1       = SYSCTL_ZERO,
++        .extra2       = SYSCTL_INT_MAX,
++    },
++	{
++		.procname	= "lse_gov_debug",
++		.data		= &sysctl_lse_gov_debug,
++		.maxlen		= sizeof(unsigned int),
++		.mode		= 0666,
++		.proc_handler	= proc_dointvec,
++	},
++    { },
++};
++
++void lse_sysctl_init(void)
++{
++    struct ctl_table_header *hdr;
++
++    hdr = register_sysctl("lunar_sched_ext", lse_table);
++    if (hdr)
++        kmemleak_not_leak(hdr);
++    else
++        pr_err("lse: failed to register lunar_sched_ext sysctls\n");
++}
+diff --git a/kernel/sched/lse/lse_task_struct_ext.c b/kernel/sched/lse/lse_task_struct_ext.c
+new file mode 100644
+index 0000000..ffbd20d
+--- /dev/null
++++ b/kernel/sched/lse/lse_task_struct_ext.c
+@@ -0,0 +1,163 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Copyright (C) 2025, LunarKernel Project. All rights reserved.
++ *
++ * This code is part of LunarKernel.
++ * task_struct extension.
++ *
++ * File name: lse_task_struct_ext.c
++ * Author: Cloud_Yun <1770669041@qq.com>
++ * Version: v251003_Dev
++ * Date: 2025/10/3 Friday
++ */
++
++#include <linux/smp.h>
++#include <linux/rwsem.h>
++#include <trace/hooks/sched.h>
++#include <../kernel/sched/sched.h>
++
++#include "lse_main.h"
++
++/* The anchor slot must exist inside android_vendor_data1[]. */
++static_assert(LTS_IDX < LTS_SLOT_COUNT);
++
++static struct kmem_cache *lse_task_struct_cachep;
++
++static void init_lse_task_struct(struct lse_task_struct *lts, struct task_struct *tsk)
++{
++    memset(lts, 0, sizeof(struct lse_task_struct));
++    lts->task = tsk;
++}
++
++static void alloc_lse_task_struct(void *unused, struct task_struct *tsk,
++                                     struct task_struct *orig)
++{
++    struct lse_task_struct *lts;
++
++    if (!tsk)
++        return;
++
++    if (smp_load_acquire(&tsk->android_vendor_data1[LTS_IDX]) != 0)
++        return;
++
++    lts = kmem_cache_alloc(lse_task_struct_cachep, GFP_ATOMIC);
++    if (!lts)
++        return;
++
++    init_lse_task_struct(lts, tsk);
++
++    smp_store_release(&tsk->android_vendor_data1[LTS_IDX], (u64)lts);
++}
++
++static void free_lse_task_struct(void *unused, struct task_struct *tsk)
++{
++    struct lse_task_struct *lts;
++
++    if (!tsk)
++        return;
++
++    lts = (struct lse_task_struct *)smp_load_acquire(&tsk->android_vendor_data1[LTS_IDX]);
++    if (!lts)
++        return;
++
++    smp_store_release(&tsk->android_vendor_data1[LTS_IDX], 0);
++
++    kmem_cache_free(lse_task_struct_cachep, lts);
++}
++
++static void alloc_lts_mem_for_all_threads(void)
++{
++    struct task_struct *p, *g;
++    u32 iter_cpu;
++
++    read_lock(&tasklist_lock);
++    for_each_process_thread(g, p) {
++        struct lse_task_struct *lts = NULL;
++
++        lts = (struct lse_task_struct *)smp_load_acquire(&p->android_vendor_data1[LTS_IDX]);
++
++        if (!lts) {
++            lts = kmem_cache_alloc(lse_task_struct_cachep, GFP_ATOMIC);
++
++            if (lts) {
++                init_lse_task_struct(lts, p);
++                smp_store_release(&p->android_vendor_data1[LTS_IDX], (u64)lts);
++            }
++        }
++    }
++
++    for_each_possible_cpu(iter_cpu) {
++        struct lse_task_struct *lts = NULL;
++
++        p = cpu_rq(iter_cpu)->idle;
++        lts = (struct lse_task_struct *)smp_load_acquire(&p->android_vendor_data1[LTS_IDX]);
++
++        if (!lts) {
++            lts = kmem_cache_alloc(lse_task_struct_cachep, GFP_ATOMIC);
++
++            if (lts) {
++                init_lse_task_struct(lts, p);
++                smp_store_release(&p->android_vendor_data1[LTS_IDX], (u64)lts);
++            }
++        }
++    }
++    read_unlock(&tasklist_lock);
++}
++
++/*
++ * The GKI 6.12 vendor data array is shared with vendor modules. Refuse to run
++ * instead of silently corrupting whatever else already parked a pointer in the
++ * LTS slot.
++ */
++static int lse_slot_is_free(void)
++{
++    struct task_struct *p, *g;
++
++    read_lock(&tasklist_lock);
++    for_each_process_thread(g, p) {
++        if (smp_load_acquire(&p->android_vendor_data1[LTS_IDX])) {
++            pr_err("lse: slot %d of %s/%d already in use\n",
++                   LTS_IDX, p->comm, p->pid);
++            read_unlock(&tasklist_lock);
++            return -EBUSY;
++        }
++    }
++    read_unlock(&tasklist_lock);
++
++    return 0;
++}
++
++int lse_task_struct_ext_init(void)
++{
++    int ret;
++
++    ret = lse_slot_is_free();
++    if (ret) {
++        pr_err("lse: task_struct anchor slot %d is busy, LSE stays disabled\n",
++               LTS_IDX);
++        return ret;
++    }
++
++    lse_task_struct_cachep = kmem_cache_create("lse_task_struct",
++            sizeof(struct lse_task_struct), 0,
++            SLAB_PANIC | SLAB_ACCOUNT, NULL);
++
++    if (!lse_task_struct_cachep)
++        return -ENOMEM;
++
++    alloc_lts_mem_for_all_threads();
++
++    ret = register_trace_android_vh_dup_task_struct(alloc_lse_task_struct, NULL);
++    if (ret) {
++        pr_err("lse: failed to hook dup_task_struct: %d\n", ret);
++        return ret;
++    }
++
++    ret = register_trace_android_vh_free_task(free_lse_task_struct, NULL);
++    if (ret) {
++        pr_err("lse: failed to hook free_task: %d\n", ret);
++        return ret;
++    }
++
++    return 0;
++}
+diff --git a/kernel/sched/lse/lse_util_track.c b/kernel/sched/lse/lse_util_track.c
+new file mode 100644
+index 0000000..f174571
+--- /dev/null
++++ b/kernel/sched/lse/lse_util_track.c
+@@ -0,0 +1,590 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Copyright (C) 2025, LunarKernel Project. All rights reserved.
++ *
++ * This code is part of LunarKernel.
++ * slim walt (window assisted load tracking).
++ *
++ * File name: lse_util_track.c
++ * Author: Cloud_Yun <1770669041@qq.com>
++ * Version: v251003_Dev
++ * Date: 2025/10/3 Friday
++ */
++
++#include <linux/sched.h>
++#include <linux/sched/cputime.h>
++
++#include "lse_main.h"
++#include "trace_lse.h"
++
++static inline void window_rollover_systrace_c(void)
++{
++	char buf[256];
++	static unsigned long window_count;
++
++	window_count += 1;
++
++	snprintf(buf, sizeof(buf), "C|9999|lse_window_rollover|%lu\n", window_count%2);
++	lse_tracing_mark_write(buf);
++}
++
++static DEFINE_PER_CPU(u16, prev_cpu_util);
++static inline void cpu_util_update_systrace_c(int cpu)
++{
++	char buf[256];
++	u16 cpu_util = lse_cpu_util(cpu);
++
++	if(cpu_util != per_cpu(prev_cpu_util, cpu)) {
++		snprintf(buf, sizeof(buf), "C|9999|Cpu%d_util|%u\n",
++						cpu, cpu_util);
++		lse_tracing_mark_write(buf);
++		per_cpu(prev_cpu_util, cpu) = cpu_util;
++	}
++}
++
++unsigned int __read_mostly lse_sched_ravg_window = DEFAULT_SCHED_RAVG_WINDOW;
++__read_mostly unsigned int new_lse_sched_ravg_window = DEFAULT_SCHED_RAVG_WINDOW;
++DEFINE_SPINLOCK(new_sched_ravg_window_lock);
++DEFINE_PER_CPU(struct lse_rq, lse_rq);
++
++static bool init_irq_work_inited;
++static struct irq_work lse_slim_walt_irq_work;
++
++__read_mostly unsigned int lse_scale_demand_divisor;
++
++atomic64_t lse_run_rollover_lastq_ws;
++u64 tick_sched_clock;
++
++int sched_window_stats_policy;
++
++inline u64 scale_exec_time(u64 delta, struct rq *rq)
++{
++	struct lse_rq *lrq = &per_cpu(lse_rq, cpu_of(rq));
++
++	return (delta * lrq->task_exec_scale) >> SCHED_CAPACITY_SHIFT;
++}
++
++static u64 add_to_task_demand(struct lse_task_struct *lts, struct rq *rq, struct task_struct *p, u64 delta)
++{
++	delta = scale_exec_time(delta, rq);
++	lts->sum += delta;
++	if (unlikely(lts->sum > lse_sched_ravg_window))
++		lts->sum = lse_sched_ravg_window;
++
++	return delta;
++}
++
++
++static int
++account_busy_for_task_demand(struct rq *rq, struct task_struct *p, int event)
++{
++	/*
++	 * No need to bother updating task demand for the idle task.
++	 */
++	if (is_idle_task(p))
++		return 0;
++
++	/*
++	 * When a task is waking up it is completing a segment of non-busy
++	 * time. Likewise, if wait time is not treated as busy time, then
++	 * when a task begins to run or is migrated, it is not running and
++	 * is completing a segment of non-busy time.
++	 */
++	if (event == TASK_WAKE || (!SCHED_ACCOUNT_WAIT_TIME &&
++				(event == PICK_NEXT_TASK || event == TASK_MIGRATE)))
++		return 0;
++
++	/*
++	 * The idle exit time is not accounted for the first task _picked_ up to
++	 * run on the idle CPU.
++	 */
++	if (event == PICK_NEXT_TASK && rq->curr == rq->idle)
++		return 0;
++
++	/*
++	 * TASK_UPDATE can be called on sleeping task, when its moved between
++	 * related groups
++	 */
++	if (event == TASK_UPDATE) {
++		if (rq->curr == p)
++			return 1;
++
++		return p->on_rq ? SCHED_ACCOUNT_WAIT_TIME : 0;
++	}
++
++	return 1;
++}
++
++static void rollover_cpu_window(struct rq *rq, bool full_window)
++{
++	struct lse_rq *lrq = &per_cpu(lse_rq, cpu_of(rq));
++	u64 curr_sum = lrq->curr_runnable_sum;
++
++	if (unlikely(full_window))
++		curr_sum = 0;
++
++	lrq->prev_runnable_sum = curr_sum;
++	lrq->curr_runnable_sum = 0;
++}
++
++static u64
++update_window_start(struct rq *rq, u64 wallclock)
++{
++	s64 delta;
++	int nr_windows;
++	bool full_window;
++
++	struct lse_rq *lrq = &per_cpu(lse_rq, cpu_of(rq));
++	u64 old_window_start = lrq->window_start;
++
++	if (wallclock < lrq->latest_clock) {
++		LSE_BUG("on CPU%d; wallclock=%llu(0x%llx) is lesser than latest_clock=%llu(0x%llx)",
++			rq->cpu, wallclock, wallclock, lrq->latest_clock,
++			lrq->latest_clock);
++		wallclock = lrq->latest_clock;
++	}
++	delta = wallclock - lrq->window_start;
++	if (delta < 0) {
++		LSE_BUG("on CPU%d; wallclock=%llu(0x%llx) is lesser than window_start=%llu(0x%llx)",
++			rq->cpu, wallclock, wallclock,
++			lrq->window_start, lrq->window_start);
++		delta = 0;
++		wallclock = lrq->window_start;
++	}
++	lrq->latest_clock = wallclock;
++	if (delta < lse_sched_ravg_window)
++		return old_window_start;
++
++	nr_windows = div64_u64(delta, lse_sched_ravg_window);
++	lrq->window_start += (u64)nr_windows * (u64)lse_sched_ravg_window;
++
++	lrq->prev_window_size = lse_sched_ravg_window;
++	full_window = nr_windows > 1;
++	rollover_cpu_window(rq, full_window);
++
++	return old_window_start;
++}
++
++static inline unsigned int get_max_freq(unsigned int cpu)
++{
++	struct cpufreq_policy *policy = cpufreq_cpu_get_raw(cpu);
++
++	return (policy == NULL) ? 0 : policy->cpuinfo.max_freq;
++}
++
++static inline unsigned int cpu_cur_freq(int cpu)
++{
++	struct cpufreq_policy *policy = cpufreq_cpu_get_raw(cpu);
++
++	return (policy == NULL) ? 0 : policy->cur;
++}
++
++static void
++update_task_rq_cpu_cycles(struct task_struct *p, struct rq *rq, u64 wallclock)
++{
++	int cpu = cpu_of(rq);
++	struct lse_rq *lrq = &per_cpu(lse_rq, cpu_of(rq));
++
++	lrq->task_exec_scale = DIV64_U64_ROUNDUP(cpu_cur_freq(cpu) *
++					arch_scale_cpu_capacity(cpu), get_max_freq(cpu));
++}
++
++/*
++ * Called when new window is starting for a task, to record cpu usage over
++ * recently concluded window(s). Normally 'samples' should be 1. It can be > 1
++ * when, say, a real-time task runs without preemption for several windows at a
++ * stretch.
++ */
++static void update_history(struct lse_task_struct *lts, struct rq *rq, struct task_struct *p,
++			 u32 runtime, int samples, int event)
++{
++	u32 *hist = &lts->sum_history[0];
++	int i;
++	u32 max = 0, avg, demand;
++	u64 sum = 0;
++	u16 demand_scaled;
++	int samples_old = samples;
++
++	/* Ignore windows where task had no activity */
++	if (!runtime || is_idle_task(p) || !samples)
++		goto done;
++
++	/* Push new 'runtime' value onto stack */
++	for (; samples > 0; samples--) {
++		hist[lts->cidx] = runtime;
++		lts->cidx = ++(lts->cidx) % RAVG_HIST_SIZE;
++	}
++
++	for (i = 0; i < RAVG_HIST_SIZE; i++) {
++		sum += hist[i];
++		if (hist[i] > max)
++			max = hist[i];
++	}
++
++	lts->sum = 0;
++	avg = div64_u64(sum, RAVG_HIST_SIZE);
++
++	switch (sched_window_stats_policy) {
++	case WINDOW_STATS_RECENT:
++		demand = runtime;
++		break;
++	case WINDOW_STATS_MAX:
++		demand = max;
++		break;
++	case WINDOW_STATS_AVG:
++		demand = avg;
++		break;
++	default:
++		demand = max(avg, runtime);
++	}
++
++	demand_scaled = lse_scale_time_to_util(demand);
++
++	lts->demand = demand;
++	lts->demand_scaled = demand_scaled;
++
++done:
++	trace_lse_update_history(lts, rq, p, runtime, samples_old, event);
++	return;
++}
++
++
++static u64
++update_task_demand(struct lse_task_struct *lts, struct task_struct *p, struct rq *rq,
++			       int event, u64 wallclock)
++{
++	u64 mark_start = lts->mark_start;
++	struct lse_rq *lrq = &per_cpu(lse_rq, cpu_of(rq));
++	u64 delta, window_start = lrq->window_start;
++	int new_window, nr_full_windows;
++	u32 window_size = lse_sched_ravg_window;
++	u64 runtime;
++
++	new_window = mark_start < window_start;
++	if (!account_busy_for_task_demand(rq, p, event)) {
++		if (new_window)
++			/*
++			 * If the time accounted isn't being accounted as
++			 * busy time, and a new window started, only the
++			 * previous window need be closed out with the
++			 * pre-existing demand. Multiple windows may have
++			 * elapsed, but since empty windows are dropped,
++			 * it is not necessary to account those.
++			 */
++			update_history(lts, rq, p, lts->sum, 1, event);
++		return 0;
++	}
++
++	if (!new_window) {
++		/*
++		 * The simple case - busy time contained within the existing
++		 * window.
++		 */
++		return add_to_task_demand(lts, rq, p, wallclock - mark_start);
++	}
++
++	/*
++	 * Busy time spans at least two windows. Temporarily rewind
++	 * window_start to first window boundary after mark_start.
++	 */
++	delta = window_start - mark_start;
++	nr_full_windows = div64_u64(delta, window_size);
++	window_start -= (u64)nr_full_windows * (u64)window_size;
++
++	/* Process (window_start - mark_start) first */
++	runtime = add_to_task_demand(lts, rq, p, window_start - mark_start);
++
++	/* Push new sample(s) into task's demand history */
++	update_history(lts, rq, p, lts->sum, 1, event);
++	if (nr_full_windows) {
++		u64 scaled_window = scale_exec_time(window_size, rq);
++
++		update_history(lts, rq, p, scaled_window, nr_full_windows, event);
++		runtime += nr_full_windows * scaled_window;
++	}
++
++	/*
++	 * Roll window_start back to current to process any remainder
++	 * in current window.
++	 */
++	window_start += (u64)nr_full_windows * (u64)window_size;
++
++	/* Process (wallclock - window_start) next */
++	mark_start = window_start;
++	runtime += add_to_task_demand(lts, rq, p, wallclock - mark_start);
++
++	return runtime;
++}
++
++static inline int account_busy_for_cpu_time(struct rq *rq, struct task_struct *p,
++				     int event)
++{
++	return !is_idle_task(p) && (event == PUT_PREV_TASK || event == TASK_UPDATE);
++}
++
++
++static void update_cpu_busy_time(struct lse_task_struct *lts, struct task_struct *p, struct rq *rq,
++				 int event, u64 wallclock)
++{
++	int new_window, full_window = 0;
++	u64 mark_start = lts->mark_start;
++	struct lse_rq *lrq = &per_cpu(lse_rq, cpu_of(rq));
++	u64 window_start = lrq->window_start;
++	u32 window_size = lrq->prev_window_size;
++	u64 delta;
++	u64 *curr_runnable_sum = &lrq->curr_runnable_sum;
++	u64 *prev_runnable_sum = &lrq->prev_runnable_sum;
++
++	new_window = mark_start < window_start;
++	if (new_window)
++		full_window = (window_start - mark_start) >= window_size;
++
++
++	if (!account_busy_for_cpu_time(rq, p, event))
++		goto done;
++
++
++	if (!new_window) {
++		/*
++		 * account_busy_for_cpu_time() = 1 so busy time needs
++		 * to be accounted to the current window. No rollover
++		 * since we didn't start a new window. An example of this is
++		 * when a task starts execution and then sleeps within the
++		 * same window.
++		 */
++		delta = wallclock - mark_start;
++
++		delta = scale_exec_time(delta, rq);
++		*curr_runnable_sum += delta;
++
++		goto done;
++	}
++
++	/*
++	 * situations below this need window rollover,
++	 * Rollover of cpu counters (curr/prev_runnable_sum) should have already be done
++	 * in update_window_start()
++	 *
++	 * For task counters curr/prev_window[_cpu] are rolled over in the early part of
++	 * this function. If full_window(s) have expired and time since last update needs
++	 * to be accounted as busy time, set the prev to a complete window size time, else
++	 * add the prev window portion.
++	 *
++	 * For task curr counters a new window has begun, always assign
++	 */
++
++	/*
++	 * account_busy_for_cpu_time() = 1 so busy time needs
++	 * to be accounted to the current window. A new window
++	 * must have been started in udpate_window_start()
++	 * If any of these three above conditions are true
++	 * then this busy time can't be accounted as irqtime.
++	 *
++	 * Busy time for the idle task need not be accounted.
++	 *
++	 * An example of this would be a task that starts execution
++	 * and then sleeps once a new window has begun.
++	 */
++
++	/*
++	 * A full window hasn't elapsed, account partial
++	 * contribution to previous completed window.
++	 */
++
++	delta = full_window ? scale_exec_time(window_size, rq) :
++					scale_exec_time(window_start - mark_start, rq);
++
++	*prev_runnable_sum += delta;
++
++	/* Account piece of busy time in the current window. */
++	delta = scale_exec_time(wallclock - window_start, rq);
++	*curr_runnable_sum += delta;
++
++done:
++	if((dump_info & LSE_DEBUG_SYSTRACE) && new_window)
++		cpu_util_update_systrace_c(rq->cpu);
++}
++
++void lse_window_rollover_run_once(u64 old_window_start, struct rq *rq)
++{
++	u64 result;
++	struct lse_rq *lrq = &per_cpu(lse_rq, cpu_of(rq));
++	u64 new_window_start = lrq->window_start;
++
++	if (old_window_start == new_window_start)
++		return;
++
++	result = atomic64_cmpxchg(&lse_run_rollover_lastq_ws, old_window_start, new_window_start);
++
++	if (result != old_window_start)
++		return;
++
++	if (likely(cpu_online(raw_smp_processor_id())))
++		irq_work_queue(&lse_slim_walt_irq_work);
++	else
++		irq_work_queue_on(&lse_slim_walt_irq_work, cpumask_any(cpu_online_mask));
++
++	trace_lse_run_window_rollover(old_window_start, new_window_start);
++	if (dump_info & LSE_DEBUG_SYSTRACE)
++		window_rollover_systrace_c();
++}
++
++void lse_update_task_ravg(struct lse_task_struct *lts, struct task_struct *p, struct rq *rq, int event, u64 wallclock)
++{
++	struct lse_rq *lrq = &per_cpu(lse_rq, cpu_of(rq));
++	u64 old_window_start;
++
++	if(!slim_walt_ctrl)
++		return;
++
++	if(!lrq->window_start || lts->mark_start == wallclock)
++		return;
++
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0)
++	if (unlikely(!raw_spin_is_locked(&rq->__lock)))
++#else
++	if (unlikely(!raw_spin_is_locked(&rq->lock)))
++#endif
++		LSE_BUG("on CPU%d: %s task %s(%d) unlocked access"
++				 "for cpu=%d stack[%pS <== %pS <== %pS]\n",
++				 raw_smp_processor_id(), __func__,
++				 p->comm, p->pid, rq->cpu,
++				 (void *)CALLER_ADDR0,
++				 (void *)CALLER_ADDR1, (void *)CALLER_ADDR2);
++
++	old_window_start = update_window_start(rq, wallclock);
++
++	if(!lts->window_start)
++		lts->window_start = lrq->window_start;
++
++	if(!lts->mark_start)
++		goto done;
++
++	update_task_rq_cpu_cycles(p, rq, wallclock);
++	update_task_demand(lts, p, rq, event, wallclock);
++	update_cpu_busy_time(lts, p, rq, event, wallclock);
++
++	lts->window_start = lrq->window_start;
++
++done:
++	lts->mark_start = wallclock;
++
++	if (lts->mark_start > (lts->window_start + lse_sched_ravg_window))
++		LSE_BUG("CPU%d: %s task %s(%d)'s ms=%llu is ahead of ws=%llu by more than 1 window on rq=%d event=%d\n",
++			raw_smp_processor_id(), __func__, p->comm, p->pid,
++			lts->mark_start, lts->window_start, rq->cpu, event);
++
++	lse_window_rollover_run_once(old_window_start, rq);
++}
++
++static void lse_irq_work(struct irq_work *irq_work)
++{
++	cpumask_t lock_cpus;
++	struct lse_rq *lrq;
++	struct rq *rq;
++	int cpu;
++	int level = 0;
++	u64 wc;
++	unsigned long flags;
++	struct lse_task_struct *lts;
++
++	cpumask_copy(&lock_cpus, cpu_possible_mask);
++
++	for_each_cpu(cpu, &lock_cpus) {
++		if (level == 0)
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0)
++			raw_spin_lock(&cpu_rq(cpu)->__lock);
++#else
++            raw_spin_lock(&cpu_rq(cpu)->lock);
++#endif
++		else
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0)
++			raw_spin_lock_nested(&cpu_rq(cpu)->__lock, level);
++#else
++			raw_spin_lock_nested(&cpu_rq(cpu)->lock, level);
++#endif
++		level++;
++	}
++
++	wc = lse_sched_clock();
++
++	for_each_cpu(cpu, &lock_cpus) {
++		rq = cpu_rq(cpu);
++		lts = get_lse_task_struct(rq->curr);
++		if (lts)
++		lse_update_task_ravg(lts, rq->curr, rq, TASK_UPDATE, wc);
++	}
++
++	cpufreq_update_util(cpu_rq(0), LSE_CPUFREQ_WINDOW_ROLLOVER);
++	spin_lock_irqsave(&new_sched_ravg_window_lock, flags);
++	if (unlikely(new_lse_sched_ravg_window != lse_sched_ravg_window)) {
++		lrq = &per_cpu(lse_rq, smp_processor_id());
++		if (wc < lrq->window_start + new_lse_sched_ravg_window)
++			lse_sched_ravg_window = new_lse_sched_ravg_window;
++	}
++	spin_unlock_irqrestore(&new_sched_ravg_window_lock, flags);
++
++	for_each_cpu(cpu, &lock_cpus)
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0)
++		raw_spin_unlock(&cpu_rq(cpu)->__lock);
++#else
++		raw_spin_unlock(&cpu_rq(cpu)->lock);
++#endif
++}
++
++u16 lse_cpu_util(int cpu)
++{
++	u64 prev_runnable_sum;
++	struct lse_rq *lrq = &per_cpu(lse_rq, cpu);
++
++	prev_runnable_sum = lrq->prev_runnable_sum;
++	do_div(prev_runnable_sum, lrq->prev_window_size >> SCHED_CAPACITY_SHIFT);
++
++	return (u16)prev_runnable_sum;
++}
++
++static void lse_sched_init_rq(struct rq *rq)
++{
++	struct lse_rq *lrq = &per_cpu(lse_rq, cpu_of(rq));
++
++	lrq->prev_window_size = lse_sched_ravg_window;
++	lrq->task_exec_scale = 1024;
++	lrq->window_start = 0;
++}
++
++void lse_sched_stats_init(void)
++{
++	int cpu;
++	unsigned long flags;
++
++	for_each_possible_cpu(cpu) {
++		struct rq *rq = cpu_rq(cpu);
++
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0)
++		raw_spin_lock_irqsave(&rq->__lock, flags);
++#else
++		raw_spin_lock_irqsave(&rq->lock, flags);
++#endif
++		lse_sched_init_rq(rq);
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0)
++		raw_spin_unlock_irqrestore(&rq->__lock, flags);
++#else
++		raw_spin_unlock_irqrestore(&rq->lock, flags);
++#endif
++	}
++	sched_window_stats_policy = WINDOW_STATS_MAX_RECENT_AVG;
++
++	if (false == init_irq_work_inited) {
++		init_irq_work(&lse_slim_walt_irq_work, lse_irq_work);
++		init_irq_work_inited = true;
++	}
++}
++
++void sched_ravg_window_change(int frame_per_sec)
++{
++	unsigned long flags;
++
++	spin_lock_irqsave(&new_sched_ravg_window_lock, flags);
++	new_lse_sched_ravg_window = NSEC_PER_SEC / frame_per_sec;
++	spin_unlock_irqrestore(&new_sched_ravg_window_lock, flags);
++}
+diff --git a/kernel/sched/lse/trace_lse.h b/kernel/sched/lse/trace_lse.h
+new file mode 100644
+index 0000000..ca02a9a
+--- /dev/null
++++ b/kernel/sched/lse/trace_lse.h
+@@ -0,0 +1,88 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Copyright (C) 2025, LunarKernel Project. All rights reserved.
++ */
++
++#undef TRACE_SYSTEM
++#define TRACE_SYSTEM lse
++
++#if !defined(_TRACE_LSE_H_) || defined(TRACE_HEADER_MULTI_READ)
++#define _TRACE_LSE_H_
++
++#include <linux/sched.h>
++#include <linux/types.h>
++#include <linux/tracepoint.h>
++
++#include "lse_main.h"
++
++TRACE_EVENT(lse_update_history,
++
++	TP_PROTO(struct lse_task_struct *lts, struct rq *rq, struct task_struct *p, u32 runtime, int samples, int event),
++
++	TP_ARGS(lts, rq, p, runtime, samples, event),
++
++	TP_STRUCT__entry(
++		__array(char, comm, TASK_COMM_LEN)
++		__field(pid_t, pid)
++		__field(unsigned int, runtime)
++		__field(int, samples)
++		__field(int, event)
++		__field(unsigned int, demand)
++		__array(u32, hist, RAVG_HIST_SIZE)
++		__field(u16, task_util)
++		__field(int, cpu)),
++
++	TP_fast_assign(
++		memcpy(__entry->comm, p->comm, TASK_COMM_LEN);
++		__entry->pid = p->pid;
++		__entry->runtime = runtime;
++		__entry->samples = samples;
++		__entry->event = event;
++		__entry->demand = lts->demand;
++		memcpy(__entry->hist, lts->sum_history, RAVG_HIST_SIZE * sizeof(u32));
++		__entry->task_util = lts->demand_scaled,
++		__entry->cpu = rq->cpu;),
++
++	TP_printk("comm=%s[%d]: runtime %u samples %d event %d demand %u (hist: %u %u %u %u %u) task_util %u cpu %d",
++		__entry->comm, __entry->pid,
++		__entry->runtime, __entry->samples,
++		__entry->event,
++		__entry->demand,
++		__entry->hist[0], __entry->hist[1],
++		__entry->hist[2], __entry->hist[3],
++		__entry->hist[4],
++		__entry->task_util,
++		__entry->cpu)
++);
++
++TRACE_EVENT(lse_run_window_rollover,
++
++	TP_PROTO(u64 old_window_start, u64 new_window_start),
++
++	TP_ARGS(old_window_start, new_window_start),
++
++	TP_STRUCT__entry(
++		__field(u64, old_window_start)
++		__field(u64, new_window_start)
++		__field(int, cpu)),
++
++	TP_fast_assign(
++		__entry->old_window_start = old_window_start;
++		__entry->new_window_start = new_window_start;
++		__entry->cpu = raw_smp_processor_id();),
++
++	TP_printk("old_window_start=%llu new_window_start=%llu cpu=%d",
++		__entry->old_window_start,
++		__entry->new_window_start,
++		__entry->cpu)
++);
++
++#endif /*_TRACE_LSE_H_ */
++
++#undef TRACE_INCLUDE_PATH
++#define TRACE_INCLUDE_PATH .
++
++#undef TRACE_INCLUDE_FILE
++#define TRACE_INCLUDE_FILE trace_lse
++/* This part must be outside protection */
++#include <trace/define_trace.h>

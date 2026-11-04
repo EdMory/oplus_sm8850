@@ -25,7 +25,6 @@
 - [x] 引入 Clang20 与 [Oryon编译优化]([https://lkml.rescloud.iu.edu/hypermail/linux/kernel/2503.3/02174.html](https://lists.llvm.org/pipermail/cfe-commits/Week-of-Mon-20240603/585645.html))
 - [x] LZ4 1.10.0 & ZSTD 1.5.7 算法更新&优化补丁(来自[@ferstar](https://github.com/ferstar), 移植by [@Xiaomichael](https://github.com/Xiaomichael), 6.12版本补丁重制by [@cctv18](https://github.com/cctv18))
 - [x] 移植LZ4KD支持到6.12内核(可选补丁)
-- [x] 移植[LRU_CAST](https://github.com/firelzrd/lru_cast)支持到6.12内核(可选补丁)
 - [x] 可选加入 BBR/Brutal 及一系列 tcp 拥塞控制算法
 - [x] [INTFP](https://github.com/firelzrd/intfp),[ISQRT](https://github.com/firelzrd/isqrt)移植
 - [x] [ADIOS](https://github.com/firelzrd/adios),[BORE](https://github.com/firelzrd/bore),[Cambyses](https://github.com/firelzrd/cambyses)移植
@@ -38,7 +37,7 @@
 ##### 
 ##### 
 ##### 
-## 鸣谢（排名不分先后）
+## 鸣谢
 - firelzrd：[firelzrd](https://github.com/firelzrd)
 - WildKernel的一加系列内核构建脚本：[WildKernels/OnePlus_KernelSU_SUSFS](https://github.com/WildKernels/OnePlus_KernelSU_SUSFS)
 - cctv18的欧加真米系列内核构建脚本：[oppo_oplus_realme_sm8850](https://github.com/cctv18/oppo_oplus_realme_sm8850)

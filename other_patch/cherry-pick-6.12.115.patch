@@ -1,46 +1,8 @@
 diff --git a/drivers/block/zram/zram_drv.c b/drivers/block/zram/zram_drv.c
-index 76b326d..19f985f 100644
+index 55f52f9..169513c 100644
 --- a/drivers/block/zram/zram_drv.c
 +++ b/drivers/block/zram/zram_drv.c
-@@ -610,7 +610,7 @@ static ssize_t writeback_store(struct device *dev,
- 		struct device_attribute *attr, const char *buf, size_t len)
- {
- 	struct zram *zram = dev_to_zram(dev);
--	unsigned long nr_pages = zram->disksize >> PAGE_SHIFT;
-+	unsigned long nr_pages;
- 	unsigned long index = 0;
- 	struct bio bio;
- 	struct bio_vec bio_vec;
-@@ -631,11 +631,9 @@ static ssize_t writeback_store(struct device *dev,
- 		if (strncmp(buf, PAGE_WB_SIG, sizeof(PAGE_WB_SIG) - 1))
- 			return -EINVAL;
- 
--		if (kstrtol(buf + sizeof(PAGE_WB_SIG) - 1, 10, &index) ||
--				index >= nr_pages)
-+		if (kstrtol(buf + sizeof(PAGE_WB_SIG) - 1, 10, &index))
- 			return -EINVAL;
- 
--		nr_pages = 1;
- 		mode = PAGE_WRITEBACK;
- 	}
- 
-@@ -645,6 +643,15 @@ static ssize_t writeback_store(struct device *dev,
- 		goto release_init_lock;
- 	}
- 
-+	nr_pages = zram->disksize >> PAGE_SHIFT;
-+	if (mode == PAGE_WRITEBACK) {
-+		if (index >= nr_pages) {
-+			up_read(&zram->init_lock);
-+			return -EINVAL;
-+		}
-+		nr_pages = 1;
-+	}
-+
- 	/* Do not permit concurrent post-processing actions. */
- 	if (atomic_xchg(&zram->pp_in_progress, 1)) {
- 		up_read(&zram->init_lock);
-@@ -868,7 +875,7 @@ static ssize_t read_block_state(struct file *file, char __user *buf,
+@@ -1844,7 +1844,7 @@ static ssize_t read_block_state(struct file *file, char __user *buf,
  	char *kbuf;
  	ssize_t index, written = 0;
  	struct zram *zram = file->private_data;
@@ -49,7 +11,7 @@ index 76b326d..19f985f 100644
  	struct timespec64 ts;
  
  	kbuf = kvmalloc(count, GFP_KERNEL);
-@@ -882,6 +889,8 @@ static ssize_t read_block_state(struct file *file, char __user *buf,
+@@ -1858,6 +1858,8 @@ static ssize_t read_block_state(struct file *file, char __user *buf,
  		return -EINVAL;
  	}
  
@@ -58,16 +20,7 @@ index 76b326d..19f985f 100644
  	for (index = *ppos; index < nr_pages; index++) {
  		int copied;
  
-@@ -1661,7 +1670,7 @@ static int zram_bvec_write_partial(struct zram *zram, struct bio_vec *bvec,
- 	if (!page)
- 		return -ENOMEM;
- 
--	ret = zram_read_page(zram, page, index, bio);
-+	ret = zram_read_page(zram, page, index, NULL);
- 	if (!ret) {
- 		memcpy_from_bvec(page_address(page) + offset, bvec);
- 		ret = zram_write_page(zram, page, index);
-@@ -2017,7 +2026,7 @@ static void zram_bio_discard(struct zram *zram, struct bio *bio)
+@@ -3076,7 +3078,7 @@ static void zram_bio_discard(struct zram *zram, struct bio *bio)
  	 */
  	if (offset) {
  		if (n <= (PAGE_SIZE - offset))
@@ -76,7 +29,7 @@ index 76b326d..19f985f 100644
  
  		n -= (PAGE_SIZE - offset);
  		index++;
-@@ -2032,6 +2041,7 @@ static void zram_bio_discard(struct zram *zram, struct bio *bio)
+@@ -3091,6 +3093,7 @@ static void zram_bio_discard(struct zram *zram, struct bio *bio)
  		n -= PAGE_SIZE;
  	}
  
@@ -84,24 +37,6 @@ index 76b326d..19f985f 100644
  	bio_endio(bio);
  }
  
-diff --git a/drivers/hid/hid-core.c b/drivers/hid/hid-core.c
-index 9910c6d..52be63d 100644
---- a/drivers/hid/hid-core.c
-+++ b/drivers/hid/hid-core.c
-@@ -2006,6 +2006,13 @@ int hid_report_raw_event(struct hid_device *hid, enum hid_report_type type, u8 *
- 	u8 *cdata = data;
- 	int ret = 0;
- 
-+	if (report_enum->numbered && (size < 1 || bufsize < 1)) {
-+		hid_warn_ratelimited(hid,
-+				     "Event data for numbered report is too short (%d vs %zu)\n",
-+				     size, bufsize);
-+		return -EINVAL;
-+	}
-+
- 	report = hid_get_report(report_enum, data);
- 	if (!report)
- 		goto out;
 diff --git a/drivers/interconnect/core.c b/drivers/interconnect/core.c
 index 7e9b996..e3d3350 100644
 --- a/drivers/interconnect/core.c
@@ -127,29 +62,11 @@ index 7e9b996..e3d3350 100644
  	}
  out:
  	mutex_unlock(&icc_lock);
-diff --git a/drivers/opp/core.c b/drivers/opp/core.c
-index 5ac2094..24b9ebc 100644
---- a/drivers/opp/core.c
-+++ b/drivers/opp/core.c
-@@ -2026,11 +2026,10 @@ int _opp_add(struct device *dev, struct dev_pm_opp *new_opp,
- 		return ret;
- 	}
- 
--	list_add(&new_opp->node, head);
--	mutex_unlock(&opp_table->lock);
--
- 	new_opp->opp_table = opp_table;
- 	kref_init(&new_opp->kref);
-+	list_add(&new_opp->node, head);
-+	mutex_unlock(&opp_table->lock);
- 
- 	opp_debug_create_one(new_opp, opp_table);
- 
 diff --git a/drivers/ufs/core/ufs-mcq.c b/drivers/ufs/core/ufs-mcq.c
-index 5e6197a..37af6de 100644
+index 04262fe..3d3ae76 100644
 --- a/drivers/ufs/core/ufs-mcq.c
 +++ b/drivers/ufs/core/ufs-mcq.c
-@@ -299,17 +299,24 @@ static int ufshcd_mcq_get_tag(struct ufs_hba *hba, struct cq_entry *cqe)
+@@ -305,17 +305,24 @@ static int ufshcd_mcq_get_tag(struct ufs_hba *hba, struct cq_entry *cqe)
  	return div_u64(addr, ufshcd_get_ucd_size(hba));
  }
  
@@ -180,7 +97,7 @@ index 5e6197a..37af6de 100644
  }
  
  void ufshcd_mcq_compl_all_cqes_lock(struct ufs_hba *hba,
-@@ -320,13 +327,13 @@ void ufshcd_mcq_compl_all_cqes_lock(struct ufs_hba *hba,
+@@ -326,13 +333,13 @@ void ufshcd_mcq_compl_all_cqes_lock(struct ufs_hba *hba,
  
  	spin_lock_irqsave(&hwq->cq_lock, flags);
  	while (entries > 0) {
@@ -198,50 +115,11 @@ index 5e6197a..37af6de 100644
  	spin_unlock_irqrestore(&hwq->cq_lock, flags);
  }
  
-diff --git a/drivers/ufs/core/ufs-sysfs.c b/drivers/ufs/core/ufs-sysfs.c
-index f8397ef..5d4f23b 100644
---- a/drivers/ufs/core/ufs-sysfs.c
-+++ b/drivers/ufs/core/ufs-sysfs.c
-@@ -426,6 +426,8 @@ static ssize_t pm_qos_enable_show(struct device *dev,
- {
- 	struct ufs_hba *hba = dev_get_drvdata(dev);
- 
-+	guard(mutex)(&hba->pm_qos_mutex);
-+
- 	return sysfs_emit(buf, "%d\n", hba->pm_qos_enabled);
- }
- 
 diff --git a/drivers/ufs/core/ufshcd.c b/drivers/ufs/core/ufshcd.c
-index fb406e9..0094e6d 100644
+index 9fb54b2..7f64cc0 100644
 --- a/drivers/ufs/core/ufshcd.c
 +++ b/drivers/ufs/core/ufshcd.c
-@@ -1023,6 +1023,7 @@ EXPORT_SYMBOL_GPL(ufshcd_is_hba_active);
-  */
- void ufshcd_pm_qos_init(struct ufs_hba *hba)
- {
-+	guard(mutex)(&hba->pm_qos_mutex);
- 
- 	if (hba->pm_qos_enabled)
- 		return;
-@@ -1039,6 +1040,8 @@ void ufshcd_pm_qos_init(struct ufs_hba *hba)
-  */
- void ufshcd_pm_qos_exit(struct ufs_hba *hba)
- {
-+	guard(mutex)(&hba->pm_qos_mutex);
-+
- 	if (!hba->pm_qos_enabled)
- 		return;
- 
-@@ -1053,6 +1056,8 @@ void ufshcd_pm_qos_exit(struct ufs_hba *hba)
-  */
- static void ufshcd_pm_qos_update(struct ufs_hba *hba, bool on)
- {
-+	guard(mutex)(&hba->pm_qos_mutex);
-+
- 	if (!hba->pm_qos_enabled)
- 		return;
- 
-@@ -10537,6 +10542,9 @@ int ufshcd_init(struct ufs_hba *hba, void __iomem *mmio_base, unsigned int irq)
+@@ -10757,6 +10757,9 @@ int ufshcd_init(struct ufs_hba *hba, void __iomem *mmio_base, unsigned int irq)
  	 */
  	spin_lock_init(&hba->clk_gating.lock);
  
@@ -251,14 +129,6 @@ index fb406e9..0094e6d 100644
  	/*
  	 * Set the default power management level for runtime and system PM.
  	 * Host controller drivers can override them in their
-@@ -10622,6 +10630,7 @@ int ufshcd_init(struct ufs_hba *hba, void __iomem *mmio_base, unsigned int irq)
- 	mutex_init(&hba->ee_ctrl_mutex);
- 
- 	mutex_init(&hba->wb_mutex);
-+
- 	init_rwsem(&hba->clk_scaling_lock);
- 
- 	ufshcd_init_clk_gating(hba);
 diff --git a/drivers/vhost/vhost.c b/drivers/vhost/vhost.c
 index 276dded..a1c8157 100644
 --- a/drivers/vhost/vhost.c
@@ -279,28 +149,10 @@ index 276dded..a1c8157 100644
  
  	return r;
 diff --git a/fs/exec.c b/fs/exec.c
-index 030240d..4a23ab0 100644
+index 965fdc5..c42867a 100644
 --- a/fs/exec.c
 +++ b/fs/exec.c
-@@ -1217,6 +1217,17 @@ void __set_task_comm(struct task_struct *tsk, const char *buf, bool exec)
- 	perf_event_comm(tsk, exec);
- }
- 
-+static void posixtimer_exec(struct task_struct *me)
-+{
-+#ifdef CONFIG_POSIX_TIMERS
-+	spin_lock_irq(&me->sighand->siglock);
-+	posix_cpu_timers_exit(me);
-+	spin_unlock_irq(&me->sighand->siglock);
-+	exit_itimers(me);
-+	flush_itimer_signals();
-+#endif
-+}
-+
- /*
-  * Calling this is the point of no return. None of the failures will be
-  * seen by userspace since either the process is already taking a fatal
-@@ -1250,6 +1261,16 @@ int begin_new_exec(struct linux_binprm * bprm)
+@@ -1256,6 +1256,22 @@ int begin_new_exec(struct linux_binprm * bprm)
  	retval = de_thread(me);
  	if (retval)
  		goto out;
@@ -312,12 +164,18 @@ index 030240d..4a23ab0 100644
 +	 * timer would not remove an enqueued timer because the TID lookup
 +	 * of the old TID fails.
 +	 */
-+	posixtimer_exec(me);
++#ifdef CONFIG_POSIX_TIMERS
++	spin_lock_irq(&me->sighand->siglock);
++	posix_cpu_timers_exit(me);
++	spin_unlock_irq(&me->sighand->siglock);
++	exit_itimers(me);
++	flush_itimer_signals();
++#endif
 +
  	/* see the comment in check_unsafe_exec() */
  	current->fs->in_exec = 0;
  	/*
-@@ -1290,14 +1311,6 @@ int begin_new_exec(struct linux_binprm * bprm)
+@@ -1316,14 +1332,6 @@ int begin_new_exec(struct linux_binprm * bprm)
  	if (retval)
  		goto out_unlock;
  
@@ -332,33 +190,11 @@ index 030240d..4a23ab0 100644
  	/*
  	 * Make the signal table private.
  	 */
-diff --git a/fs/ext4/mballoc.c b/fs/ext4/mballoc.c
-index ed2d63b..a657c20 100644
---- a/fs/ext4/mballoc.c
-+++ b/fs/ext4/mballoc.c
-@@ -1091,8 +1091,6 @@ static inline int should_optimize_scan(struct ext4_allocation_context *ac)
- 		return 0;
- 	if (ac->ac_criteria >= CR_GOAL_LEN_SLOW)
- 		return 0;
--	if (!ext4_test_inode_flag(ac->ac_inode, EXT4_INODE_EXTENTS))
--		return 0;
- 	return 1;
- }
- 
 diff --git a/fs/f2fs/gc.c b/fs/f2fs/gc.c
-index dfd1e44..f70b385 100644
+index edfd9c7..c493fb4 100644
 --- a/fs/f2fs/gc.c
 +++ b/fs/f2fs/gc.c
-@@ -1227,7 +1227,7 @@ static int ra_data_block(struct inode *inode, pgoff_t index)
- 		.encrypted_page = NULL,
- 		.in_list = 0,
- 	};
--	int err;
-+	int err = 0;
- 
- 	page = f2fs_grab_cache_page(mapping, index, true);
- 	if (!page)
-@@ -1279,6 +1279,9 @@ got_it:
+@@ -1305,6 +1305,9 @@ got_it:
  		goto put_page;
  	}
  
@@ -369,26 +205,26 @@ index dfd1e44..f70b385 100644
  	if (err)
  		goto put_encrypted_page;
 diff --git a/fs/f2fs/node.c b/fs/f2fs/node.c
-index 720768d..aafd3a4 100644
+index a43da4c..c9b2809 100644
 --- a/fs/f2fs/node.c
 +++ b/fs/f2fs/node.c
-@@ -1908,6 +1908,11 @@ continue_unlock:
+@@ -1939,6 +1939,11 @@ continue_unlock:
  		f2fs_debug(sbi, "Retry to write fsync mark: ino=%u, idx=%lx",
- 			   ino, page_folio(last_page)->index);
- 		lock_page(last_page);
-+		if (unlikely(last_page->mapping != NODE_MAPPING(sbi))) {
-+			f2fs_put_page(last_page, 1);
+ 			   ino, last_folio->index);
+ 		folio_lock(last_folio);
++		if (unlikely(last_folio->mapping != NODE_MAPPING(sbi))) {
++			f2fs_folio_put(last_folio, true);
 +			ret = -EAGAIN;
 +			goto out;
 +		}
- 		f2fs_wait_on_page_writeback(last_page, NODE, true, true);
- 		set_page_dirty(last_page);
- 		unlock_page(last_page);
+ 		f2fs_folio_wait_writeback(last_folio, NODE, true, true);
+ 		folio_mark_dirty(last_folio);
+ 		folio_unlock(last_folio);
 diff --git a/fs/fs-writeback.c b/fs/fs-writeback.c
-index 45e9033..5696ea5 100644
+index ce332d8..502adb9 100644
 --- a/fs/fs-writeback.c
 +++ b/fs/fs-writeback.c
-@@ -369,7 +369,8 @@ static struct bdi_writeback *inode_to_wb_and_lock_list(struct inode *inode)
+@@ -372,7 +372,8 @@ static struct bdi_writeback *inode_to_wb_and_lock_list(struct inode *inode)
  }
  
  struct inode_switch_wbs_context {
@@ -398,15 +234,7 @@ index 45e9033..5696ea5 100644
  
  	/*
  	 * Multiple inodes can be switched at once.  The switching procedure
-@@ -379,7 +380,6 @@ struct inode_switch_wbs_context {
- 	 * array embedded into struct inode_switch_wbs_context.  Otherwise
- 	 * an inode could be left in a non-consistent state.
- 	 */
--	struct bdi_writeback	*new_wb;
- 	struct inode		*inodes[];
- };
- 
-@@ -488,13 +488,11 @@ skip_switch:
+@@ -491,13 +492,11 @@ skip_switch:
  	return switched;
  }
  
@@ -422,7 +250,7 @@ index 45e9033..5696ea5 100644
  	unsigned long nr_switched = 0;
  	struct inode **inodep;
  
-@@ -554,6 +552,40 @@ relock:
+@@ -557,6 +556,40 @@ relock:
  	atomic_dec(&isw_nr_in_flight);
  }
  
@@ -463,7 +291,7 @@ index 45e9033..5696ea5 100644
  static bool inode_prepare_wbs_switch(struct inode *inode,
  				     struct bdi_writeback *new_wb)
  {
-@@ -583,6 +615,13 @@ static bool inode_prepare_wbs_switch(struct inode *inode,
+@@ -586,6 +619,13 @@ static bool inode_prepare_wbs_switch(struct inode *inode,
  	return true;
  }
  
@@ -477,7 +305,7 @@ index 45e9033..5696ea5 100644
  /**
   * inode_switch_wbs - change the wb association of an inode
   * @inode: target inode
-@@ -596,6 +635,7 @@ static void inode_switch_wbs(struct inode *inode, int new_wb_id)
+@@ -599,6 +639,7 @@ static void inode_switch_wbs(struct inode *inode, int new_wb_id)
  	struct backing_dev_info *bdi = inode_to_bdi(inode);
  	struct cgroup_subsys_state *memcg_css;
  	struct inode_switch_wbs_context *isw;
@@ -485,7 +313,7 @@ index 45e9033..5696ea5 100644
  
  	/* noop if seems to be already in progress */
  	if (inode->i_state & I_WB_SWITCH)
-@@ -620,49 +660,58 @@ static void inode_switch_wbs(struct inode *inode, int new_wb_id)
+@@ -623,49 +664,58 @@ static void inode_switch_wbs(struct inode *inode, int new_wb_id)
  	if (!memcg_css)
  		goto out_free;
  
@@ -531,9 +359,7 @@ index 45e9033..5696ea5 100644
 +	struct inode *inode, *tmp;
 +	LIST_HEAD(scanned);
 +	bool full = false;
- 
--	list_for_each_entry(inode, list, i_io_list) {
--		if (!inode_prepare_wbs_switch(inode, isw->new_wb))
++
 +	/*
 +	 * Walk from the oldest end and move scanned inodes to the newest
 +	 * end, so the next scan resumes at unscanned inodes instead of
@@ -543,7 +369,9 @@ index 45e9033..5696ea5 100644
 +	 */
 +	list_for_each_entry_safe_reverse(inode, tmp, list, i_io_list) {
 +		list_move(&inode->i_io_list, &scanned);
-+
+ 
+-	list_for_each_entry(inode, list, i_io_list) {
+-		if (!inode_prepare_wbs_switch(inode, isw->new_wb))
 +		if (!inode_prepare_wbs_switch(inode, new_wb))
  			continue;
  
@@ -564,7 +392,7 @@ index 45e9033..5696ea5 100644
  }
  
  /**
-@@ -677,6 +726,7 @@ bool cleanup_offline_cgwb(struct bdi_writeback *wb)
+@@ -680,6 +730,7 @@ bool cleanup_offline_cgwb(struct bdi_writeback *wb)
  {
  	struct cgroup_subsys_state *memcg_css;
  	struct inode_switch_wbs_context *isw;
@@ -572,7 +400,7 @@ index 45e9033..5696ea5 100644
  	int nr;
  	bool restart = false;
  
-@@ -689,12 +739,12 @@ bool cleanup_offline_cgwb(struct bdi_writeback *wb)
+@@ -692,12 +743,12 @@ bool cleanup_offline_cgwb(struct bdi_writeback *wb)
  
  	for (memcg_css = wb->memcg_css->parent; memcg_css;
  	     memcg_css = memcg_css->parent) {
@@ -589,7 +417,7 @@ index 45e9033..5696ea5 100644
  
  	nr = 0;
  	spin_lock(&wb->list_lock);
-@@ -706,27 +756,21 @@ bool cleanup_offline_cgwb(struct bdi_writeback *wb)
+@@ -709,27 +760,21 @@ bool cleanup_offline_cgwb(struct bdi_writeback *wb)
  	 * bandwidth restrictions, as writeback of inode metadata is not
  	 * accounted for.
  	 */
@@ -622,23 +450,11 @@ index 45e9033..5696ea5 100644
  
  	return restart;
  }
-@@ -1162,11 +1206,6 @@ void cgroup_writeback_umount(struct super_block *sb)
- 	smp_mb();
- 
- 	if (atomic_read(&isw_nr_in_flight)) {
--		/*
--		 * Use rcu_barrier() to wait for all pending callbacks to
--		 * ensure that all in-flight wb switches are in the workqueue.
--		 */
--		rcu_barrier();
- 		flush_workqueue(isw_wq);
- 	}
- }
 diff --git a/include/linux/backing-dev-defs.h b/include/linux/backing-dev-defs.h
-index 2ad2610..c5c9d89 100644
+index 28b3d15..1a7d1ac 100644
 --- a/include/linux/backing-dev-defs.h
 +++ b/include/linux/backing-dev-defs.h
-@@ -152,6 +152,10 @@ struct bdi_writeback {
+@@ -153,6 +153,10 @@ struct bdi_writeback {
  	struct list_head blkcg_node;	/* anchored at blkcg->cgwb_list */
  	struct list_head b_attached;	/* attached inodes, protected by list_lock */
  	struct list_head offline_node;	/* anchored at offline_cgwbs */
@@ -650,10 +466,10 @@ index 2ad2610..c5c9d89 100644
  	union {
  		struct work_struct release_work;
 diff --git a/include/linux/cgroup-defs.h b/include/linux/cgroup-defs.h
-index 252eed7..d75b802 100644
+index 694e627..731e771 100644
 --- a/include/linux/cgroup-defs.h
 +++ b/include/linux/cgroup-defs.h
-@@ -458,7 +458,10 @@ struct cgroup {
+@@ -498,7 +498,10 @@ struct cgroup {
  
  	int nr_threaded_children;	/* # of live threaded child cgroups */
  
@@ -666,20 +482,13 @@ index 252eed7..d75b802 100644
  
  	struct kernfs_node *kn;		/* cgroup kernfs entry */
 diff --git a/include/linux/io_uring_types.h b/include/linux/io_uring_types.h
-index f18f50d..c1a17c3 100644
+index f08f979..4383974 100644
 --- a/include/linux/io_uring_types.h
 +++ b/include/linux/io_uring_types.h
-@@ -17,6 +17,14 @@ enum {
+@@ -18,6 +18,7 @@ enum {
  	 * It's also ignored unless IORING_SETUP_DEFER_TASKRUN is set.
  	 */
  	IOU_F_TWQ_LAZY_WAKE			= 1,
-+
-+	/*
-+	 * Set when task_work is queued from a waitqueue wakeup handler, where
-+	 * an arbitrary provider waitqueue lock is held. Signaling the CQ ring
-+	 * eventfd inline from there can recurse back into that lock through
-+	 * epoll, so the eventfd signal must be deferred.
-+	 */
 +	IOU_F_TWQ_IN_WAKE			= 2,
  };
  
@@ -698,10 +507,10 @@ index 641a057..b6bf90a 100644
  
  static inline void inode_attach_wb(struct inode *inode, struct folio *folio)
 diff --git a/include/net/ip.h b/include/net/ip.h
-index c65ca27..aa98bc2 100644
+index 818b2d4..6252dce 100644
 --- a/include/net/ip.h
 +++ b/include/net/ip.h
-@@ -73,6 +73,13 @@ static inline unsigned int ip_hdrlen(const struct sk_buff *skb)
+@@ -74,6 +74,13 @@ static inline unsigned int ip_hdrlen(const struct sk_buff *skb)
  	return ip_hdr(skb)->ihl * 4;
  }
  
@@ -742,10 +551,10 @@ index 4aeffdd..e680383 100644
  	/* extra space to store route keys */
  };
 diff --git a/include/net/sch_generic.h b/include/net/sch_generic.h
-index 1e002b1..75a0d60 100644
+index c563b79..242b8ef 100644
 --- a/include/net/sch_generic.h
 +++ b/include/net/sch_generic.h
-@@ -758,13 +758,23 @@ static inline bool skb_skip_tc_classify(struct sk_buff *skb)
+@@ -766,13 +766,23 @@ static inline bool skb_skip_tc_classify(struct sk_buff *skb)
  static inline void qdisc_reset_all_tx_gt(struct net_device *dev, unsigned int i)
  {
  	struct Qdisc *qdisc;
@@ -770,19 +579,10 @@ index 1e002b1..75a0d60 100644
  	}
  }
 diff --git a/include/net/tcp.h b/include/net/tcp.h
-index 3255a19..9c3a5c7 100644
+index 3255a19..88cbe0e 100644
 --- a/include/net/tcp.h
 +++ b/include/net/tcp.h
-@@ -53,8 +53,6 @@ extern struct inet_hashinfo tcp_hashinfo;
- DECLARE_PER_CPU(unsigned int, tcp_orphan_count);
- int tcp_orphan_count_sum(void);
- 
--DECLARE_PER_CPU(u32, tcp_tw_isn);
--
- void tcp_time_wait(struct sock *sk, int state, int timeo);
- 
- #define MAX_TCP_HEADER	L1_CACHE_ALIGN(128 + MAX_HEADER)
-@@ -962,10 +960,13 @@ struct tcp_skb_cb {
+@@ -962,10 +962,13 @@ struct tcp_skb_cb {
  	__u32		seq;		/* Starting sequence number	*/
  	__u32		end_seq;	/* SEQ + FIN + SYN + datalen	*/
  	union {
@@ -797,7 +597,7 @@ index 3255a19..9c3a5c7 100644
  		struct {
  			u16	tcp_gso_segs;
  			u16	tcp_gso_size;
-@@ -1083,9 +1084,9 @@ static inline bool tcp_skb_can_collapse_to(const struct sk_buff *skb)
+@@ -1083,9 +1086,9 @@ static inline bool tcp_skb_can_collapse_to(const struct sk_buff *skb)
  static inline bool tcp_skb_can_collapse(const struct sk_buff *to,
  					const struct sk_buff *from)
  {
@@ -808,7 +608,7 @@ index 3255a19..9c3a5c7 100644
  		      skb_pure_zcopy_same(to, from) &&
  		      skb_frags_readable(to) == skb_frags_readable(from));
  }
-@@ -2110,7 +2111,7 @@ static inline void tcp_rtx_queue_unlink_and_free(struct sk_buff *skb, struct soc
+@@ -2110,7 +2113,7 @@ static inline void tcp_rtx_queue_unlink_and_free(struct sk_buff *skb, struct soc
  
  static inline void tcp_write_collapse_fence(struct sock *sk)
  {
@@ -817,27 +617,6 @@ index 3255a19..9c3a5c7 100644
  
  	if (skb)
  		TCP_SKB_CB(skb)->eor = 1;
-diff --git a/include/ufs/ufshcd.h b/include/ufs/ufshcd.h
-index bdc5564..143b83a 100644
---- a/include/ufs/ufshcd.h
-+++ b/include/ufs/ufshcd.h
-@@ -968,6 +968,7 @@ enum ufshcd_mcq_opr {
-  * @ufs_rtc_update_work: A work for UFS RTC periodic update
-  * @pm_qos_req: PM QoS request handle
-  * @pm_qos_enabled: flag to check if pm qos is enabled
-+ * @pm_qos_mutex: synchronizes PM QoS request and status updates
-  */
- struct ufs_hba {
- 	void __iomem *mmio_base;
-@@ -1138,6 +1139,8 @@ struct ufs_hba {
- 	struct delayed_work ufs_rtc_update_work;
- 	struct pm_qos_request pm_qos_req;
- 	bool pm_qos_enabled;
-+	/* synchronizes PM QoS request and status updates */
-+	struct mutex pm_qos_mutex;
- };
- 
- /**
 diff --git a/io_uring/eventfd.c b/io_uring/eventfd.c
 index ffc4bd1..6a6ec9d 100644
 --- a/io_uring/eventfd.c
@@ -902,15 +681,15 @@ index a3d2b70..5897697 100644
  
  static struct io_futex_data *io_alloc_ifd(struct io_ring_ctx *ctx)
 diff --git a/io_uring/io_uring.c b/io_uring/io_uring.c
-index 99b0b1b..49f515d 100644
+index e8e0bba..a01d856 100644
 --- a/io_uring/io_uring.c
 +++ b/io_uring/io_uring.c
-@@ -1207,7 +1207,7 @@ static inline void io_req_local_work_add(struct io_kiocb *req,
+@@ -1212,7 +1212,7 @@ static inline void io_req_local_work_add(struct io_kiocb *req,
  		if (ctx->flags & IORING_SETUP_TASKRUN_FLAG)
  			atomic_or(IORING_SQ_TASKRUN, &ctx->rings->sq_flags);
  		if (ctx->has_evfd)
 -			io_eventfd_signal(ctx);
-+			io_eventfd_signal(ctx, flags & IOU_F_TWQ_IN_WAKE);
++			io_eventfd_signal(ctx, false);
  	}
  
  	nr_wait = atomic_read(&ctx->cq_wait_nr);
@@ -1017,10 +796,10 @@ index ecaa358..66ca167 100644
  }
  
 diff --git a/kernel/cgroup/cgroup.c b/kernel/cgroup/cgroup.c
-index cb756ee..3d98ebc 100644
+index 793921a..78c9bab 100644
 --- a/kernel/cgroup/cgroup.c
 +++ b/kernel/cgroup/cgroup.c
-@@ -3875,33 +3875,41 @@ static int cgroup_cpu_pressure_show(struct seq_file *seq, void *v)
+@@ -3908,33 +3908,41 @@ static int cgroup_cpu_pressure_show(struct seq_file *seq, void *v)
  static ssize_t pressure_write(struct kernfs_open_file *of, char *buf,
  			      size_t nbytes, enum psi_res res)
  {
@@ -1070,7 +849,7 @@ index cb756ee..3d98ebc 100644
  
  	return nbytes;
  }
-@@ -6565,10 +6573,7 @@ static int cgroup_css_set_fork(struct kernel_clone_args *kargs)
+@@ -6617,10 +6625,7 @@ static int cgroup_css_set_fork(struct kernel_clone_args *kargs)
  	spin_lock_irq(&css_set_lock);
  	cset = task_css_set(current);
  	get_css_set(cset);
@@ -1082,7 +861,7 @@ index cb756ee..3d98ebc 100644
  	spin_unlock_irq(&css_set_lock);
  
  	if (!(kargs->flags & CLONE_INTO_CGROUP)) {
-@@ -6633,6 +6638,7 @@ static int cgroup_css_set_fork(struct kernel_clone_args *kargs)
+@@ -6685,6 +6690,7 @@ static int cgroup_css_set_fork(struct kernel_clone_args *kargs)
  	put_css_set(cset);
  	fput(f);
  	kargs->cgrp = dst_cgrp;
@@ -1090,52 +869,8 @@ index cb756ee..3d98ebc 100644
  	return ret;
  
  err:
-diff --git a/kernel/exit.c b/kernel/exit.c
-index d465b36..fd3012c 100644
---- a/kernel/exit.c
-+++ b/kernel/exit.c
-@@ -206,7 +206,13 @@ static void __exit_signal(struct task_struct *tsk)
- 	 * doing sigqueue_free() if we have SIGQUEUE_PREALLOC signals.
- 	 */
- 	flush_sigqueue(&tsk->pending);
--	tsk->sighand = NULL;
-+
-+	/*
-+	 * Ensure that all preceeding state is visible. Pairs with
-+	 * the smp_acquire__after_ctrl_dep() in the sighand == NULL
-+	 * path of lock_task_sighand().
-+	 */
-+	smp_store_release(&tsk->sighand, NULL);
- 	spin_unlock(&sighand->siglock);
- 
- 	__cleanup_sighand(sighand);
-diff --git a/kernel/futex/pi.c b/kernel/futex/pi.c
-index 8ec12f1..635c7d5 100644
---- a/kernel/futex/pi.c
-+++ b/kernel/futex/pi.c
-@@ -922,6 +922,7 @@ int futex_lock_pi(u32 __user *uaddr, unsigned int flags, ktime_t *time, int tryl
- 	struct rt_mutex_waiter rt_waiter;
- 	struct futex_hash_bucket *hb;
- 	struct futex_q q = futex_q_init;
-+	DEFINE_WAKE_Q(wake_q);
- 	int res, ret;
- 
- 	if (!IS_ENABLED(CONFIG_FUTEX_PI))
-@@ -1018,8 +1019,11 @@ retry_private:
- 	 * such that futex_unlock_pi() is guaranteed to observe the waiter when
- 	 * it sees the futex_q::pi_state.
- 	 */
--	ret = __rt_mutex_start_proxy_lock(&q.pi_state->pi_mutex, &rt_waiter, current);
-+	ret = __rt_mutex_start_proxy_lock(&q.pi_state->pi_mutex, &rt_waiter, current, &wake_q);
-+	preempt_disable();
- 	raw_spin_unlock_irq(&q.pi_state->pi_mutex.wait_lock);
-+	wake_up_q(&wake_q);
-+	preempt_enable();
- 
- 	if (ret) {
- 		if (ret == 1)
 diff --git a/kernel/futex/requeue.c b/kernel/futex/requeue.c
-index 559aae5..99176c1 100644
+index f4a6994..99176c1 100644
 --- a/kernel/futex/requeue.c
 +++ b/kernel/futex/requeue.c
 @@ -149,8 +149,16 @@ static inline void futex_requeue_pi_complete(struct futex_q *q, int locked)
@@ -1157,598 +892,11 @@ index 559aae5..99176c1 100644
  		rcuwait_wake_up(&q->requeue_wait);
  #endif
  }
-@@ -309,8 +317,11 @@ futex_proxy_trylock_atomic(u32 __user *pifutex, struct futex_hash_bucket *hb1,
- 		return -EINVAL;
- 
- 	/* Ensure that this does not race against an early wakeup */
--	if (!futex_requeue_pi_prepare(top_waiter, NULL))
-+	if (!futex_requeue_pi_prepare(top_waiter, NULL)) {
-+		plist_del(&top_waiter->list, &hb1->chain);
-+		futex_hb_waiters_dec(hb1);
- 		return -EAGAIN;
-+	}
- 
- 	/*
- 	 * Try to take the lock for top_waiter and set the FUTEX_WAITERS bit
-@@ -711,10 +722,12 @@ int handle_early_requeue_pi_wakeup(struct futex_hash_bucket *hb,
- 
- 	/*
- 	 * We were woken prior to requeue by a timeout or a signal.
--	 * Unqueue the futex_q and determine which it was.
-+	 * Conditionally unqueue the futex_q and determine which it was.
- 	 */
--	plist_del(&q->list, &hb->chain);
--	futex_hb_waiters_dec(hb);
-+	if (!plist_node_empty(&q->list)) {
-+		plist_del(&q->list, &hb->chain);
-+		futex_hb_waiters_dec(hb);
-+	}
- 
- 	/* Handle spurious wakeups gracefully */
- 	ret = -EWOULDBLOCK;
-diff --git a/kernel/locking/mutex.c b/kernel/locking/mutex.c
-index cbae8c0..6c94da0 100644
---- a/kernel/locking/mutex.c
-+++ b/kernel/locking/mutex.c
-@@ -575,6 +575,7 @@ __mutex_lock_common(struct mutex *lock, unsigned int state, unsigned int subclas
- 		    struct lockdep_map *nest_lock, unsigned long ip,
- 		    struct ww_acquire_ctx *ww_ctx, const bool use_ww_ctx)
- {
-+	DEFINE_WAKE_Q(wake_q);
- 	struct mutex_waiter waiter;
- 	struct ww_mutex *ww;
- 	int ret;
-@@ -625,7 +626,7 @@ __mutex_lock_common(struct mutex *lock, unsigned int state, unsigned int subclas
- 	 */
- 	if (__mutex_trylock(lock)) {
- 		if (ww_ctx)
--			__ww_mutex_check_waiters(lock, ww_ctx);
-+			__ww_mutex_check_waiters(lock, ww_ctx, &wake_q);
- 
- 		goto skip_wait;
- 	}
-@@ -645,7 +646,7 @@ __mutex_lock_common(struct mutex *lock, unsigned int state, unsigned int subclas
- 		 * Add in stamp order, waking up waiters that must kill
- 		 * themselves.
- 		 */
--		ret = __ww_mutex_add_waiter(&waiter, lock, ww_ctx);
-+		ret = __ww_mutex_add_waiter(&waiter, lock, ww_ctx, &wake_q);
- 		if (ret)
- 			goto err_early_kill;
- 	}
-@@ -681,6 +682,10 @@ __mutex_lock_common(struct mutex *lock, unsigned int state, unsigned int subclas
- 		}
- 
- 		raw_spin_unlock(&lock->wait_lock);
-+		/* Make sure we do wakeups before calling schedule */
-+		wake_up_q(&wake_q);
-+		wake_q_init(&wake_q);
-+
- 		schedule_preempt_disabled();
- 
- 		first = __mutex_waiter_is_first(lock, &waiter);
-@@ -714,7 +719,7 @@ acquired:
- 		 */
- 		if (!ww_ctx->is_wait_die &&
- 		    !__mutex_waiter_is_first(lock, &waiter))
--			__ww_mutex_check_waiters(lock, ww_ctx);
-+			__ww_mutex_check_waiters(lock, ww_ctx, &wake_q);
- 	}
- 
- 	__mutex_remove_waiter(lock, &waiter);
-@@ -730,6 +735,7 @@ skip_wait:
- 		ww_mutex_lock_acquired(ww, ww_ctx);
- 
- 	raw_spin_unlock(&lock->wait_lock);
-+	wake_up_q(&wake_q);
- 	preempt_enable();
- 	return 0;
- 
-@@ -741,6 +747,7 @@ err_early_kill:
- 	raw_spin_unlock(&lock->wait_lock);
- 	debug_mutex_free_waiter(&waiter);
- 	mutex_release(&lock->dep_map, ip);
-+	wake_up_q(&wake_q);
- 	preempt_enable();
- 	return ret;
- }
-@@ -951,9 +958,10 @@ static noinline void __sched __mutex_unlock_slowpath(struct mutex *lock, unsigne
- 	if (owner & MUTEX_FLAG_HANDOFF)
- 		__mutex_handoff(lock, next);
- 
-+	preempt_disable();
- 	raw_spin_unlock(&lock->wait_lock);
--
- 	wake_up_q(&wake_q);
-+	preempt_enable();
- }
- 
- #ifndef CONFIG_DEBUG_LOCK_ALLOC
-diff --git a/kernel/locking/rtmutex.c b/kernel/locking/rtmutex.c
-index ebebd0e..8fdbd29 100644
---- a/kernel/locking/rtmutex.c
-+++ b/kernel/locking/rtmutex.c
-@@ -34,13 +34,15 @@
- 
- static inline int __ww_mutex_add_waiter(struct rt_mutex_waiter *waiter,
- 					struct rt_mutex *lock,
--					struct ww_acquire_ctx *ww_ctx)
-+					struct ww_acquire_ctx *ww_ctx,
-+					struct wake_q_head *wake_q)
- {
- 	return 0;
- }
- 
- static inline void __ww_mutex_check_waiters(struct rt_mutex *lock,
--					    struct ww_acquire_ctx *ww_ctx)
-+					    struct ww_acquire_ctx *ww_ctx,
-+					    struct wake_q_head *wake_q)
- {
- }
- 
-@@ -1201,7 +1203,8 @@ static int __sched task_blocks_on_rt_mutex(struct rt_mutex_base *lock,
- 					   struct rt_mutex_waiter *waiter,
- 					   struct task_struct *task,
- 					   struct ww_acquire_ctx *ww_ctx,
--					   enum rtmutex_chainwalk chwalk)
-+					   enum rtmutex_chainwalk chwalk,
-+					   struct wake_q_head *wake_q)
- {
- 	struct task_struct *owner = rt_mutex_owner(lock);
- 	struct rt_mutex_waiter *top_waiter = waiter;
-@@ -1245,7 +1248,10 @@ static int __sched task_blocks_on_rt_mutex(struct rt_mutex_base *lock,
- 
- 		/* Check whether the waiter should back out immediately */
- 		rtm = container_of(lock, struct rt_mutex, rtmutex);
--		res = __ww_mutex_add_waiter(waiter, rtm, ww_ctx);
-+		preempt_disable();
-+		res = __ww_mutex_add_waiter(waiter, rtm, ww_ctx, wake_q);
-+		wake_up_q(wake_q);
-+		preempt_enable();
- 		if (res) {
- 			raw_spin_lock(&task->pi_lock);
- 			rt_mutex_dequeue(lock, waiter);
-@@ -1531,20 +1537,23 @@ static bool rtmutex_spin_on_owner(struct rt_mutex_base *lock,
-  *
-  * Must be called with lock->wait_lock held and interrupts disabled. It must
-  * have just failed to try_to_take_rt_mutex().
-+ *
-+ * When invoked from rt_mutex_start_proxy_lock() waiter::task != current !
-  */
- static void __sched remove_waiter(struct rt_mutex_base *lock,
- 				  struct rt_mutex_waiter *waiter)
- {
- 	bool is_top_waiter = (waiter == rt_mutex_top_waiter(lock));
- 	struct task_struct *owner = rt_mutex_owner(lock);
-+	struct task_struct *waiter_task = waiter->task;
- 	struct rt_mutex_base *next_lock;
- 
- 	lockdep_assert_held(&lock->wait_lock);
- 
--	raw_spin_lock(&current->pi_lock);
--	rt_mutex_dequeue(lock, waiter);
--	current->pi_blocked_on = NULL;
--	raw_spin_unlock(&current->pi_lock);
-+	scoped_guard(raw_spinlock, &waiter_task->pi_lock) {
-+		rt_mutex_dequeue(lock, waiter);
-+		waiter_task->pi_blocked_on = NULL;
-+	}
- 
- 	/*
- 	 * Only update priority if the waiter was the highest priority
-@@ -1580,7 +1589,7 @@ static void __sched remove_waiter(struct rt_mutex_base *lock,
- 	raw_spin_unlock_irq(&lock->wait_lock);
- 
- 	rt_mutex_adjust_prio_chain(owner, RT_MUTEX_MIN_CHAINWALK, lock,
--				   next_lock, NULL, current);
-+				   next_lock, NULL, waiter_task);
- 
- 	raw_spin_lock_irq(&lock->wait_lock);
- }
-@@ -1674,12 +1683,14 @@ static void __sched rt_mutex_handle_deadlock(int res, int detect_deadlock,
-  * @state:	The task state for sleeping
-  * @chwalk:	Indicator whether full or partial chainwalk is requested
-  * @waiter:	Initializer waiter for blocking
-+ * @wake_q:	The wake_q to wake tasks after we release the wait_lock
-  */
- static int __sched __rt_mutex_slowlock(struct rt_mutex_base *lock,
- 				       struct ww_acquire_ctx *ww_ctx,
- 				       unsigned int state,
- 				       enum rtmutex_chainwalk chwalk,
--				       struct rt_mutex_waiter *waiter)
-+				       struct rt_mutex_waiter *waiter,
-+				       struct wake_q_head *wake_q)
- {
- 	struct rt_mutex *rtm = container_of(lock, struct rt_mutex, rtmutex);
- 	struct ww_mutex *ww = ww_container_of(rtm);
-@@ -1690,7 +1701,7 @@ static int __sched __rt_mutex_slowlock(struct rt_mutex_base *lock,
- 	/* Try to acquire the lock again: */
- 	if (try_to_take_rt_mutex(lock, current, NULL)) {
- 		if (build_ww_mutex() && ww_ctx) {
--			__ww_mutex_check_waiters(rtm, ww_ctx);
-+			__ww_mutex_check_waiters(rtm, ww_ctx, wake_q);
- 			ww_mutex_lock_acquired(ww, ww_ctx);
- 		}
- 		return 0;
-@@ -1700,7 +1711,7 @@ static int __sched __rt_mutex_slowlock(struct rt_mutex_base *lock,
- 
- 	trace_contention_begin(lock, LCB_F_RT);
- 
--	ret = task_blocks_on_rt_mutex(lock, waiter, current, ww_ctx, chwalk);
-+	ret = task_blocks_on_rt_mutex(lock, waiter, current, ww_ctx, chwalk, wake_q);
- 	if (likely(!ret))
- 		ret = rt_mutex_slowlock_block(lock, ww_ctx, state, NULL, waiter);
- 
-@@ -1708,7 +1719,7 @@ static int __sched __rt_mutex_slowlock(struct rt_mutex_base *lock,
- 		/* acquired the lock */
- 		if (build_ww_mutex() && ww_ctx) {
- 			if (!ww_ctx->is_wait_die)
--				__ww_mutex_check_waiters(rtm, ww_ctx);
-+				__ww_mutex_check_waiters(rtm, ww_ctx, wake_q);
- 			ww_mutex_lock_acquired(ww, ww_ctx);
- 		}
- 	} else {
-@@ -1730,7 +1741,8 @@ static int __sched __rt_mutex_slowlock(struct rt_mutex_base *lock,
- 
- static inline int __rt_mutex_slowlock_locked(struct rt_mutex_base *lock,
- 					     struct ww_acquire_ctx *ww_ctx,
--					     unsigned int state)
-+					     unsigned int state,
-+					     struct wake_q_head *wake_q)
- {
- 	struct rt_mutex_waiter waiter;
- 	int ret;
-@@ -1739,7 +1751,7 @@ static inline int __rt_mutex_slowlock_locked(struct rt_mutex_base *lock,
- 	waiter.ww_ctx = ww_ctx;
- 
- 	ret = __rt_mutex_slowlock(lock, ww_ctx, state, RT_MUTEX_MIN_CHAINWALK,
--				  &waiter);
-+				  &waiter, wake_q);
- 
- 	debug_rt_mutex_free_waiter(&waiter);
- 	return ret;
-@@ -1755,6 +1767,7 @@ static int __sched rt_mutex_slowlock(struct rt_mutex_base *lock,
- 				     struct ww_acquire_ctx *ww_ctx,
- 				     unsigned int state)
- {
-+	DEFINE_WAKE_Q(wake_q);
- 	unsigned long flags;
- 	int ret;
- 
-@@ -1776,8 +1789,11 @@ static int __sched rt_mutex_slowlock(struct rt_mutex_base *lock,
- 	 * irqsave/restore variants.
- 	 */
- 	raw_spin_lock_irqsave(&lock->wait_lock, flags);
--	ret = __rt_mutex_slowlock_locked(lock, ww_ctx, state);
-+	ret = __rt_mutex_slowlock_locked(lock, ww_ctx, state, &wake_q);
-+	preempt_disable();
- 	raw_spin_unlock_irqrestore(&lock->wait_lock, flags);
-+	wake_up_q(&wake_q);
-+	preempt_enable();
- 	rt_mutex_post_schedule();
- 
- 	return ret;
-@@ -1803,8 +1819,10 @@ static __always_inline int __rt_mutex_lock(struct rt_mutex_base *lock,
- /**
-  * rtlock_slowlock_locked - Slow path lock acquisition for RT locks
-  * @lock:	The underlying RT mutex
-+ * @wake_q:	The wake_q to wake tasks after we release the wait_lock
-  */
--static void __sched rtlock_slowlock_locked(struct rt_mutex_base *lock)
-+static void __sched rtlock_slowlock_locked(struct rt_mutex_base *lock,
-+					   struct wake_q_head *wake_q)
- {
- 	struct rt_mutex_waiter waiter;
- 	struct task_struct *owner;
-@@ -1821,7 +1839,7 @@ static void __sched rtlock_slowlock_locked(struct rt_mutex_base *lock)
- 
- 	trace_contention_begin(lock, LCB_F_RT);
- 
--	task_blocks_on_rt_mutex(lock, &waiter, current, NULL, RT_MUTEX_MIN_CHAINWALK);
-+	task_blocks_on_rt_mutex(lock, &waiter, current, NULL, RT_MUTEX_MIN_CHAINWALK, wake_q);
- 
- 	for (;;) {
- 		/* Try to acquire the lock again */
-@@ -1832,7 +1850,11 @@ static void __sched rtlock_slowlock_locked(struct rt_mutex_base *lock)
- 			owner = rt_mutex_owner(lock);
- 		else
- 			owner = NULL;
-+		preempt_disable();
- 		raw_spin_unlock_irq(&lock->wait_lock);
-+		wake_up_q(wake_q);
-+		wake_q_init(wake_q);
-+		preempt_enable();
- 
- 		if (!owner || !rtmutex_spin_on_owner(lock, &waiter, owner))
- 			schedule_rtlock();
-@@ -1857,10 +1879,14 @@ static void __sched rtlock_slowlock_locked(struct rt_mutex_base *lock)
- static __always_inline void __sched rtlock_slowlock(struct rt_mutex_base *lock)
- {
- 	unsigned long flags;
-+	DEFINE_WAKE_Q(wake_q);
- 
- 	raw_spin_lock_irqsave(&lock->wait_lock, flags);
--	rtlock_slowlock_locked(lock);
-+	rtlock_slowlock_locked(lock, &wake_q);
-+	preempt_disable();
- 	raw_spin_unlock_irqrestore(&lock->wait_lock, flags);
-+	wake_up_q(&wake_q);
-+	preempt_enable();
- }
- 
- #endif /* RT_MUTEX_BUILD_SPINLOCKS */
-diff --git a/kernel/locking/rtmutex_api.c b/kernel/locking/rtmutex_api.c
-index a6974d0..2bc14c0 100644
---- a/kernel/locking/rtmutex_api.c
-+++ b/kernel/locking/rtmutex_api.c
-@@ -275,6 +275,7 @@ void __sched rt_mutex_proxy_unlock(struct rt_mutex_base *lock)
-  * @lock:		the rt_mutex to take
-  * @waiter:		the pre-initialized rt_mutex_waiter
-  * @task:		the task to prepare
-+ * @wake_q:		the wake_q to wake tasks after we release the wait_lock
-  *
-  * Starts the rt_mutex acquire; it enqueues the @waiter and does deadlock
-  * detection. It does not wait, see rt_mutex_wait_proxy_lock() for that.
-@@ -291,7 +292,8 @@ void __sched rt_mutex_proxy_unlock(struct rt_mutex_base *lock)
-  */
- int __sched __rt_mutex_start_proxy_lock(struct rt_mutex_base *lock,
- 					struct rt_mutex_waiter *waiter,
--					struct task_struct *task)
-+					struct task_struct *task,
-+					struct wake_q_head *wake_q)
- {
- 	int ret;
- 
-@@ -302,7 +304,7 @@ int __sched __rt_mutex_start_proxy_lock(struct rt_mutex_base *lock,
- 
- 	/* We enforce deadlock detection for futexes */
- 	ret = task_blocks_on_rt_mutex(lock, waiter, task, NULL,
--				      RT_MUTEX_FULL_CHAINWALK);
-+				      RT_MUTEX_FULL_CHAINWALK, wake_q);
- 
- 	if (ret && !rt_mutex_owner(lock)) {
- 		/*
-@@ -341,12 +343,16 @@ int __sched rt_mutex_start_proxy_lock(struct rt_mutex_base *lock,
- 				      struct task_struct *task)
- {
- 	int ret;
-+	DEFINE_WAKE_Q(wake_q);
- 
- 	raw_spin_lock_irq(&lock->wait_lock);
--	ret = __rt_mutex_start_proxy_lock(lock, waiter, task);
-+	ret = __rt_mutex_start_proxy_lock(lock, waiter, task, &wake_q);
- 	if (unlikely(ret))
- 		remove_waiter(lock, waiter);
-+	preempt_disable();
- 	raw_spin_unlock_irq(&lock->wait_lock);
-+	wake_up_q(&wake_q);
-+	preempt_enable();
- 
- 	return ret;
- }
-diff --git a/kernel/locking/rtmutex_common.h b/kernel/locking/rtmutex_common.h
-index 1162e07..c38a2d2 100644
---- a/kernel/locking/rtmutex_common.h
-+++ b/kernel/locking/rtmutex_common.h
-@@ -83,7 +83,8 @@ extern void rt_mutex_init_proxy_locked(struct rt_mutex_base *lock,
- extern void rt_mutex_proxy_unlock(struct rt_mutex_base *lock);
- extern int __rt_mutex_start_proxy_lock(struct rt_mutex_base *lock,
- 				     struct rt_mutex_waiter *waiter,
--				     struct task_struct *task);
-+				     struct task_struct *task,
-+				     struct wake_q_head *);
- extern int rt_mutex_start_proxy_lock(struct rt_mutex_base *lock,
- 				     struct rt_mutex_waiter *waiter,
- 				     struct task_struct *task);
-diff --git a/kernel/locking/rwbase_rt.c b/kernel/locking/rwbase_rt.c
-index 34a5956..9f4322c 100644
---- a/kernel/locking/rwbase_rt.c
-+++ b/kernel/locking/rwbase_rt.c
-@@ -69,6 +69,7 @@ static int __sched __rwbase_read_lock(struct rwbase_rt *rwb,
- 				      unsigned int state)
- {
- 	struct rt_mutex_base *rtm = &rwb->rtmutex;
-+	DEFINE_WAKE_Q(wake_q);
- 	int ret;
- 
- 	rwbase_pre_schedule();
-@@ -110,7 +111,7 @@ static int __sched __rwbase_read_lock(struct rwbase_rt *rwb,
- 	 * For rwlocks this returns 0 unconditionally, so the below
- 	 * !ret conditionals are optimized out.
- 	 */
--	ret = rwbase_rtmutex_slowlock_locked(rtm, state);
-+	ret = rwbase_rtmutex_slowlock_locked(rtm, state, &wake_q);
- 
- 	/*
- 	 * On success the rtmutex is held, so there can't be a writer
-@@ -121,7 +122,12 @@ static int __sched __rwbase_read_lock(struct rwbase_rt *rwb,
- 	 */
- 	if (!ret)
- 		atomic_inc(&rwb->readers);
-+
-+	preempt_disable();
- 	raw_spin_unlock_irq(&rtm->wait_lock);
-+	wake_up_q(&wake_q);
-+	preempt_enable();
-+
- 	if (!ret)
- 		rwbase_rtmutex_unlock(rtm);
- 
-diff --git a/kernel/locking/rwsem.c b/kernel/locking/rwsem.c
-index 2bbb6ec..2ddb827 100644
---- a/kernel/locking/rwsem.c
-+++ b/kernel/locking/rwsem.c
-@@ -1413,8 +1413,8 @@ static inline void __downgrade_write(struct rw_semaphore *sem)
- #define rwbase_rtmutex_lock_state(rtm, state)		\
- 	__rt_mutex_lock(rtm, state)
- 
--#define rwbase_rtmutex_slowlock_locked(rtm, state)	\
--	__rt_mutex_slowlock_locked(rtm, NULL, state)
-+#define rwbase_rtmutex_slowlock_locked(rtm, state, wq)	\
-+	__rt_mutex_slowlock_locked(rtm, NULL, state, wq)
- 
- #define rwbase_rtmutex_unlock(rtm)			\
- 	__rt_mutex_unlock(rtm)
-diff --git a/kernel/locking/spinlock_rt.c b/kernel/locking/spinlock_rt.c
-index 38e2924..0141439 100644
---- a/kernel/locking/spinlock_rt.c
-+++ b/kernel/locking/spinlock_rt.c
-@@ -162,9 +162,10 @@ rwbase_rtmutex_lock_state(struct rt_mutex_base *rtm, unsigned int state)
- }
- 
- static __always_inline int
--rwbase_rtmutex_slowlock_locked(struct rt_mutex_base *rtm, unsigned int state)
-+rwbase_rtmutex_slowlock_locked(struct rt_mutex_base *rtm, unsigned int state,
-+			       struct wake_q_head *wake_q)
- {
--	rtlock_slowlock_locked(rtm);
-+	rtlock_slowlock_locked(rtm, wake_q);
- 	return 0;
- }
- 
-diff --git a/kernel/locking/ww_mutex.h b/kernel/locking/ww_mutex.h
-index 76d204b..a54bd16 100644
---- a/kernel/locking/ww_mutex.h
-+++ b/kernel/locking/ww_mutex.h
-@@ -275,7 +275,7 @@ __ww_ctx_less(struct ww_acquire_ctx *a, struct ww_acquire_ctx *b)
-  */
- static bool
- __ww_mutex_die(struct MUTEX *lock, struct MUTEX_WAITER *waiter,
--	       struct ww_acquire_ctx *ww_ctx)
-+	       struct ww_acquire_ctx *ww_ctx, struct wake_q_head *wake_q)
- {
- 	if (!ww_ctx->is_wait_die)
- 		return false;
-@@ -284,7 +284,7 @@ __ww_mutex_die(struct MUTEX *lock, struct MUTEX_WAITER *waiter,
- #ifndef WW_RT
- 		debug_mutex_wake_waiter(lock, waiter);
- #endif
--		wake_up_process(waiter->task);
-+		wake_q_add(wake_q, waiter->task);
- 	}
- 
- 	return true;
-@@ -299,7 +299,8 @@ __ww_mutex_die(struct MUTEX *lock, struct MUTEX_WAITER *waiter,
-  */
- static bool __ww_mutex_wound(struct MUTEX *lock,
- 			     struct ww_acquire_ctx *ww_ctx,
--			     struct ww_acquire_ctx *hold_ctx)
-+			     struct ww_acquire_ctx *hold_ctx,
-+			     struct wake_q_head *wake_q)
- {
- 	struct task_struct *owner = __ww_mutex_owner(lock);
- 
-@@ -331,7 +332,7 @@ static bool __ww_mutex_wound(struct MUTEX *lock,
- 		 * wakeup pending to re-read the wounded state.
- 		 */
- 		if (owner != current)
--			wake_up_process(owner);
-+			wake_q_add(wake_q, owner);
- 
- 		return true;
- 	}
-@@ -352,7 +353,8 @@ static bool __ww_mutex_wound(struct MUTEX *lock,
-  * The current task must not be on the wait list.
-  */
- static void
--__ww_mutex_check_waiters(struct MUTEX *lock, struct ww_acquire_ctx *ww_ctx)
-+__ww_mutex_check_waiters(struct MUTEX *lock, struct ww_acquire_ctx *ww_ctx,
-+			 struct wake_q_head *wake_q)
- {
- 	struct MUTEX_WAITER *cur;
- 
-@@ -364,8 +366,8 @@ __ww_mutex_check_waiters(struct MUTEX *lock, struct ww_acquire_ctx *ww_ctx)
- 		if (!cur->ww_ctx)
- 			continue;
- 
--		if (__ww_mutex_die(lock, cur, ww_ctx) ||
--		    __ww_mutex_wound(lock, cur->ww_ctx, ww_ctx))
-+		if (__ww_mutex_die(lock, cur, ww_ctx, wake_q) ||
-+		    __ww_mutex_wound(lock, cur->ww_ctx, ww_ctx, wake_q))
- 			break;
- 	}
- }
-@@ -377,6 +379,8 @@ __ww_mutex_check_waiters(struct MUTEX *lock, struct ww_acquire_ctx *ww_ctx)
- static __always_inline void
- ww_mutex_set_context_fastpath(struct ww_mutex *lock, struct ww_acquire_ctx *ctx)
- {
-+	DEFINE_WAKE_Q(wake_q);
-+
- 	ww_mutex_lock_acquired(lock, ctx);
- 
- 	/*
-@@ -405,8 +409,11 @@ ww_mutex_set_context_fastpath(struct ww_mutex *lock, struct ww_acquire_ctx *ctx)
- 	 * die or wound us.
- 	 */
- 	lock_wait_lock(&lock->base);
--	__ww_mutex_check_waiters(&lock->base, ctx);
-+	__ww_mutex_check_waiters(&lock->base, ctx, &wake_q);
-+	preempt_disable();
- 	unlock_wait_lock(&lock->base);
-+	wake_up_q(&wake_q);
-+	preempt_enable();
- }
- 
- static __always_inline int
-@@ -488,7 +495,8 @@ __ww_mutex_check_kill(struct MUTEX *lock, struct MUTEX_WAITER *waiter,
- static inline int
- __ww_mutex_add_waiter(struct MUTEX_WAITER *waiter,
- 		      struct MUTEX *lock,
--		      struct ww_acquire_ctx *ww_ctx)
-+		      struct ww_acquire_ctx *ww_ctx,
-+		      struct wake_q_head *wake_q)
- {
- 	struct MUTEX_WAITER *cur, *pos = NULL;
- 	bool is_wait_die;
-@@ -532,7 +540,7 @@ __ww_mutex_add_waiter(struct MUTEX_WAITER *waiter,
- 		pos = cur;
- 
- 		/* Wait-Die: ensure younger waiters die. */
--		__ww_mutex_die(lock, cur, ww_ctx);
-+		__ww_mutex_die(lock, cur, ww_ctx, wake_q);
- 	}
- 
- 	__ww_waiter_add(lock, waiter, pos);
-@@ -550,7 +558,7 @@ __ww_mutex_add_waiter(struct MUTEX_WAITER *waiter,
- 		 * such that either we or the fastpath will wound @ww->ctx.
- 		 */
- 		smp_mb();
--		__ww_mutex_wound(lock, ww_ctx, ww->ctx);
-+		__ww_mutex_wound(lock, ww_ctx, ww->ctx, wake_q);
- 	}
- 
- 	return 0;
-diff --git a/kernel/rcu/tree_plugin.h b/kernel/rcu/tree_plugin.h
-index 2d865b2..56ea8ea 100644
---- a/kernel/rcu/tree_plugin.h
-+++ b/kernel/rcu/tree_plugin.h
-@@ -626,11 +626,10 @@ notrace void rcu_preempt_deferred_qs(struct task_struct *t)
-  */
- static void rcu_preempt_deferred_qs_handler(struct irq_work *iwp)
- {
--	unsigned long flags;
- 	struct rcu_data *rdp;
- 
-+	lockdep_assert_irqs_disabled();
- 	rdp = container_of(iwp, struct rcu_data, defer_qs_iw);
--	local_irq_save(flags);
- 
- 	/*
- 	 * If the IRQ work handler happens to run in the middle of RCU read-side
-@@ -647,8 +646,6 @@ static void rcu_preempt_deferred_qs_handler(struct irq_work *iwp)
- 	 */
- 	if (rcu_preempt_depth() > 0)
- 		WRITE_ONCE(rdp->defer_qs_iw_pending, DEFER_QS_IDLE);
--
--	local_irq_restore(flags);
- }
- 
- /*
 diff --git a/kernel/sched/core.c b/kernel/sched/core.c
-index b1895b3..b031550 100644
+index 3caa543..e915d5d 100644
 --- a/kernel/sched/core.c
 +++ b/kernel/sched/core.c
-@@ -401,6 +401,17 @@ static void __sched_core_flip(bool enabled)
+@@ -494,6 +494,17 @@ static void __sched_core_flip(bool enabled)
  
  		sched_core_lock(cpu, &flags);
  
@@ -1766,7 +914,7 @@ index b1895b3..b031550 100644
  		for_each_cpu(t, smt_mask)
  			cpu_rq(t)->core_enabled = enabled;
  
-@@ -6085,6 +6096,8 @@ pick_next_task(struct rq *rq, struct task_struct *prev, struct rq_flags *rf)
+@@ -6777,6 +6788,8 @@ pick_next_task(struct rq *rq, struct task_struct *prev, struct rq_flags *rf)
  		return __pick_next_task(rq, prev, rf);
  	}
  
@@ -1775,7 +923,7 @@ index b1895b3..b031550 100644
  	/*
  	 * If there were no {en,de}queues since we picked (IOW, the task
  	 * pointers are all still valid), and we haven't scheduled the last
-@@ -6279,6 +6292,7 @@ pick_next_task(struct rq *rq, struct task_struct *prev, struct rq_flags *rf)
+@@ -6971,6 +6984,7 @@ pick_next_task(struct rq *rq, struct task_struct *prev, struct rq_flags *rf)
  	}
  
  out_set_next:
@@ -1783,7 +931,7 @@ index b1895b3..b031550 100644
  	put_prev_set_next_task(rq, prev, next);
  	if (rq->core->core_forceidle_count && next == rq->idle)
  		queue_core_balance(rq);
-@@ -6475,6 +6489,13 @@ static void sched_core_cpu_deactivate(unsigned int cpu)
+@@ -7164,6 +7178,13 @@ static void sched_core_cpu_deactivate(unsigned int cpu)
  	core_rq->core_forceidle_seq        = rq->core_forceidle_seq;
  	core_rq->core_forceidle_occupation = rq->core_forceidle_occupation;
  
@@ -1797,7 +945,7 @@ index b1895b3..b031550 100644
  	/*
  	 * Accounting edge for forced idle is handled in pick_next_task().
  	 * Don't need another one here, since the hotplug thread shouldn't
-@@ -8546,6 +8567,7 @@ void __init sched_init(void)
+@@ -9740,6 +9761,7 @@ void __init sched_init(void)
  		rq->core_forceidle_count = 0;
  		rq->core_forceidle_occupation = 0;
  		rq->core_forceidle_start = 0;
@@ -1806,10 +954,10 @@ index b1895b3..b031550 100644
  		rq->core_cookie = 0UL;
  #endif
 diff --git a/kernel/sched/cpufreq_schedutil.c b/kernel/sched/cpufreq_schedutil.c
-index e5ced97..fee9fc1 100644
+index 66f23b0..4564509 100644
 --- a/kernel/sched/cpufreq_schedutil.c
 +++ b/kernel/sched/cpufreq_schedutil.c
-@@ -59,6 +59,17 @@ static DEFINE_PER_CPU(struct sugov_cpu, sugov_cpu);
+@@ -61,6 +61,17 @@ static DEFINE_PER_CPU(struct sugov_cpu, sugov_cpu);
  
  /************************ Governor internals ***********************/
  
@@ -1827,7 +975,7 @@ index e5ced97..fee9fc1 100644
  static bool sugov_should_update_freq(struct sugov_policy *sg_policy, u64 time)
  {
  	s64 delta_ns;
-@@ -599,7 +610,7 @@ rate_limit_us_store(struct gov_attr_set *attr_set, const char *buf, size_t count
+@@ -607,7 +618,7 @@ rate_limit_us_store(struct gov_attr_set *attr_set, const char *buf, size_t count
  	tunables->rate_limit_us = rate_limit_us;
  
  	list_for_each_entry(sg_policy, &attr_set->policy_list, tunables_hook)
@@ -1836,7 +984,7 @@ index e5ced97..fee9fc1 100644
  
  	return count;
  }
-@@ -858,7 +869,7 @@ static int sugov_start(struct cpufreq_policy *policy)
+@@ -866,7 +877,7 @@ static int sugov_start(struct cpufreq_policy *policy)
  	void (*uu)(struct update_util_data *data, u64 time, unsigned int flags);
  	unsigned int cpu;
  
@@ -1846,10 +994,10 @@ index e5ced97..fee9fc1 100644
  	sg_policy->next_freq			= 0;
  	sg_policy->work_in_progress		= false;
 diff --git a/kernel/sched/fair.c b/kernel/sched/fair.c
-index 6efb1df..a00ea82 100644
+index 3723601..52b6874 100644
 --- a/kernel/sched/fair.c
 +++ b/kernel/sched/fair.c
-@@ -4390,7 +4390,8 @@ static inline void
+@@ -4505,7 +4505,8 @@ static inline void
  update_tg_cfs_runnable(struct cfs_rq *cfs_rq, struct sched_entity *se, struct cfs_rq *gcfs_rq)
  {
  	long delta_sum, delta_avg = gcfs_rq->avg.runnable_avg - se->avg.runnable_avg;
@@ -1859,7 +1007,7 @@ index 6efb1df..a00ea82 100644
  
  	/* Nothing to update */
  	if (!delta_avg)
-@@ -4404,7 +4405,7 @@ update_tg_cfs_runnable(struct cfs_rq *cfs_rq, struct sched_entity *se, struct cf
+@@ -4519,7 +4520,7 @@ update_tg_cfs_runnable(struct cfs_rq *cfs_rq, struct sched_entity *se, struct cf
  
  	/* Set new sched_entity's runnable */
  	se->avg.runnable_avg = gcfs_rq->avg.runnable_avg;
@@ -1868,7 +1016,7 @@ index 6efb1df..a00ea82 100644
  	delta_sum = (long)new_sum - (long)se->avg.runnable_sum;
  	se->avg.runnable_sum = new_sum;
  
-@@ -8084,25 +8085,32 @@ static int select_idle_sibling(struct task_struct *p, int prev, int target)
+@@ -8250,25 +8251,32 @@ static int select_idle_sibling(struct task_struct *p, int prev, int target)
  static unsigned long
  cpu_util(int cpu, struct task_struct *p, int dst_cpu, int boost)
  {
@@ -1909,7 +1057,7 @@ index 6efb1df..a00ea82 100644
  
  	if (sched_feat(UTIL_EST)) {
  		unsigned long util_est;
-@@ -9320,6 +9328,7 @@ struct lb_env {
+@@ -9533,6 +9541,7 @@ struct lb_env {
  
  	int			dst_cpu;
  	struct rq		*dst_rq;
@@ -1917,7 +1065,7 @@ index 6efb1df..a00ea82 100644
  
  	struct cpumask		*dst_grpmask;
  	int			new_dst_cpu;
-@@ -10510,13 +10519,30 @@ static bool update_sd_pick_busiest(struct lb_env *env,
+@@ -10792,14 +10801,31 @@ static bool update_sd_pick_busiest(struct lb_env *env,
  	 * We can use max_capacity here as reduction in capacity on some
  	 * CPUs in the group should either be possible to resolve
  	 * internally or be covered by avg_load imbalance (eventually).
@@ -1929,6 +1077,7 @@ index 6efb1df..a00ea82 100644
  	 */
  	if ((env->sd->flags & SD_ASYM_CPUCAPACITY) &&
  	    (sgs->group_type == group_misfit_task) &&
+ 	    (sgs->group_misfit_reason == MISFIT_PERF) &&
 -	    (!capacity_greater(capacity_of(env->dst_cpu), sg->sgc->max_capacity) ||
 +	    (!env->dst_core_idle ||
 +	     !capacity_greater(capacity_of(env->dst_cpu), sg->sgc->max_capacity) ||
@@ -1949,25 +1098,7 @@ index 6efb1df..a00ea82 100644
  	if (sgs->group_type > busiest->group_type)
  		return true;
  
-@@ -10618,17 +10644,6 @@ has_spare:
- 		break;
- 	}
- 
--	/*
--	 * Candidate sg has no more than one task per CPU and has higher
--	 * per-CPU capacity. Migrating tasks to less capable CPUs may harm
--	 * throughput. Maximize throughput, power/energy consequences are not
--	 * considered.
--	 */
--	if ((env->sd->flags & SD_ASYM_CPUCAPACITY) &&
--	    (sgs->group_type <= group_fully_busy) &&
--	    (capacity_greater(sg->sgc->min_capacity, capacity_of(env->dst_cpu))))
--		return false;
--
- 	return true;
- }
- 
-@@ -11079,6 +11094,8 @@ static inline void update_sd_lb_stats(struct lb_env *env, struct sd_lb_stats *sd
+@@ -11370,6 +11396,8 @@ static inline void update_sd_lb_stats(struct lb_env *env, struct sd_lb_stats *sd
  	unsigned long sum_util = 0;
  	bool sg_overloaded = 0, sg_overutilized = 0;
  
@@ -1977,10 +1108,10 @@ index 6efb1df..a00ea82 100644
  		struct sg_lb_stats *sgs = &tmp_sgs;
  		int local_group;
 diff --git a/kernel/sched/sched.h b/kernel/sched/sched.h
-index 62f90dc..0ea271f 100644
+index 69dc772..4c0890d 100644
 --- a/kernel/sched/sched.h
 +++ b/kernel/sched/sched.h
-@@ -1330,6 +1330,7 @@ static inline struct rq *rq_of(struct cfs_rq *cfs_rq)
+@@ -1432,6 +1432,7 @@ static inline struct rq *rq_of(struct cfs_rq *cfs_rq)
  
  static inline int cpu_of(struct rq *rq)
  {
@@ -1988,33 +1119,11 @@ index 62f90dc..0ea271f 100644
  #ifdef CONFIG_SMP
  	return rq->cpu;
  #else
-diff --git a/kernel/signal.c b/kernel/signal.c
-index 468b589..eceac8b 100644
---- a/kernel/signal.c
-+++ b/kernel/signal.c
-@@ -1394,8 +1394,16 @@ struct sighand_struct *__lock_task_sighand(struct task_struct *tsk,
- 	rcu_read_lock();
- 	for (;;) {
- 		sighand = rcu_dereference(tsk->sighand);
--		if (unlikely(sighand == NULL))
-+		if (unlikely(sighand == NULL)) {
-+			/*
-+			 * Pairs with the smp_store_release() in
-+			 * __exit_signal().  It ensures that all state
-+			 * modifications to the task preceeding the store are
-+			 * visible to the callers of lock_task_sighand().
-+			 */
-+			smp_acquire__after_ctrl_dep();
- 			break;
-+		}
- 
- 		/*
- 		 * This sighand can be already freed and even reused, but
 diff --git a/kernel/time/hrtimer.c b/kernel/time/hrtimer.c
-index 184d5c3..bd4835b 100644
+index 06b4538..579605b 100644
 --- a/kernel/time/hrtimer.c
 +++ b/kernel/time/hrtimer.c
-@@ -1280,6 +1280,14 @@ static int __hrtimer_start_range_ns(struct hrtimer *timer, ktime_t tim,
+@@ -1285,6 +1285,14 @@ static int __hrtimer_start_range_ns(struct hrtimer *timer, ktime_t tim,
  	}
  
  	first = enqueue_hrtimer(timer, new_base, mode);
@@ -2029,268 +1138,11 @@ index 184d5c3..bd4835b 100644
  	if (!force_local) {
  		/*
  		 * If the current CPU base is online, then the timer is
-diff --git a/kernel/time/posix-cpu-timers.c b/kernel/time/posix-cpu-timers.c
-index d446411..0c65b15 100644
---- a/kernel/time/posix-cpu-timers.c
-+++ b/kernel/time/posix-cpu-timers.c
-@@ -462,6 +462,109 @@ static void disarm_timer(struct k_itimer *timer, struct task_struct *p)
- 		trigger_base_recalc_expires(timer, p);
- }
- 
-+/*
-+ * Lookup the task via timer->it.cpu.pid and attempt to lock the task's sighand.
-+ *
-+ * This can race with the reaping of the task:
-+ *
-+ * CPU0					CPU1
-+ *
-+ * // Finds task
-+ * p = pid_task(pid, pid_type);		__exit_signal(p)
-+ *					  lock(p, sighand);
-+ *					  posix_cpu_timers*_exit();
-+ * sighand = lock_task_sighand(p);	  unhash_task(p);
-+ *					  p->sighand = NULL;
-+ *					  unlock(sighand);
-+ *
-+ * In this case sighand is NULL, which means the task and the associated timer
-+ * queue cannot be longer accessed safely.
-+ *
-+ * __exit_signal() invokes posix_cpu_timers_exit() and if the thread group is
-+ * dead it also invokes posix_cpu_timers_group_exit(). These functions delete
-+ * all pending timers from the related timer queues. The POSIX timers (k_itimer)
-+ * themself are still accessible, but not longer connected to the task.
-+ *
-+ * exec() works slightly differently. The task which exec()'s terminates all
-+ * other threads in the thread group and runs __exit_signal() on them. As the
-+ * thread group is not dead they only clean up the per task timers via
-+ * posix_cpu_timers_exit().
-+ *
-+ * As the TGID on exec() stays the same per process timers stay queued, if they
-+ * are armed. This works without a problem when exec() is done by the thread
-+ * group leader. If a non-leader thread exec()'s this can end up in the
-+ * following scenario:
-+ *
-+ * CPU0					CPU1
-+ * // Returns old leader
-+ * p = pid_task(pid, pid_type);		de_thread()
-+ *					switch_leader()
-+ *					release_task(old leader)
-+ *					  __exit_signal()
-+ *					  old_leader->sighand = NULL;
-+ * // Returns NULL
-+ * sighand = lock_task_sighand(p)
-+ *
-+ * That's problematic for several functions:
-+ *
-+ *  - posix_cpu_timer_del(): If the timer is still enqueued on the task the
-+ *    underlying k_itimer will be freed which results in a UAF in
-+ *    run_posix_cpu_timers() or on timerqueue related add/delete operations.
-+ *    If the timer is not enqueued, the failure is harmless
-+ *
-+ *  - posix_cpu_timer_set(): Independent of the enqueued state that results in a
-+ *    transient failure which is user space visible (-ESRCH) for regular posix
-+ *    timers. But for the use case in do_cpu_nanosleep() it's the same UAF
-+ *    problem just that the timer is allocated on the stack.
-+ *
-+ *  - posix_cpu_timer_rearm(): Timer is not enqueued at that point, but this
-+ *    silently ignores the rearm request, which is a functional problem as the
-+ *    timer wont expire anymore.
-+ */
-+static struct task_struct *timer_lock_sighand(struct k_itimer *timer, unsigned long *flags)
-+{
-+	enum pid_type type = clock_pid_type(timer->it_clock);
-+	struct cpu_timer *ctmr = &timer->it.cpu;
-+
-+	guard(rcu)();
-+
-+	for (;;) {
-+		struct task_struct *t = pid_task(timer->it.cpu.pid, type);
-+
-+		/* Fail if the task cannot be found. */
-+		if (!t)
-+			break;
-+
-+		/* Try to lock the task's sighand */
-+		if (lock_task_sighand(t, flags))
-+			return t;
-+
-+		/*
-+		 * The next PID lookup might either fail or return the new
-+		 * leader. This is correct for both exit() and exec().
-+		 */
-+	}
-+
-+	/*
-+	 * If the timer is still enqueued, warn. There is nothing safe to do
-+	 * here as there might be two timers in there which are removed in
-+	 * parallel and that will cause more damage than good. This should never
-+	 * happen!
-+	 *
-+	 * Ensure that the stores to the timer and timerqueue are visible:
-+	 *
-+	 * __exit_signal()
-+	 *   posix_cpu_timers*_exit()
-+	 *   write_seqlock(seqlock)
-+	 *	smp_wmb(); <-------
-+	 *   __unhash_process()	  |	!pid_task()
-+	 *			  ---->	smp_rmb();
-+	 *				WARN_ON_ONCE(...)
-+	 */
-+	smp_rmb();
-+	WARN_ON_ONCE(ctmr->head || timerqueue_node_queued(&ctmr->node));
-+	return NULL;
-+}
- 
- /*
-  * Clean up a CPU-clock timer that is about to be destroyed.
-@@ -471,29 +574,13 @@ static void disarm_timer(struct k_itimer *timer, struct task_struct *p)
-  */
- static int posix_cpu_timer_del(struct k_itimer *timer)
- {
--	struct cpu_timer *ctmr = &timer->it.cpu;
--	struct sighand_struct *sighand;
- 	struct task_struct *p;
- 	unsigned long flags;
- 	int ret = 0;
- 
--	rcu_read_lock();
--	p = cpu_timer_task_rcu(timer);
--	if (!p)
--		goto out;
-+	p = timer_lock_sighand(timer, &flags);
- 
--	/*
--	 * Protect against sighand release/switch in exit/exec and process/
--	 * thread timer list entry concurrent read/writes.
--	 */
--	sighand = lock_task_sighand(p, &flags);
--	if (unlikely(sighand == NULL)) {
--		/*
--		 * This raced with the reaping of the task. The exit cleanup
--		 * should have removed this timer from the timer queue.
--		 */
--		WARN_ON_ONCE(ctmr->head || timerqueue_node_queued(&ctmr->node));
--	} else {
-+	if (likely(p)) {
- 		if (timer->it.cpu.firing)
- 			ret = TIMER_RETRY;
- 		else
-@@ -502,10 +589,8 @@ static int posix_cpu_timer_del(struct k_itimer *timer)
- 		unlock_task_sighand(p, &flags);
- 	}
- 
--out:
--	rcu_read_unlock();
- 	if (!ret)
--		put_pid(ctmr->pid);
-+		put_pid(timer->it.cpu.pid);
- 
- 	return ret;
- }
-@@ -627,21 +712,17 @@ static int posix_cpu_timer_set(struct k_itimer *timer, int timer_flags,
- 	clockid_t clkid = CPUCLOCK_WHICH(timer->it_clock);
- 	struct cpu_timer *ctmr = &timer->it.cpu;
- 	u64 old_expires, new_expires, now;
--	struct sighand_struct *sighand;
- 	struct task_struct *p;
- 	unsigned long flags;
- 	int ret = 0;
- 
--	rcu_read_lock();
--	p = cpu_timer_task_rcu(timer);
--	if (!p) {
--		/*
--		 * If p has just been reaped, we can no
--		 * longer get any information about it at all.
--		 */
--		rcu_read_unlock();
-+	p = timer_lock_sighand(timer, &flags);
-+	/*
-+	 * If p has just been reaped, we can no longer get any information about
-+	 * it at all.
-+	 */
-+	if (!p)
- 		return -ESRCH;
--	}
- 
- 	/*
- 	 * Use the to_ktime conversion because that clamps the maximum
-@@ -649,20 +730,6 @@ static int posix_cpu_timer_set(struct k_itimer *timer, int timer_flags,
- 	 */
- 	new_expires = ktime_to_ns(timespec64_to_ktime(new->it_value));
- 
--	/*
--	 * Protect against sighand release/switch in exit/exec and p->cpu_timers
--	 * and p->signal->cpu_timers read/write in arm_timer()
--	 */
--	sighand = lock_task_sighand(p, &flags);
--	/*
--	 * If p has just been reaped, we can no
--	 * longer get any information about it at all.
--	 */
--	if (unlikely(sighand == NULL)) {
--		rcu_read_unlock();
--		return -ESRCH;
--	}
--
- 	/* Retrieve the current expiry time before disarming the timer */
- 	old_expires = cpu_timer_getexpires(ctmr);
- 
-@@ -693,7 +760,7 @@ static int posix_cpu_timer_set(struct k_itimer *timer, int timer_flags,
- 	/* Retry if the timer expiry is running concurrently */
- 	if (unlikely(ret)) {
- 		unlock_task_sighand(p, &flags);
--		goto out;
-+		return ret;
- 	}
- 
- 	/* Convert relative expiry time to absolute */
-@@ -728,8 +795,6 @@ static int posix_cpu_timer_set(struct k_itimer *timer, int timer_flags,
- 	 */
- 	if (!sigev_none && new_expires && now >= new_expires)
- 		cpu_timer_fire(timer);
--out:
--	rcu_read_unlock();
- 	return ret;
- }
- 
-@@ -1011,19 +1076,12 @@ static void posix_cpu_timer_rearm(struct k_itimer *timer)
- {
- 	clockid_t clkid = CPUCLOCK_WHICH(timer->it_clock);
- 	struct task_struct *p;
--	struct sighand_struct *sighand;
- 	unsigned long flags;
- 	u64 now;
- 
--	rcu_read_lock();
--	p = cpu_timer_task_rcu(timer);
--	if (!p)
--		goto out;
--
--	/* Protect timer list r/w in arm_timer() */
--	sighand = lock_task_sighand(p, &flags);
--	if (unlikely(sighand == NULL))
--		goto out;
-+	p = timer_lock_sighand(timer, &flags);
-+	if (unlikely(!p))
-+		return;
- 
- 	/*
- 	 * Fetch the current sample and update the timer's expiry time.
-@@ -1040,8 +1098,6 @@ static void posix_cpu_timer_rearm(struct k_itimer *timer)
- 	 */
- 	arm_timer(timer, p);
- 	unlock_task_sighand(p, &flags);
--out:
--	rcu_read_unlock();
- }
- 
- /**
 diff --git a/kernel/time/tick-sched.c b/kernel/time/tick-sched.c
-index f203f00..88fcd43 100644
+index ed59a40..6de50ee 100644
 --- a/kernel/time/tick-sched.c
 +++ b/kernel/time/tick-sched.c
-@@ -774,15 +774,16 @@ static u64 get_cpu_sleep_time_us(struct tick_sched *ts, ktime_t *sleeptime,
+@@ -777,15 +777,16 @@ static u64 get_cpu_sleep_time_us(struct tick_sched *ts, ktime_t *sleeptime,
  		*last_update_time = ktime_to_us(now);
  
  	do {
@@ -2313,10 +1165,10 @@ index f203f00..88fcd43 100644
  
  	return ktime_to_us(idle);
 diff --git a/mm/backing-dev.c b/mm/backing-dev.c
-index e61bbb1..d6bc999 100644
+index f913e67..6764c3c 100644
 --- a/mm/backing-dev.c
 +++ b/mm/backing-dev.c
-@@ -633,6 +633,7 @@ static void cgwb_release_workfn(struct work_struct *work)
+@@ -634,6 +634,7 @@ static void cgwb_release_workfn(struct work_struct *work)
  	wb_exit(wb);
  	bdi_put(bdi);
  	WARN_ON_ONCE(!list_empty(&wb->b_attached));
@@ -2324,7 +1176,7 @@ index e61bbb1..d6bc999 100644
  	call_rcu(&wb->rcu, cgwb_free_rcu);
  }
  
-@@ -709,6 +710,8 @@ static int cgwb_create(struct backing_dev_info *bdi,
+@@ -710,6 +711,8 @@ static int cgwb_create(struct backing_dev_info *bdi,
  	wb->memcg_css = memcg_css;
  	wb->blkcg_css = blkcg_css;
  	INIT_LIST_HEAD(&wb->b_attached);
@@ -2333,7 +1185,7 @@ index e61bbb1..d6bc999 100644
  	INIT_WORK(&wb->release_work, cgwb_release_workfn);
  	set_bit(WB_registered, &wb->state);
  	bdi_get(bdi);
-@@ -839,6 +842,8 @@ static int cgwb_bdi_init(struct backing_dev_info *bdi)
+@@ -840,6 +843,8 @@ static int cgwb_bdi_init(struct backing_dev_info *bdi)
  	if (!ret) {
  		bdi->wb.memcg_css = &root_mem_cgroup->css;
  		bdi->wb.blkcg_css = blkcg_root_css;
@@ -2343,10 +1195,10 @@ index e61bbb1..d6bc999 100644
  	return ret;
  }
 diff --git a/mm/shmem.c b/mm/shmem.c
-index d12fcf2..e9270c6 100644
+index 956f7ba..b4221e4 100644
 --- a/mm/shmem.c
 +++ b/mm/shmem.c
-@@ -499,15 +499,27 @@ static int shmem_replace_entry(struct address_space *mapping,
+@@ -504,15 +504,27 @@ static int shmem_replace_entry(struct address_space *mapping,
  
  /*
   * Sometimes, before we decide whether to proceed or to fail, we must check
@@ -2378,7 +1230,7 @@ index d12fcf2..e9270c6 100644
  }
  
  /*
-@@ -794,7 +806,9 @@ static int shmem_add_to_page_cache(struct folio *folio,
+@@ -799,7 +811,9 @@ static int shmem_add_to_page_cache(struct folio *folio,
  				   pgoff_t index, void *expected, gfp_t gfp)
  {
  	XA_STATE_ORDER(xas, &mapping->i_pages, index, folio_order(folio));
@@ -2389,7 +1241,7 @@ index d12fcf2..e9270c6 100644
  
  	VM_BUG_ON_FOLIO(index != round_down(index, nr), folio);
  	VM_BUG_ON_FOLIO(!folio_test_locked(folio), folio);
-@@ -806,14 +820,25 @@ static int shmem_add_to_page_cache(struct folio *folio,
+@@ -811,14 +825,25 @@ static int shmem_add_to_page_cache(struct folio *folio,
  
  	gfp &= GFP_RECLAIM_MASK;
  	folio_throttle_swaprate(folio, gfp);
@@ -2419,7 +1271,7 @@ index d12fcf2..e9270c6 100644
  			xas_set_err(&xas, -EEXIST);
  			goto unlock;
  		}
-@@ -2127,7 +2152,7 @@ static int shmem_swapin_folio(struct inode *inode, pgoff_t index,
+@@ -2142,7 +2167,7 @@ static int shmem_swapin_folio(struct inode *inode, pgoff_t index,
  	struct swap_info_struct *si;
  	struct folio *folio = NULL;
  	swp_entry_t swap;
@@ -2428,7 +1280,7 @@ index d12fcf2..e9270c6 100644
  
  	VM_BUG_ON(!*foliop || !xa_is_value(*foliop));
  	swap = radix_to_swp_entry(*foliop);
-@@ -2137,12 +2162,17 @@ static int shmem_swapin_folio(struct inode *inode, pgoff_t index,
+@@ -2152,12 +2177,17 @@ static int shmem_swapin_folio(struct inode *inode, pgoff_t index,
  		return -EIO;
  
  	si = get_swap_device(swap);
@@ -2448,16 +1300,7 @@ index d12fcf2..e9270c6 100644
  
  	/* Look it up and read it in.. */
  	folio = swap_cache_get_folio(swap, NULL, 0);
-@@ -2190,7 +2220,7 @@ static int shmem_swapin_folio(struct inode *inode, pgoff_t index,
- 	folio_lock(folio);
- 	if (!folio_test_swapcache(folio) ||
- 	    folio->swap.val != swap.val ||
--	    !shmem_confirm_swap(mapping, index, swap)) {
-+	    shmem_confirm_swap(mapping, index, swap) != folio_order(folio)) {
- 		error = -EEXIST;
- 		goto unlock;
- 	}
-@@ -2232,7 +2262,7 @@ static int shmem_swapin_folio(struct inode *inode, pgoff_t index,
+@@ -2249,7 +2279,7 @@ static int shmem_swapin_folio(struct inode *inode, pgoff_t index,
  	*foliop = folio;
  	return 0;
  failed:
@@ -2467,19 +1310,10 @@ index d12fcf2..e9270c6 100644
  	if (error == -EIO)
  		shmem_set_folio_swapin_error(inode, index, folio, swap);
 diff --git a/mm/vmscan.c b/mm/vmscan.c
-index 0ceed77..9ac5204 100644
+index 33275e0..fad412e 100644
 --- a/mm/vmscan.c
 +++ b/mm/vmscan.c
-@@ -4312,7 +4312,7 @@ void lru_gen_soft_reclaim(struct mem_cgroup *memcg, int nid)
- static bool sort_folio(struct lruvec *lruvec, struct folio *folio, struct scan_control *sc,
- 		       int tier_idx)
- {
--	bool success;
-+	bool dirty, writeback;
- 	int gen = folio_lru_gen(folio);
- 	int type = folio_is_file_lru(folio);
- 	int zone = folio_zonenum(folio);
-@@ -4323,15 +4323,9 @@ static bool sort_folio(struct lruvec *lruvec, struct folio *folio, struct scan_c
+@@ -4574,15 +4574,9 @@ static bool sort_folio(struct lruvec *lruvec, struct folio *folio, struct scan_c
  
  	VM_WARN_ON_ONCE_FOLIO(gen >= MAX_NR_GENS, folio);
  
@@ -2498,47 +1332,10 @@ index 0ceed77..9ac5204 100644
  
  	/* promoted */
  	if (gen != lru_gen_from_seq(lrugen->min_seq[type])) {
-@@ -4358,9 +4352,17 @@ static bool sort_folio(struct lruvec *lruvec, struct folio *folio, struct scan_c
- 		return true;
- 	}
+@@ -4853,11 +4847,9 @@ retry:
+ 		if (bypass)
+ 			continue;
  
-+	dirty = folio_test_dirty(folio);
-+	writeback = folio_test_writeback(folio);
-+	if (type == LRU_GEN_FILE && dirty) {
-+		sc->nr.file_taken += delta;
-+		if (!writeback)
-+			sc->nr.unqueued_dirty += delta;
-+	}
-+
- 	/* waiting for writeback */
--	if (folio_test_locked(folio) || folio_test_writeback(folio) ||
--	    (type == LRU_GEN_FILE && folio_test_dirty(folio))) {
-+	if (folio_test_locked(folio) || writeback ||
-+	    (type == LRU_GEN_FILE && dirty)) {
- 		gen = folio_inc_gen(lruvec, folio, true);
- 		list_move(&folio->lru, &lrugen->folios[gen][type][zone]);
- 		return true;
-@@ -4476,7 +4478,8 @@ static int scan_folios(struct lruvec *lruvec, struct scan_control *sc,
- 	trace_mm_vmscan_lru_isolate(sc->reclaim_idx, sc->order, MAX_LRU_BATCH,
- 				scanned, skipped, isolated,
- 				type ? LRU_INACTIVE_FILE : LRU_INACTIVE_ANON);
--
-+	if (type == LRU_GEN_FILE)
-+		sc->nr.file_taken += isolated;
- 	/*
- 	 * There might not be eligible folios due to reclaim_idx. Check the
- 	 * remaining to prevent livelock if it's not making progress.
-@@ -4610,17 +4613,16 @@ static int evict_folios(struct lruvec *lruvec, struct scan_control *sc, int swap
- 		return scanned;
- retry:
- 	reclaimed = shrink_folio_list(&list, pgdat, sc, &stat, false);
-+	sc->nr.unqueued_dirty += stat.nr_unqueued_dirty;
- 	sc->nr_reclaimed += reclaimed;
- 	trace_mm_vmscan_lru_shrink_inactive(pgdat->node_id,
- 			scanned, reclaimed, &stat, sc->priority,
- 			type ? LRU_INACTIVE_FILE : LRU_INACTIVE_ANON);
- 
- 	list_for_each_entry_safe_reverse(folio, next, &list, lru) {
 -		if (!folio_evictable(folio)) {
 -			list_del(&folio->lru);
 -			folio_putback_lru(folio);
@@ -2547,35 +1344,13 @@ index 0ceed77..9ac5204 100644
  			continue;
 -		}
  
- 		if (folio_test_reclaim(folio) &&
- 		    (folio_test_dirty(folio) || folio_test_writeback(folio))) {
-@@ -4821,6 +4823,13 @@ static bool try_to_shrink_lruvec(struct lruvec *lruvec, struct scan_control *sc)
- 		cond_resched();
- 	}
- 
-+	/*
-+	 * If too many file cache in the coldest generation can't be evicted
-+	 * due to being dirty, wake up the flusher.
-+	 */
-+	if (sc->nr.unqueued_dirty && sc->nr.unqueued_dirty == sc->nr.file_taken)
-+		wakeup_flusher_threads(WB_REASON_VMSCAN);
-+
- 	/* whether this lruvec should be rotated */
- 	return nr_to_scan < 0;
- }
-@@ -5966,6 +5975,7 @@ static void shrink_node(pg_data_t *pgdat, struct scan_control *sc)
- 	bool reclaimable = false;
- 
- 	if (lru_gen_enabled() && root_reclaim(sc)) {
-+		memset(&sc->nr, 0, sizeof(sc->nr));
- 		lru_gen_shrink_node(pgdat, sc);
- 		return;
- 	}
+ 		/* retry folios that may have missed folio_rotate_reclaimable() */
+ 		if (!skip_retry && !folio_test_active(folio) && !folio_mapped(folio) &&
 diff --git a/mm/zsmalloc.c b/mm/zsmalloc.c
-index e4326af..a0c7eca 100644
+index 574fe74..92168ce 100644
 --- a/mm/zsmalloc.c
 +++ b/mm/zsmalloc.c
-@@ -515,6 +515,11 @@ static int get_size_class_index(int size)
+@@ -516,6 +516,11 @@ static int get_size_class_index(int size)
  	return min_t(int, ZS_SIZE_CLASSES - 1, idx);
  }
  
@@ -2587,7 +1362,7 @@ index e4326af..a0c7eca 100644
  static inline void class_stat_add(struct size_class *class, int type,
  				  unsigned long cnt)
  {
-@@ -1156,7 +1161,7 @@ unsigned int zs_lookup_class_index(struct zs_pool *pool, unsigned int size)
+@@ -1157,7 +1162,7 @@ unsigned int zs_lookup_class_index(struct zs_pool *pool, unsigned int size)
  {
  	struct size_class *class;
  
@@ -2596,7 +1371,7 @@ index e4326af..a0c7eca 100644
  
  	return class->index;
  }
-@@ -1368,9 +1373,7 @@ unsigned long zs_malloc(struct zs_pool *pool, size_t size, gfp_t gfp)
+@@ -1369,9 +1374,7 @@ unsigned long zs_malloc(struct zs_pool *pool, size_t size, gfp_t gfp)
  	if (!handle)
  		return (unsigned long)ERR_PTR(-ENOMEM);
  
@@ -2607,180 +1382,6 @@ index e4326af..a0c7eca 100644
  
  	/* class->lock effectively protects the zpage migration */
  	spin_lock(&class->lock);
-diff --git a/net/bluetooth/rfcomm/sock.c b/net/bluetooth/rfcomm/sock.c
-index 9134028..236a068 100644
---- a/net/bluetooth/rfcomm/sock.c
-+++ b/net/bluetooth/rfcomm/sock.c
-@@ -122,7 +122,7 @@ static struct sock *__rfcomm_get_listen_sock_by_addr(u8 channel, bdaddr_t *src)
- }
- 
- /* Find socket with channel and source bdaddr.
-- * Returns closest match.
-+ * Returns closest match with an extra reference held.
-  */
- static struct sock *rfcomm_get_sock_by_channel(int state, u8 channel, bdaddr_t *src)
- {
-@@ -136,15 +136,25 @@ static struct sock *rfcomm_get_sock_by_channel(int state, u8 channel, bdaddr_t *
- 
- 		if (rfcomm_pi(sk)->channel == channel) {
- 			/* Exact match. */
--			if (!bacmp(&rfcomm_pi(sk)->src, src))
-+			if (!bacmp(&rfcomm_pi(sk)->src, src)) {
-+				sock_hold(sk);
- 				break;
-+			}
- 
- 			/* Closest match */
--			if (!bacmp(&rfcomm_pi(sk)->src, BDADDR_ANY))
-+			if (!bacmp(&rfcomm_pi(sk)->src, BDADDR_ANY)) {
-+				if (sk1)
-+					sock_put(sk1);
-+
- 				sk1 = sk;
-+				sock_hold(sk1);
-+			}
- 		}
- 	}
- 
-+	if (sk && sk1)
-+		sock_put(sk1);
-+
- 	read_unlock(&rfcomm_sk_list.lock);
- 
- 	return sk ? sk : sk1;
-@@ -933,6 +943,7 @@ int rfcomm_connect_ind(struct rfcomm_session *s, u8 channel, struct rfcomm_dlc *
- {
- 	struct sock *sk, *parent;
- 	bdaddr_t src, dst;
-+	bool defer_setup = false;
- 	int result = 0;
- 
- 	BT_DBG("session %p channel %d", s, channel);
-@@ -946,6 +957,11 @@ int rfcomm_connect_ind(struct rfcomm_session *s, u8 channel, struct rfcomm_dlc *
- 
- 	lock_sock(parent);
- 
-+	if (parent->sk_state != BT_LISTEN)
-+		goto done;
-+
-+	defer_setup = test_bit(BT_SK_DEFER_SETUP, &bt_sk(parent)->flags);
-+
- 	/* Check for backlog size */
- 	if (sk_acceptq_is_full(parent)) {
- 		BT_DBG("backlog full %d", parent->sk_ack_backlog);
-@@ -973,9 +989,11 @@ int rfcomm_connect_ind(struct rfcomm_session *s, u8 channel, struct rfcomm_dlc *
- done:
- 	release_sock(parent);
- 
--	if (test_bit(BT_SK_DEFER_SETUP, &bt_sk(parent)->flags))
-+	if (defer_setup)
- 		parent->sk_state_change(parent);
- 
-+	sock_put(parent);
-+
- 	return result;
- }
- 
-diff --git a/net/bluetooth/sco.c b/net/bluetooth/sco.c
-index 202d75a..0699b43 100644
---- a/net/bluetooth/sco.c
-+++ b/net/bluetooth/sco.c
-@@ -395,9 +395,13 @@ static struct sock *sco_get_sock_listen(bdaddr_t *src)
- 			sk1 = sk;
- 	}
- 
-+	sk = sk ? sk : sk1;
-+	if (sk)
-+		sock_hold(sk);
-+
- 	read_unlock(&sco_sk_list.lock);
- 
--	return sk ? sk : sk1;
-+	return sk;
- }
- 
- static void sco_sock_destruct(struct sock *sk)
-@@ -435,11 +439,13 @@ static void sco_sock_kill(struct sock *sk)
- 	BT_DBG("sk %p state %d", sk, sk->sk_state);
- 
- 	/* Sock is dead, so set conn->sk to NULL to avoid possible UAF */
-+	lock_sock(sk);
- 	if (sco_pi(sk)->conn) {
- 		sco_conn_lock(sco_pi(sk)->conn);
- 		sco_pi(sk)->conn->sk = NULL;
- 		sco_conn_unlock(sco_pi(sk)->conn);
- 	}
-+	release_sock(sk);
- 
- 	/* Kill poor orphan */
- 	bt_sock_unlink(&sco_sk_list, sk);
-@@ -1277,17 +1283,28 @@ static int sco_sock_release(struct socket *sock)
- 
- static void sco_conn_ready(struct sco_conn *conn)
- {
--	struct sock *parent;
--	struct sock *sk = conn->sk;
-+	struct sock *parent, *sk;
-+
-+	sco_conn_lock(conn);
-+	sk = sco_sock_hold(conn);
-+	sco_conn_unlock(conn);
- 
- 	BT_DBG("conn %p", conn);
- 
- 	if (sk) {
- 		lock_sock(sk);
--		sco_sock_clear_timer(sk);
--		sk->sk_state = BT_CONNECTED;
--		sk->sk_state_change(sk);
-+
-+		/* conn->sk may have become NULL if racing with sk close, but
-+		 * due to held hdev->lock, it can't become different sk.
-+		 */
-+		if (conn->sk) {
-+			sco_sock_clear_timer(sk);
-+			sk->sk_state = BT_CONNECTED;
-+			sk->sk_state_change(sk);
-+		}
-+
- 		release_sock(sk);
-+		sock_put(sk);
- 	} else {
- 		sco_conn_lock(conn);
- 
-@@ -1304,13 +1321,15 @@ static void sco_conn_ready(struct sco_conn *conn)
- 
- 		lock_sock(parent);
- 
-+		/* hdev->lock guarantees conn->sk == NULL still here */
-+
-+		if (parent->sk_state != BT_LISTEN)
-+			goto release;
-+
- 		sk = sco_sock_alloc(sock_net(parent), NULL,
- 				    BTPROTO_SCO, GFP_ATOMIC, 0);
--		if (!sk) {
--			release_sock(parent);
--			sco_conn_unlock(conn);
--			return;
--		}
-+		if (!sk)
-+			goto release;
- 
- 		sco_sock_init(sk, parent);
- 
-@@ -1328,9 +1347,11 @@ static void sco_conn_ready(struct sco_conn *conn)
- 		/* Wake up parent */
- 		parent->sk_data_ready(parent);
- 
-+release:
- 		release_sock(parent);
- 
- 		sco_conn_unlock(conn);
-+		sock_put(parent);
- 	}
- }
- 
 diff --git a/net/bridge/netfilter/nf_conntrack_bridge.c b/net/bridge/netfilter/nf_conntrack_bridge.c
 index 6482de4..10127b7 100644
 --- a/net/bridge/netfilter/nf_conntrack_bridge.c
@@ -2817,10 +1418,10 @@ index 458b040..8052a44 100644
  
  	if (netmem && *offset + size > max_size) {
 diff --git a/net/core/sock.c b/net/core/sock.c
-index 58f3f0d..c6d594a 100644
+index 4d4f4f8..3359110 100644
 --- a/net/core/sock.c
 +++ b/net/core/sock.c
-@@ -3716,7 +3716,14 @@ int sock_gettstamp(struct socket *sock, void __user *userstamp,
+@@ -3728,7 +3728,14 @@ int sock_gettstamp(struct socket *sock, void __user *userstamp,
  	struct sock *sk = sock->sk;
  	struct timespec64 ts;
  
@@ -2837,10 +1438,10 @@ index 58f3f0d..c6d594a 100644
  	if (ts.tv_sec == -1)
  		return -ENOENT;
 diff --git a/net/ipv4/af_inet.c b/net/ipv4/af_inet.c
-index 8095e82..c310a60 100644
+index fbf366b..7ed1b9a 100644
 --- a/net/ipv4/af_inet.c
 +++ b/net/ipv4/af_inet.c
-@@ -155,7 +155,7 @@ void inet_sock_destruct(struct sock *sk)
+@@ -156,7 +156,7 @@ void inet_sock_destruct(struct sock *sk)
  	WARN_ON_ONCE(sk->sk_wmem_queued);
  	WARN_ON_ONCE(sk_forward_alloc_get(sk));
  
@@ -2850,10 +1451,10 @@ index 8095e82..c310a60 100644
  	dst_release(rcu_dereference_protected(sk->sk_rx_dst, 1));
  }
 diff --git a/net/ipv4/inet_connection_sock.c b/net/ipv4/inet_connection_sock.c
-index fe7947f..72049d0 100644
+index 74ac047..6b59c4c 100644
 --- a/net/ipv4/inet_connection_sock.c
 +++ b/net/ipv4/inet_connection_sock.c
-@@ -157,12 +157,10 @@ static bool inet_use_bhash2_on_bind(const struct sock *sk)
+@@ -158,12 +158,10 @@ static bool inet_use_bhash2_on_bind(const struct sock *sk)
  {
  #if IS_ENABLED(CONFIG_IPV6)
  	if (sk->sk_family == AF_INET6) {
@@ -2869,7 +1470,7 @@ index fe7947f..72049d0 100644
  	}
  #endif
 diff --git a/net/ipv4/ip_output.c b/net/ipv4/ip_output.c
-index 0bda561..d59c3f4 100644
+index ba51fc4..5faafa1 100644
 --- a/net/ipv4/ip_output.c
 +++ b/net/ipv4/ip_output.c
 @@ -779,9 +779,13 @@ int ip_do_fragment(struct net *net, struct sock *sk, struct sk_buff *skb,
@@ -2890,20 +1491,10 @@ index 0bda561..d59c3f4 100644
  	/*
  	 *	Point into the IP datagram header.
 diff --git a/net/ipv4/tcp.c b/net/ipv4/tcp.c
-index ad5f30c..75f77a1 100644
+index 09e2f85..9fe10f2 100644
 --- a/net/ipv4/tcp.c
 +++ b/net/ipv4/tcp.c
-@@ -296,9 +296,6 @@ enum {
- DEFINE_PER_CPU(unsigned int, tcp_orphan_count);
- EXPORT_PER_CPU_SYMBOL_GPL(tcp_orphan_count);
- 
--DEFINE_PER_CPU(u32, tcp_tw_isn);
--EXPORT_PER_CPU_SYMBOL_GPL(tcp_tw_isn);
--
- long sysctl_tcp_mem[3] __read_mostly;
- EXPORT_SYMBOL(sysctl_tcp_mem);
- 
-@@ -4397,9 +4394,11 @@ int do_tcp_getsockopt(struct sock *sk, int level,
+@@ -4406,9 +4406,11 @@ int do_tcp_getsockopt(struct sock *sk, int level,
  		if (copy_from_sockptr(&len, optlen, sizeof(int)))
  			return -EFAULT;
  
@@ -2930,10 +1521,10 @@ index 8a45a4a..3c7cf68 100644
  			info->dctcp.dctcp_ce_state = (u16) ca->ce_state;
  			info->dctcp.dctcp_alpha = ca->dctcp_alpha;
 diff --git a/net/ipv4/tcp_input.c b/net/ipv4/tcp_input.c
-index 1d9e93a..e8e884d 100644
+index 444105e..38f8467 100644
 --- a/net/ipv4/tcp_input.c
 +++ b/net/ipv4/tcp_input.c
-@@ -6106,6 +6106,7 @@ reset:
+@@ -6116,6 +6116,7 @@ reset:
   *	  or pure receivers (this means either the sequence number or the ack
   *	  value must stay constant)
   *	- Unexpected TCP option.
@@ -2941,7 +1532,7 @@ index 1d9e93a..e8e884d 100644
   *
   *	When these conditions are not satisfied it drops into a standard
   *	receive procedure patterned after RFC793 to handle all cases.
-@@ -6154,7 +6155,7 @@ void tcp_rcv_established(struct sock *sk, struct sk_buff *skb)
+@@ -6164,7 +6165,7 @@ void tcp_rcv_established(struct sock *sk, struct sk_buff *skb)
  
  	if ((tcp_flag_word(th) & TCP_HP_BITS) == tp->pred_flags &&
  	    TCP_SKB_CB(skb)->seq == tp->rcv_nxt &&
@@ -2950,7 +1541,7 @@ index 1d9e93a..e8e884d 100644
  		int tcp_header_len = tp->tcp_header_len;
  
  		/* Timestamp header prediction: tcp_header_len
-@@ -7203,6 +7204,7 @@ int tcp_conn_request(struct request_sock_ops *rsk_ops,
+@@ -7219,6 +7220,7 @@ int tcp_conn_request(struct request_sock_ops *rsk_ops,
  		     struct sock *sk, struct sk_buff *skb)
  {
  	struct tcp_fastopen_cookie foc = { .len = -1 };
@@ -2958,7 +1549,7 @@ index 1d9e93a..e8e884d 100644
  	struct tcp_options_received tmp_opt;
  	struct tcp_sock *tp = tcp_sk(sk);
  	struct net *net = sock_net(sk);
-@@ -7212,20 +7214,16 @@ int tcp_conn_request(struct request_sock_ops *rsk_ops,
+@@ -7228,20 +7230,16 @@ int tcp_conn_request(struct request_sock_ops *rsk_ops,
  	struct dst_entry *dst;
  	struct flowi fl;
  	u8 syncookies;
@@ -2985,10 +1576,10 @@ index 1d9e93a..e8e884d 100644
  
  		if (syncookies == 2 || inet_csk_reqsk_queue_is_full(sk)) {
 diff --git a/net/ipv4/tcp_ipv4.c b/net/ipv4/tcp_ipv4.c
-index 1572562..7392667 100644
+index 7808bf1..56ed11e 100644
 --- a/net/ipv4/tcp_ipv4.c
 +++ b/net/ipv4/tcp_ipv4.c
-@@ -1218,7 +1218,7 @@ static int tcp_v4_send_synack(const struct sock *sk, struct dst_entry *dst,
+@@ -1221,7 +1221,7 @@ static int tcp_v4_send_synack(const struct sock *sk, struct dst_entry *dst,
   */
  static void tcp_v4_reqsk_destructor(struct request_sock *req)
  {
@@ -2997,7 +1588,7 @@ index 1572562..7392667 100644
  }
  
  #ifdef CONFIG_TCP_MD5SIG
-@@ -2305,6 +2305,7 @@ lookup:
+@@ -2308,6 +2308,7 @@ lookup:
  		}
  	}
  
@@ -3005,7 +1596,7 @@ index 1572562..7392667 100644
  process:
  	if (static_branch_unlikely(&ip4_min_ttl)) {
  		/* min_ttl can be changed concurrently from do_ip_setsockopt() */
-@@ -2334,6 +2335,7 @@ process:
+@@ -2337,6 +2338,7 @@ process:
  	th = (const struct tcphdr *)skb->data;
  	iph = ip_hdr(skb);
  	tcp_v4_fill_cb(skb, iph, th);
@@ -3013,19 +1604,11 @@ index 1572562..7392667 100644
  
  	skb->dev = NULL;
  
-@@ -2418,7 +2420,6 @@ do_time_wait:
- 			sk = sk2;
- 			tcp_v4_restore_cb(skb);
- 			refcounted = false;
--			__this_cpu_write(tcp_tw_isn, isn);
- 			goto process;
- 		}
- 	}
 diff --git a/net/ipv6/tcp_ipv6.c b/net/ipv6/tcp_ipv6.c
-index 06edfe0..8feb847 100644
+index a84dbd5..aedacb1 100644
 --- a/net/ipv6/tcp_ipv6.c
 +++ b/net/ipv6/tcp_ipv6.c
-@@ -1863,6 +1863,7 @@ lookup:
+@@ -1866,6 +1866,7 @@ lookup:
  		}
  	}
  
@@ -3033,7 +1616,7 @@ index 06edfe0..8feb847 100644
  process:
  	if (static_branch_unlikely(&ip6_min_hopcount)) {
  		/* min_hopcount can be changed concurrently from do_ipv6_setsockopt() */
-@@ -1892,6 +1893,7 @@ process:
+@@ -1895,6 +1896,7 @@ process:
  	th = (const struct tcphdr *)skb->data;
  	hdr = ipv6_hdr(skb);
  	tcp_v6_fill_cb(skb, hdr, th);
@@ -3041,14 +1624,6 @@ index 06edfe0..8feb847 100644
  
  	skb->dev = NULL;
  
-@@ -1978,7 +1980,6 @@ do_time_wait:
- 			sk = sk2;
- 			tcp_v6_restore_cb(skb);
- 			refcounted = false;
--			__this_cpu_write(tcp_tw_isn, isn);
- 			goto process;
- 		}
- 	}
 diff --git a/net/netfilter/nf_conntrack_expect.c b/net/netfilter/nf_conntrack_expect.c
 index 21fa550..008073e 100644
 --- a/net/netfilter/nf_conntrack_expect.c
@@ -3083,18 +1658,9 @@ index ceb48c3..627d218 100644
  	return this == me;
  }
 diff --git a/net/netfilter/nf_conntrack_netlink.c b/net/netfilter/nf_conntrack_netlink.c
-index 18a91c0..9b4b8cd 100644
+index 18a91c0..25b699a 100644
 --- a/net/netfilter/nf_conntrack_netlink.c
 +++ b/net/netfilter/nf_conntrack_netlink.c
-@@ -3006,7 +3006,7 @@ ctnetlink_exp_dump_expect(struct sk_buff *skb,
- {
- 	struct nf_conn *master = exp->master;
- 	long timeout = ((long)exp->timeout.expires - (long)jiffies) / HZ;
--	struct nf_conn_help *help;
-+	struct nf_conntrack_helper *helper;
- #if IS_ENABLED(CONFIG_NF_NAT)
- 	struct nlattr *nest_parms;
- 	struct nf_conntrack_tuple nat_tuple = {};
 @@ -3051,15 +3051,12 @@ ctnetlink_exp_dump_expect(struct sk_buff *skb,
  	    nla_put_be32(skb, CTA_EXPECT_FLAGS, htonl(exp->flags)) ||
  	    nla_put_be32(skb, CTA_EXPECT_CLASS, htonl(exp->class)))
@@ -3141,15 +1707,6 @@ index 18a91c0..9b4b8cd 100644
  	int err;
  
  	help = nfct_help(ct);
-@@ -3550,6 +3544,8 @@ ctnetlink_alloc_expect(const struct nlattr * const cda[], struct nf_conn *ct,
- 
- 	exp->class = class;
- 	exp->master = ct;
-+	if (!helper)
-+		helper = rcu_dereference(help->helper);
- 	exp->helper = helper;
- 	exp->tuple = *tuple;
- 	exp->mask.src.u3 = mask->src.u3;
 diff --git a/net/netfilter/nf_conntrack_sip.c b/net/netfilter/nf_conntrack_sip.c
 index d0eac27..bde6eaf 100644
 --- a/net/netfilter/nf_conntrack_sip.c
@@ -3440,7 +1997,7 @@ index d2773ce..437c4b7 100644
  }
  
 diff --git a/net/netfilter/xt_CHECKSUM.c b/net/netfilter/xt_CHECKSUM.c
-index 9d99f5a..1fb0f81 100644
+index c8a639f..9fe0e1c 100644
 --- a/net/netfilter/xt_CHECKSUM.c
 +++ b/net/netfilter/xt_CHECKSUM.c
 @@ -15,6 +15,7 @@
@@ -3507,10 +2064,10 @@ index 66fd606..65c2ed2 100644
  }
  
 diff --git a/net/xfrm/xfrm_output.c b/net/xfrm/xfrm_output.c
-index 9277dd4..b1bb1c5 100644
+index 85f8acd..3248f67 100644
 --- a/net/xfrm/xfrm_output.c
 +++ b/net/xfrm/xfrm_output.c
-@@ -812,16 +812,22 @@ int xfrm_output(struct sock *sk, struct sk_buff *skb)
+@@ -810,16 +810,22 @@ int xfrm_output(struct sock *sk, struct sk_buff *skb)
  	}
  
  	if (skb->ip_summed == CHECKSUM_PARTIAL) {

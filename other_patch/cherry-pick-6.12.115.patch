@@ -62,59 +62,6 @@ index 7e9b996..e3d3350 100644
  	}
  out:
  	mutex_unlock(&icc_lock);
-diff --git a/drivers/ufs/core/ufs-mcq.c b/drivers/ufs/core/ufs-mcq.c
-index 04262fe..3d3ae76 100644
---- a/drivers/ufs/core/ufs-mcq.c
-+++ b/drivers/ufs/core/ufs-mcq.c
-@@ -305,17 +305,24 @@ static int ufshcd_mcq_get_tag(struct ufs_hba *hba, struct cq_entry *cqe)
- 	return div_u64(addr, ufshcd_get_ucd_size(hba));
- }
- 
-+static void ufshcd_mcq_compl_cqe(struct ufs_hba *hba, struct cq_entry *cqe)
-+{
-+	int tag = ufshcd_mcq_get_tag(hba, cqe);
-+
-+	ufshcd_compl_one_cqe(hba, tag, cqe);
-+	/* After processed the cqe, mark it empty (invalid) entry */
-+	cqe->command_desc_base_addr = 0;
-+}
-+
- static void ufshcd_mcq_process_cqe(struct ufs_hba *hba,
- 				   struct ufs_hw_queue *hwq)
- {
- 	struct cq_entry *cqe = ufshcd_mcq_cur_cqe(hwq);
--	int tag = ufshcd_mcq_get_tag(hba, cqe);
- 
--	if (cqe->command_desc_base_addr) {
--		ufshcd_compl_one_cqe(hba, tag, cqe);
--		/* After processed the cqe, mark it empty (invalid) entry */
--		cqe->command_desc_base_addr = 0;
--	}
-+	if (cqe->command_desc_base_addr)
-+		ufshcd_mcq_compl_cqe(hba, cqe);
-+	else
-+		dev_err(hba->dev, "Abnormal CQ entry!\n");
- }
- 
- void ufshcd_mcq_compl_all_cqes_lock(struct ufs_hba *hba,
-@@ -326,13 +333,13 @@ void ufshcd_mcq_compl_all_cqes_lock(struct ufs_hba *hba,
- 
- 	spin_lock_irqsave(&hwq->cq_lock, flags);
- 	while (entries > 0) {
--		ufshcd_mcq_process_cqe(hba, hwq);
-+		struct cq_entry *cqe = ufshcd_mcq_cur_cqe(hwq);
-+
-+		if (cqe->command_desc_base_addr)
-+			ufshcd_mcq_compl_cqe(hba, cqe);
- 		ufshcd_mcq_inc_cq_head_slot(hwq);
- 		entries--;
- 	}
--
--	ufshcd_mcq_update_cq_tail_slot(hwq);
--	hwq->cq_head_slot = hwq->cq_tail_slot;
- 	spin_unlock_irqrestore(&hwq->cq_lock, flags);
- }
- 
 diff --git a/drivers/vhost/vhost.c b/drivers/vhost/vhost.c
 index 276dded..a1c8157 100644
 --- a/drivers/vhost/vhost.c
@@ -176,36 +123,6 @@ index 965fdc5..c42867a 100644
  	/*
  	 * Make the signal table private.
  	 */
-diff --git a/fs/f2fs/gc.c b/fs/f2fs/gc.c
-index edfd9c7..c493fb4 100644
---- a/fs/f2fs/gc.c
-+++ b/fs/f2fs/gc.c
-@@ -1305,6 +1305,9 @@ got_it:
- 		goto put_page;
- 	}
- 
-+	if (PageUptodate(fio.encrypted_page))
-+		goto put_encrypted_page;
-+
- 	err = f2fs_submit_page_bio(&fio);
- 	if (err)
- 		goto put_encrypted_page;
-diff --git a/fs/f2fs/node.c b/fs/f2fs/node.c
-index a43da4c..c9b2809 100644
---- a/fs/f2fs/node.c
-+++ b/fs/f2fs/node.c
-@@ -1939,6 +1939,11 @@ continue_unlock:
- 		f2fs_debug(sbi, "Retry to write fsync mark: ino=%u, idx=%lx",
- 			   ino, last_folio->index);
- 		folio_lock(last_folio);
-+		if (unlikely(last_folio->mapping != NODE_MAPPING(sbi))) {
-+			f2fs_folio_put(last_folio, true);
-+			ret = -EAGAIN;
-+			goto out;
-+		}
- 		f2fs_folio_wait_writeback(last_folio, NODE, true, true);
- 		folio_mark_dirty(last_folio);
- 		folio_unlock(last_folio);
 diff --git a/fs/fs-writeback.c b/fs/fs-writeback.c
 index ce332d8..502adb9 100644
 --- a/fs/fs-writeback.c

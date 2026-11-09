@@ -330,3 +330,866 @@ index 85f8acd..3248f67 100644
  }
  EXPORT_SYMBOL_GPL(xfrm_output);
  
+diff --git a/drivers/block/zram/zram_drv.c b/drivers/block/zram/zram_drv.c
+index 55f52f9..169513c 100644
+--- a/drivers/block/zram/zram_drv.c
++++ b/drivers/block/zram/zram_drv.c
+@@ -1844,7 +1844,7 @@ static ssize_t read_block_state(struct file *file, char __user *buf,
+ 	char *kbuf;
+ 	ssize_t index, written = 0;
+ 	struct zram *zram = file->private_data;
+-	unsigned long nr_pages = zram->disksize >> PAGE_SHIFT;
++	unsigned long nr_pages;
+ 	struct timespec64 ts;
+ 
+ 	kbuf = kvmalloc(count, GFP_KERNEL);
+@@ -1858,6 +1858,8 @@ static ssize_t read_block_state(struct file *file, char __user *buf,
+ 		return -EINVAL;
+ 	}
+ 
++	nr_pages = zram->disksize >> PAGE_SHIFT;
++
+ 	for (index = *ppos; index < nr_pages; index++) {
+ 		int copied;
+ 
+@@ -3076,7 +3078,7 @@ static void zram_bio_discard(struct zram *zram, struct bio *bio)
+ 	 */
+ 	if (offset) {
+ 		if (n <= (PAGE_SIZE - offset))
+-			return;
++			goto end_bio;
+ 
+ 		n -= (PAGE_SIZE - offset);
+ 		index++;
+@@ -3091,6 +3093,7 @@ static void zram_bio_discard(struct zram *zram, struct bio *bio)
+ 		n -= PAGE_SIZE;
+ 	}
+ 
++end_bio:
+ 	bio_endio(bio);
+ }
+ 
+diff --git a/drivers/interconnect/core.c b/drivers/interconnect/core.c
+index 7e9b996..e3d3350 100644
+--- a/drivers/interconnect/core.c
++++ b/drivers/interconnect/core.c
+@@ -526,7 +526,7 @@ struct icc_path *of_icc_get_by_index(struct device *dev, int idx)
+ 	path->name = kasprintf(GFP_KERNEL, "%s-%s",
+ 			       src_data->node->name, dst_data->node->name);
+ 	if (!path->name) {
+-		kfree(path);
++		icc_put(path);
+ 		path = ERR_PTR(-ENOMEM);
+ 	}
+ 
+@@ -624,8 +624,9 @@ struct icc_path *icc_get(struct device *dev, const char *src, const char *dst)
+ 
+ 	path->name = kasprintf(GFP_KERNEL, "%s-%s", src_node->name, dst_node->name);
+ 	if (!path->name) {
+-		kfree(path);
+-		path = ERR_PTR(-ENOMEM);
++		mutex_unlock(&icc_lock);
++		icc_put(path);
++		return ERR_PTR(-ENOMEM);
+ 	}
+ out:
+ 	mutex_unlock(&icc_lock);
+diff --git a/include/linux/cgroup-defs.h b/include/linux/cgroup-defs.h
+index 694e627..731e771 100644
+--- a/include/linux/cgroup-defs.h
++++ b/include/linux/cgroup-defs.h
+@@ -498,7 +498,10 @@ struct cgroup {
+ 
+ 	int nr_threaded_children;	/* # of live threaded child cgroups */
+ 
+-	/* sequence number for cgroup.kill, serialized by css_set_lock. */
++	/*
++	 * Sequence number for cgroup.kill. Incremented with both cgroup_mutex
++	 * and css_set_lock held. Readers hold either one.
++	 */
+ 	unsigned int kill_seq;
+ 
+ 	struct kernfs_node *kn;		/* cgroup kernfs entry */
+diff --git a/include/linux/io_uring_types.h b/include/linux/io_uring_types.h
+index f08f979..4383974 100644
+--- a/include/linux/io_uring_types.h
++++ b/include/linux/io_uring_types.h
+@@ -18,6 +18,7 @@ enum {
+ 	 * It's also ignored unless IORING_SETUP_DEFER_TASKRUN is set.
+ 	 */
+ 	IOU_F_TWQ_LAZY_WAKE			= 1,
++	IOU_F_TWQ_IN_WAKE			= 2,
+ };
+ 
+ enum io_uring_cmd_flags {
+diff --git a/include/net/tcp.h b/include/net/tcp.h
+index 3255a19..88cbe0e 100644
+--- a/include/net/tcp.h
++++ b/include/net/tcp.h
+@@ -962,10 +962,13 @@ struct tcp_skb_cb {
+ 	__u32		seq;		/* Starting sequence number	*/
+ 	__u32		end_seq;	/* SEQ + FIN + SYN + datalen	*/
+ 	union {
+-		/* Note :
++		/* Notes :
++		 *	tcp_tw_isn is used in input path only
++		 *	(isn chosen by tcp_timewait_state_process())
+ 		 * 	  tcp_gso_segs/size are used in write queue only,
+ 		 *	  cf tcp_skb_pcount()/tcp_skb_mss()
+ 		 */
++		u32		tcp_tw_isn;
+ 		struct {
+ 			u16	tcp_gso_segs;
+ 			u16	tcp_gso_size;
+@@ -1083,9 +1086,9 @@ static inline bool tcp_skb_can_collapse_to(const struct sk_buff *skb)
+ static inline bool tcp_skb_can_collapse(const struct sk_buff *to,
+ 					const struct sk_buff *from)
+ {
+-	/* skb_cmp_decrypted() not needed, use tcp_write_collapse_fence() */
+ 	return likely(tcp_skb_can_collapse_to(to) &&
+ 		      mptcp_skb_can_collapse(to, from) &&
++		      !skb_cmp_decrypted(to, from) &&
+ 		      skb_pure_zcopy_same(to, from) &&
+ 		      skb_frags_readable(to) == skb_frags_readable(from));
+ }
+@@ -2110,7 +2113,7 @@ static inline void tcp_rtx_queue_unlink_and_free(struct sk_buff *skb, struct soc
+ 
+ static inline void tcp_write_collapse_fence(struct sock *sk)
+ {
+-	struct sk_buff *skb = tcp_write_queue_tail(sk);
++	struct sk_buff *skb = tcp_write_queue_tail(sk) ?: tcp_rtx_queue_tail(sk);
+ 
+ 	if (skb)
+ 		TCP_SKB_CB(skb)->eor = 1;
+diff --git a/io_uring/eventfd.c b/io_uring/eventfd.c
+index ffc4bd1..6a6ec9d 100644
+--- a/io_uring/eventfd.c
++++ b/io_uring/eventfd.c
+@@ -41,7 +41,7 @@ static void io_eventfd_do_signal(struct rcu_head *rcu)
+ 		call_rcu(&ev_fd->rcu, io_eventfd_free);
+ }
+ 
+-void io_eventfd_signal(struct io_ring_ctx *ctx)
++void io_eventfd_signal(struct io_ring_ctx *ctx, bool defer)
+ {
+ 	struct io_ev_fd *ev_fd = NULL;
+ 
+@@ -68,7 +68,7 @@ void io_eventfd_signal(struct io_ring_ctx *ctx)
+ 	if (ev_fd->eventfd_async && !io_wq_current_is_worker())
+ 		goto out;
+ 
+-	if (likely(eventfd_signal_allowed())) {
++	if (likely(!defer && eventfd_signal_allowed())) {
+ 		eventfd_signal_mask(ev_fd->cq_ev_fd, EPOLL_URING_WAKE);
+ 	} else {
+ 		if (!atomic_fetch_or(BIT(IO_EVENTFD_OP_SIGNAL_BIT), &ev_fd->ops)) {
+@@ -101,7 +101,7 @@ void io_eventfd_flush_signal(struct io_ring_ctx *ctx)
+ 	if (skip)
+ 		return;
+ 
+-	io_eventfd_signal(ctx);
++	io_eventfd_signal(ctx, false);
+ }
+ 
+ int io_eventfd_register(struct io_ring_ctx *ctx, void __user *arg,
+diff --git a/io_uring/eventfd.h b/io_uring/eventfd.h
+index d394f49..c93f32d 100644
+--- a/io_uring/eventfd.h
++++ b/io_uring/eventfd.h
+@@ -5,4 +5,4 @@ int io_eventfd_register(struct io_ring_ctx *ctx, void __user *arg,
+ int io_eventfd_unregister(struct io_ring_ctx *ctx);
+ 
+ void io_eventfd_flush_signal(struct io_ring_ctx *ctx);
+-void io_eventfd_signal(struct io_ring_ctx *ctx);
++void io_eventfd_signal(struct io_ring_ctx *ctx, bool defer);
+diff --git a/io_uring/futex.c b/io_uring/futex.c
+index a3d2b70..5897697 100644
+--- a/io_uring/futex.c
++++ b/io_uring/futex.c
+@@ -201,7 +201,7 @@ static void io_futex_wakev_fn(struct wake_q_head *wake_q, struct futex_q *q)
+ 
+ 	io_req_set_res(req, 0, 0);
+ 	req->io_task_work.func = io_futexv_complete;
+-	io_req_task_work_add(req);
++	__io_req_task_work_add(req, IOU_F_TWQ_IN_WAKE);
+ }
+ 
+ int io_futexv_prep(struct io_kiocb *req, const struct io_uring_sqe *sqe)
+@@ -248,7 +248,7 @@ static void io_futex_wake_fn(struct wake_q_head *wake_q, struct futex_q *q)
+ 
+ 	io_req_set_res(req, 0, 0);
+ 	req->io_task_work.func = io_futex_complete;
+-	io_req_task_work_add(req);
++	__io_req_task_work_add(req, IOU_F_TWQ_IN_WAKE);
+ }
+ 
+ static struct io_futex_data *io_alloc_ifd(struct io_ring_ctx *ctx)
+diff --git a/io_uring/io_uring.c b/io_uring/io_uring.c
+index e8e0bba..a01d856 100644
+--- a/io_uring/io_uring.c
++++ b/io_uring/io_uring.c
+@@ -1212,7 +1212,7 @@ static inline void io_req_local_work_add(struct io_kiocb *req,
+ 		if (ctx->flags & IORING_SETUP_TASKRUN_FLAG)
+ 			atomic_or(IORING_SQ_TASKRUN, &ctx->rings->sq_flags);
+ 		if (ctx->has_evfd)
+-			io_eventfd_signal(ctx);
++			io_eventfd_signal(ctx, false);
+ 	}
+ 
+ 	nr_wait = atomic_read(&ctx->cq_wait_nr);
+diff --git a/io_uring/poll.c b/io_uring/poll.c
+index c833fd1..aa8aa56 100644
+--- a/io_uring/poll.c
++++ b/io_uring/poll.c
+@@ -231,9 +231,9 @@ enum {
+ 	IOU_POLL_REQUEUE = 4,
+ };
+ 
+-static void __io_poll_execute(struct io_kiocb *req, int mask)
++static void __io_poll_execute(struct io_kiocb *req, int mask, unsigned tw_flags)
+ {
+-	unsigned flags = 0;
++	unsigned flags = tw_flags;
+ 
+ 	io_req_set_res(req, mask, 0);
+ 	req->io_task_work.func = io_poll_task_func;
+@@ -241,14 +241,15 @@ static void __io_poll_execute(struct io_kiocb *req, int mask)
+ 	trace_io_uring_task_add(req, mask);
+ 
+ 	if (!(req->flags & REQ_F_POLL_NO_LAZY))
+-		flags = IOU_F_TWQ_LAZY_WAKE;
++		flags |= IOU_F_TWQ_LAZY_WAKE;
+ 	__io_req_task_work_add(req, flags);
+ }
+ 
+-static inline void io_poll_execute(struct io_kiocb *req, int res)
++static inline void io_poll_execute(struct io_kiocb *req, int res,
++				   unsigned tw_flags)
+ {
+ 	if (io_poll_get_ownership(req))
+-		__io_poll_execute(req, res);
++		__io_poll_execute(req, res, tw_flags);
+ }
+ 
+ /*
+@@ -360,7 +361,7 @@ void io_poll_task_func(struct io_kiocb *req, struct io_tw_state *ts)
+ 		return;
+ 	} else if (ret == IOU_POLL_REQUEUE) {
+ 		io_kbuf_recycle(req, 0);
+-		__io_poll_execute(req, 0);
++		__io_poll_execute(req, 0, 0);
+ 		return;
+ 	}
+ 	io_poll_remove_entries(req);
+@@ -398,7 +399,7 @@ static void io_poll_cancel_req(struct io_kiocb *req)
+ {
+ 	io_poll_mark_cancelled(req);
+ 	/* kick tw, which should complete the request */
+-	io_poll_execute(req, 0);
++	io_poll_execute(req, 0, 0);
+ }
+ 
+ #define IO_ASYNC_POLL_COMMON	(EPOLLONESHOT | EPOLLPRI)
+@@ -407,7 +408,7 @@ static __cold int io_pollfree_wake(struct io_kiocb *req, struct io_poll *poll)
+ {
+ 	io_poll_mark_cancelled(req);
+ 	/* we have to kick tw in case it's not already */
+-	io_poll_execute(req, 0);
++	io_poll_execute(req, 0, IOU_F_TWQ_IN_WAKE);
+ 
+ 	/*
+ 	 * If the waitqueue is being freed early but someone is already
+@@ -460,7 +461,7 @@ static int io_poll_wake(struct wait_queue_entry *wait, unsigned mode, int sync,
+ 			else
+ 				req->flags &= ~REQ_F_SINGLE_POLL;
+ 		}
+-		__io_poll_execute(req, mask);
++		__io_poll_execute(req, mask, IOU_F_TWQ_IN_WAKE);
+ 	}
+ 	return 1;
+ }
+@@ -652,7 +653,7 @@ static int __io_arm_poll_handler(struct io_kiocb *req,
+ 
+ 	if (mask && (poll->events & EPOLLET) &&
+ 	    io_poll_can_finish_inline(req, ipt)) {
+-		__io_poll_execute(req, mask);
++		__io_poll_execute(req, mask, 0);
+ 		return 0;
+ 	}
+ 	io_napi_add(req);
+@@ -663,7 +664,7 @@ static int __io_arm_poll_handler(struct io_kiocb *req,
+ 		 * poll was waken up, queue up a tw, it'll deal with it.
+ 		 */
+ 		if (atomic_cmpxchg(&req->poll_refs, 1, 0) != 1)
+-			__io_poll_execute(req, 0);
++			__io_poll_execute(req, 0, 0);
+ 	}
+ 	return 0;
+ }
+diff --git a/io_uring/waitid.c b/io_uring/waitid.c
+index ecaa358..66ca167 100644
+--- a/io_uring/waitid.c
++++ b/io_uring/waitid.c
+@@ -279,7 +279,7 @@ static int io_waitid_wait(struct wait_queue_entry *wait, unsigned mode,
+ 		return 1;
+ 
+ 	req->io_task_work.func = io_waitid_cb;
+-	io_req_task_work_add(req);
++	__io_req_task_work_add(req, IOU_F_TWQ_IN_WAKE);
+ 	return 1;
+ }
+ 
+diff --git a/kernel/cgroup/cgroup.c b/kernel/cgroup/cgroup.c
+index 793921a..78c9bab 100644
+--- a/kernel/cgroup/cgroup.c
++++ b/kernel/cgroup/cgroup.c
+@@ -3908,33 +3908,41 @@ static int cgroup_cpu_pressure_show(struct seq_file *seq, void *v)
+ static ssize_t pressure_write(struct kernfs_open_file *of, char *buf,
+ 			      size_t nbytes, enum psi_res res)
+ {
+-	struct cgroup_file_ctx *ctx = of->priv;
++	struct cgroup_file_ctx *ctx;
+ 	struct psi_trigger *new;
+ 	struct cgroup *cgrp;
+ 	struct psi_group *psi;
++	ssize_t ret = 0;
+ 
+ 	cgrp = cgroup_kn_lock_live(of->kn, false);
+ 	if (!cgrp)
+ 		return -ENODEV;
+ 
+-	cgroup_get(cgrp);
+-	cgroup_kn_unlock(of->kn);
++	ctx = of->priv;
++	if (!ctx) {
++		ret = -ENODEV;
++		goto out_unlock;
++	}
+ 
+ 	/* Allow only one trigger per file descriptor */
+ 	if (ctx->psi.trigger) {
+-		cgroup_put(cgrp);
+-		return -EBUSY;
++		ret = -EBUSY;
++		goto out_unlock;
+ 	}
+ 
+ 	psi = cgroup_psi(cgrp);
+ 	new = psi_trigger_create(psi, buf, res, of->file, of);
+ 	if (IS_ERR(new)) {
+-		cgroup_put(cgrp);
+-		return PTR_ERR(new);
++		ret = PTR_ERR(new);
++		goto out_unlock;
+ 	}
+ 
+ 	smp_store_release(&ctx->psi.trigger, new);
+-	cgroup_put(cgrp);
++
++out_unlock:
++	cgroup_kn_unlock(of->kn);
++	if (ret)
++		return ret;
+ 
+ 	return nbytes;
+ }
+@@ -6617,10 +6625,7 @@ static int cgroup_css_set_fork(struct kernel_clone_args *kargs)
+ 	spin_lock_irq(&css_set_lock);
+ 	cset = task_css_set(current);
+ 	get_css_set(cset);
+-	if (kargs->cgrp)
+-		kargs->kill_seq = kargs->cgrp->kill_seq;
+-	else
+-		kargs->kill_seq = cset->dfl_cgrp->kill_seq;
++	kargs->kill_seq = cset->dfl_cgrp->kill_seq;
+ 	spin_unlock_irq(&css_set_lock);
+ 
+ 	if (!(kargs->flags & CLONE_INTO_CGROUP)) {
+@@ -6685,6 +6690,7 @@ static int cgroup_css_set_fork(struct kernel_clone_args *kargs)
+ 	put_css_set(cset);
+ 	fput(f);
+ 	kargs->cgrp = dst_cgrp;
++	kargs->kill_seq = dst_cgrp->kill_seq;
+ 	return ret;
+ 
+ err:
+diff --git a/kernel/futex/requeue.c b/kernel/futex/requeue.c
+index f4a6994..99176c1 100644
+--- a/kernel/futex/requeue.c
++++ b/kernel/futex/requeue.c
+@@ -149,8 +149,16 @@ static inline void futex_requeue_pi_complete(struct futex_q *q, int locked)
+ 	} while (!atomic_try_cmpxchg(&q->requeue_state, &old, new));
+ 
+ #ifdef CONFIG_PREEMPT_RT
+-	/* If the waiter interleaved with the requeue let it know */
+-	if (unlikely(old == Q_REQUEUE_PI_WAIT))
++	/*
++	 * The waiter in futex_requeue_pi_wakeup_sync() can interleave with the
++	 * wake below: It will assign Q_REQUEUE_PI_IN_PROGRESS and here it will
++	 * be updated to Q_REQUEUE_PI_LOCKED (locked = 1). The rcuwait_wait_event()
++	 * will already read Q_REQUEUE_PI_LOCKED and skip the schedule() invocation,
++	 * leading to an access of futex_q::requeue_wait after the waiter returned.
++	 * In this case only we skip the wake here and rely on following wake in
++	 * requeue_pi_wake_futex() to perform the wake if needed.
++	 */
++	if (unlikely(old == Q_REQUEUE_PI_WAIT) && new != Q_REQUEUE_PI_LOCKED)
+ 		rcuwait_wake_up(&q->requeue_wait);
+ #endif
+ }
+diff --git a/kernel/sched/core.c b/kernel/sched/core.c
+index 3caa543..e915d5d 100644
+--- a/kernel/sched/core.c
++++ b/kernel/sched/core.c
+@@ -494,6 +494,17 @@ static void __sched_core_flip(bool enabled)
+ 
+ 		sched_core_lock(cpu, &flags);
+ 
++		/*
++		 * A core-wide selection may have the shared rq lock temporarily
++		 * released by a lock-dropping ->pick_task(). Flipping would
++		 * rebind rq_lockp() under it. Wait it out.
++		 */
++		while (cpu_rq(cpu)->core->core_pick_in_flight) {
++			sched_core_unlock(cpu, &flags);
++			cpu_relax();
++			sched_core_lock(cpu, &flags);
++		}
++
+ 		for_each_cpu(t, smt_mask)
+ 			cpu_rq(t)->core_enabled = enabled;
+ 
+@@ -6777,6 +6788,8 @@ pick_next_task(struct rq *rq, struct task_struct *prev, struct rq_flags *rf)
+ 		return __pick_next_task(rq, prev, rf);
+ 	}
+ 
++	rq->core->core_pick_in_flight++;
++
+ 	/*
+ 	 * If there were no {en,de}queues since we picked (IOW, the task
+ 	 * pointers are all still valid), and we haven't scheduled the last
+@@ -6971,6 +6984,7 @@ pick_next_task(struct rq *rq, struct task_struct *prev, struct rq_flags *rf)
+ 	}
+ 
+ out_set_next:
++	rq->core->core_pick_in_flight--;
+ 	put_prev_set_next_task(rq, prev, next);
+ 	if (rq->core->core_forceidle_count && next == rq->idle)
+ 		queue_core_balance(rq);
+@@ -7164,6 +7178,13 @@ static void sched_core_cpu_deactivate(unsigned int cpu)
+ 	core_rq->core_forceidle_seq        = rq->core_forceidle_seq;
+ 	core_rq->core_forceidle_occupation = rq->core_forceidle_occupation;
+ 
++	/*
++	 * A stale leftover would bias the count forever if this CPU later
++	 * returns as its own leader. Move, don't copy.
++	 */
++	core_rq->core_pick_in_flight       = rq->core_pick_in_flight;
++	rq->core_pick_in_flight            = 0;
++
+ 	/*
+ 	 * Accounting edge for forced idle is handled in pick_next_task().
+ 	 * Don't need another one here, since the hotplug thread shouldn't
+@@ -9740,6 +9761,7 @@ void __init sched_init(void)
+ 		rq->core_forceidle_count = 0;
+ 		rq->core_forceidle_occupation = 0;
+ 		rq->core_forceidle_start = 0;
++		rq->core_pick_in_flight = 0;
+ 
+ 		rq->core_cookie = 0UL;
+ #endif
+diff --git a/kernel/sched/cpufreq_schedutil.c b/kernel/sched/cpufreq_schedutil.c
+index 66f23b0..4564509 100644
+--- a/kernel/sched/cpufreq_schedutil.c
++++ b/kernel/sched/cpufreq_schedutil.c
+@@ -61,6 +61,17 @@ static DEFINE_PER_CPU(struct sugov_cpu, sugov_cpu);
+ 
+ /************************ Governor internals ***********************/
+ 
++static void sugov_update_rate_limit_us(struct sugov_policy *sg_policy)
++{
++	/*
++	 * Cast rate_limit_us before multiplication to force 64-bit arithmetic.
++	 * Otherwise, on 32-bit platforms, both operands are converted to
++	 * 32-bit unsigned long and the multiplication may overflow.
++	 */
++	sg_policy->freq_update_delay_ns =
++		(s64)sg_policy->tunables->rate_limit_us * NSEC_PER_USEC;
++}
++
+ static bool sugov_should_update_freq(struct sugov_policy *sg_policy, u64 time)
+ {
+ 	s64 delta_ns;
+@@ -607,7 +618,7 @@ rate_limit_us_store(struct gov_attr_set *attr_set, const char *buf, size_t count
+ 	tunables->rate_limit_us = rate_limit_us;
+ 
+ 	list_for_each_entry(sg_policy, &attr_set->policy_list, tunables_hook)
+-		sg_policy->freq_update_delay_ns = rate_limit_us * NSEC_PER_USEC;
++		sugov_update_rate_limit_us(sg_policy);
+ 
+ 	return count;
+ }
+@@ -866,7 +877,7 @@ static int sugov_start(struct cpufreq_policy *policy)
+ 	void (*uu)(struct update_util_data *data, u64 time, unsigned int flags);
+ 	unsigned int cpu;
+ 
+-	sg_policy->freq_update_delay_ns	= sg_policy->tunables->rate_limit_us * NSEC_PER_USEC;
++	sugov_update_rate_limit_us(sg_policy);
+ 	sg_policy->last_freq_update_time	= 0;
+ 	sg_policy->next_freq			= 0;
+ 	sg_policy->work_in_progress		= false;
+diff --git a/kernel/sched/fair.c b/kernel/sched/fair.c
+index 3723601..52b6874 100644
+--- a/kernel/sched/fair.c
++++ b/kernel/sched/fair.c
+@@ -4505,7 +4505,8 @@ static inline void
+ update_tg_cfs_runnable(struct cfs_rq *cfs_rq, struct sched_entity *se, struct cfs_rq *gcfs_rq)
+ {
+ 	long delta_sum, delta_avg = gcfs_rq->avg.runnable_avg - se->avg.runnable_avg;
+-	u32 new_sum, divider;
++	u64 new_sum;
++	u32 divider;
+ 
+ 	/* Nothing to update */
+ 	if (!delta_avg)
+@@ -4519,7 +4520,7 @@ update_tg_cfs_runnable(struct cfs_rq *cfs_rq, struct sched_entity *se, struct cf
+ 
+ 	/* Set new sched_entity's runnable */
+ 	se->avg.runnable_avg = gcfs_rq->avg.runnable_avg;
+-	new_sum = se->avg.runnable_avg * divider;
++	new_sum = (u64)se->avg.runnable_avg * divider;
+ 	delta_sum = (long)new_sum - (long)se->avg.runnable_sum;
+ 	se->avg.runnable_sum = new_sum;
+ 
+@@ -8250,25 +8251,32 @@ static int select_idle_sibling(struct task_struct *p, int prev, int target)
+ static unsigned long
+ cpu_util(int cpu, struct task_struct *p, int dst_cpu, int boost)
+ {
++	bool add_task = p && task_cpu(p) != cpu && dst_cpu == cpu;
++	bool sub_task = p && task_cpu(p) == cpu && dst_cpu != cpu;
+ 	struct cfs_rq *cfs_rq = &cpu_rq(cpu)->cfs;
+ 	unsigned long util = READ_ONCE(cfs_rq->avg.util_avg);
+ 	unsigned long runnable;
+ 
+-	if (boost) {
+-		runnable = READ_ONCE(cfs_rq->avg.runnable_avg);
+-		util = max(util, runnable);
+-	}
+-
+ 	/*
+ 	 * If @dst_cpu is -1 or @p migrates from @cpu to @dst_cpu remove its
+ 	 * contribution. If @p migrates from another CPU to @cpu add its
+ 	 * contribution. In all the other cases @cpu is not impacted by the
+ 	 * migration so its util_avg is already correct.
+ 	 */
+-	if (p && task_cpu(p) == cpu && dst_cpu != cpu)
+-		lsub_positive(&util, task_util(p));
+-	else if (p && task_cpu(p) != cpu && dst_cpu == cpu)
++	if (add_task)
+ 		util += task_util(p);
++	else if (sub_task)
++		lsub_positive(&util, task_util(p));
++
++	if (boost) {
++		runnable = READ_ONCE(cfs_rq->avg.runnable_avg);
++		if (add_task)
++			runnable += READ_ONCE(p->se.avg.runnable_avg);
++		else if (sub_task)
++			lsub_positive(&runnable,
++				      READ_ONCE(p->se.avg.runnable_avg));
++		util = max(util, runnable);
++	}
+ 
+ 	if (sched_feat(UTIL_EST)) {
+ 		unsigned long util_est;
+@@ -9533,6 +9541,7 @@ struct lb_env {
+ 
+ 	int			dst_cpu;
+ 	struct rq		*dst_rq;
++	bool			dst_core_idle;
+ 
+ 	struct cpumask		*dst_grpmask;
+ 	int			new_dst_cpu;
+@@ -10792,14 +10801,31 @@ static bool update_sd_pick_busiest(struct lb_env *env,
+ 	 * We can use max_capacity here as reduction in capacity on some
+ 	 * CPUs in the group should either be possible to resolve
+ 	 * internally or be covered by avg_load imbalance (eventually).
++	 *
++	 * When SMT is active, only pull a misfit to dst_cpu if it is on a
++	 * fully idle core; otherwise the effective capacity of the core is
++	 * reduced and we may not actually provide more capacity than the
++	 * source.
+ 	 */
+ 	if ((env->sd->flags & SD_ASYM_CPUCAPACITY) &&
+ 	    (sgs->group_type == group_misfit_task) &&
+ 	    (sgs->group_misfit_reason == MISFIT_PERF) &&
+-	    (!capacity_greater(capacity_of(env->dst_cpu), sg->sgc->max_capacity) ||
++	    (!env->dst_core_idle ||
++	     !capacity_greater(capacity_of(env->dst_cpu), sg->sgc->max_capacity) ||
+ 	     sds->local_stat.group_type != group_has_spare))
+ 		return false;
+ 
++	/*
++	 * Candidate sg has no more than one task per CPU and has higher
++	 * per-CPU capacity. Migrating tasks to less capable CPUs may harm
++	 * throughput. Maximize throughput, power/energy consequences are not
++	 * considered.
++	 */
++	if ((env->sd->flags & SD_ASYM_CPUCAPACITY) &&
++	    (sgs->group_type <= group_fully_busy) &&
++	    (capacity_greater(sg->sgc->min_capacity, capacity_of(env->dst_cpu))))
++		return false;
++
+ 	if (sgs->group_type > busiest->group_type)
+ 		return true;
+ 
+@@ -11370,6 +11396,8 @@ static inline void update_sd_lb_stats(struct lb_env *env, struct sd_lb_stats *sd
+ 	unsigned long sum_util = 0;
+ 	bool sg_overloaded = 0, sg_overutilized = 0;
+ 
++	env->dst_core_idle = !sched_smt_active() || is_core_idle(env->dst_cpu);
++
+ 	do {
+ 		struct sg_lb_stats *sgs = &tmp_sgs;
+ 		int local_group;
+diff --git a/kernel/time/hrtimer.c b/kernel/time/hrtimer.c
+index 06b4538..579605b 100644
+--- a/kernel/time/hrtimer.c
++++ b/kernel/time/hrtimer.c
+@@ -1285,6 +1285,14 @@ static int __hrtimer_start_range_ns(struct hrtimer *timer, ktime_t tim,
+ 	}
+ 
+ 	first = enqueue_hrtimer(timer, new_base, mode);
++
++	/*
++	 * If the hrtimer interrupt is running, then it will reevaluate the
++	 * clock bases and reprogram the clock event device.
++	 */
++	if (new_base->cpu_base->in_hrtirq)
++		return false;
++
+ 	if (!force_local) {
+ 		/*
+ 		 * If the current CPU base is online, then the timer is
+diff --git a/kernel/time/tick-sched.c b/kernel/time/tick-sched.c
+index ed59a40..6de50ee 100644
+--- a/kernel/time/tick-sched.c
++++ b/kernel/time/tick-sched.c
+@@ -777,15 +777,16 @@ static u64 get_cpu_sleep_time_us(struct tick_sched *ts, ktime_t *sleeptime,
+ 		*last_update_time = ktime_to_us(now);
+ 
+ 	do {
++		ktime_t delta = 0;
++
+ 		seq = read_seqcount_begin(&ts->idle_sleeptime_seq);
+ 
+ 		if (tick_sched_flag_test(ts, TS_FLAG_IDLE_ACTIVE) && compute_delta) {
+-			ktime_t delta = ktime_sub(now, ts->idle_entrytime);
+-
+-			idle = ktime_add(*sleeptime, delta);
+-		} else {
+-			idle = *sleeptime;
++			if (now > ts->idle_entrytime)
++				delta = ktime_sub(now, ts->idle_entrytime);
+ 		}
++
++		idle = ktime_add(*sleeptime, delta);
+ 	} while (read_seqcount_retry(&ts->idle_sleeptime_seq, seq));
+ 
+ 	return ktime_to_us(idle);
+diff --git a/net/core/page_pool.c b/net/core/page_pool.c
+index 458b040..8052a44 100644
+--- a/net/core/page_pool.c
++++ b/net/core/page_pool.c
+@@ -1012,7 +1012,8 @@ netmem_ref page_pool_alloc_frag_netmem(struct page_pool *pool,
+ 	if (WARN_ON(size > max_size))
+ 		return 0;
+ 
+-	size = ALIGN(size, dma_get_cache_alignment());
++	size = ALIGN(size, max_t(unsigned int, dma_get_cache_alignment(),
++				 __alignof__(struct skb_shared_info)));
+ 	*offset = pool->frag_offset;
+ 
+ 	if (netmem && *offset + size > max_size) {
+diff --git a/net/ipv4/inet_connection_sock.c b/net/ipv4/inet_connection_sock.c
+index 74ac047..6b59c4c 100644
+--- a/net/ipv4/inet_connection_sock.c
++++ b/net/ipv4/inet_connection_sock.c
+@@ -158,12 +158,10 @@ static bool inet_use_bhash2_on_bind(const struct sock *sk)
+ {
+ #if IS_ENABLED(CONFIG_IPV6)
+ 	if (sk->sk_family == AF_INET6) {
+-		int addr_type = ipv6_addr_type(&sk->sk_v6_rcv_saddr);
+-
+-		if (addr_type == IPV6_ADDR_ANY)
++		if (ipv6_addr_any(&sk->sk_v6_rcv_saddr))
+ 			return false;
+ 
+-		if (addr_type != IPV6_ADDR_MAPPED)
++		if (!ipv6_addr_v4mapped(&sk->sk_v6_rcv_saddr))
+ 			return true;
+ 	}
+ #endif
+diff --git a/net/ipv4/tcp.c b/net/ipv4/tcp.c
+index 09e2f85..9fe10f2 100644
+--- a/net/ipv4/tcp.c
++++ b/net/ipv4/tcp.c
+@@ -4406,9 +4406,11 @@ int do_tcp_getsockopt(struct sock *sk, int level,
+ 		if (copy_from_sockptr(&len, optlen, sizeof(int)))
+ 			return -EFAULT;
+ 
+-		ca_ops = icsk->icsk_ca_ops;
++		rcu_read_lock();
++		ca_ops = READ_ONCE(icsk->icsk_ca_ops);
+ 		if (ca_ops && ca_ops->get_info)
+ 			sz = ca_ops->get_info(sk, ~0U, &attr, &info);
++		rcu_read_unlock();
+ 
+ 		len = min_t(unsigned int, len, sz);
+ 		if (copy_to_sockptr(optlen, &len, sizeof(int)))
+diff --git a/net/ipv4/tcp_dctcp.c b/net/ipv4/tcp_dctcp.c
+index 8a45a4a..3c7cf68 100644
+--- a/net/ipv4/tcp_dctcp.c
++++ b/net/ipv4/tcp_dctcp.c
+@@ -224,7 +224,7 @@ static size_t dctcp_get_info(struct sock *sk, u32 ext, int *attr,
+ 	if (ext & (1 << (INET_DIAG_DCTCPINFO - 1)) ||
+ 	    ext & (1 << (INET_DIAG_VEGASINFO - 1))) {
+ 		memset(&info->dctcp, 0, sizeof(info->dctcp));
+-		if (inet_csk(sk)->icsk_ca_ops != &dctcp_reno) {
++		if (READ_ONCE(inet_csk(sk)->icsk_ca_ops) != &dctcp_reno) {
+ 			info->dctcp.dctcp_enabled = 1;
+ 			info->dctcp.dctcp_ce_state = (u16) ca->ce_state;
+ 			info->dctcp.dctcp_alpha = ca->dctcp_alpha;
+diff --git a/net/ipv4/tcp_input.c b/net/ipv4/tcp_input.c
+index 444105e..38f8467 100644
+--- a/net/ipv4/tcp_input.c
++++ b/net/ipv4/tcp_input.c
+@@ -6116,6 +6116,7 @@ reset:
+  *	  or pure receivers (this means either the sequence number or the ack
+  *	  value must stay constant)
+  *	- Unexpected TCP option.
++ *	- ACK sequence number is outside [SND.UNA, SND.NXT].
+  *
+  *	When these conditions are not satisfied it drops into a standard
+  *	receive procedure patterned after RFC793 to handle all cases.
+@@ -6164,7 +6165,7 @@ void tcp_rcv_established(struct sock *sk, struct sk_buff *skb)
+ 
+ 	if ((tcp_flag_word(th) & TCP_HP_BITS) == tp->pred_flags &&
+ 	    TCP_SKB_CB(skb)->seq == tp->rcv_nxt &&
+-	    !after(TCP_SKB_CB(skb)->ack_seq, tp->snd_nxt)) {
++	    between(TCP_SKB_CB(skb)->ack_seq, tp->snd_una, tp->snd_nxt)) {
+ 		int tcp_header_len = tp->tcp_header_len;
+ 
+ 		/* Timestamp header prediction: tcp_header_len
+@@ -7219,6 +7220,7 @@ int tcp_conn_request(struct request_sock_ops *rsk_ops,
+ 		     struct sock *sk, struct sk_buff *skb)
+ {
+ 	struct tcp_fastopen_cookie foc = { .len = -1 };
++	u32 isn = TCP_SKB_CB(skb)->tcp_tw_isn;
+ 	struct tcp_options_received tmp_opt;
+ 	struct tcp_sock *tp = tcp_sk(sk);
+ 	struct net *net = sock_net(sk);
+@@ -7228,20 +7230,16 @@ int tcp_conn_request(struct request_sock_ops *rsk_ops,
+ 	struct dst_entry *dst;
+ 	struct flowi fl;
+ 	u8 syncookies;
+-	u32 isn;
+ 
+ #ifdef CONFIG_TCP_AO
+ 	const struct tcp_ao_hdr *aoh;
+ #endif
+ 
+-	isn = __this_cpu_read(tcp_tw_isn);
+-	if (isn) {
+-		/* TW buckets are converted to open requests without
+-		 * limitations, they conserve resources and peer is
+-		 * evidently real one.
+-		 */
+-		__this_cpu_write(tcp_tw_isn, 0);
+-	} else {
++	/* If isn is non-zero, this SYN originally matched a TIME_WAIT socket.
++	 * TW sockets are converted to open requests without limitations,
++	 * we skip the queue limits and syncookie checks in the block below.
++	 */
++	if (!isn) {
+ 		syncookies = READ_ONCE(net->ipv4.sysctl_tcp_syncookies);
+ 
+ 		if (syncookies == 2 || inet_csk_reqsk_queue_is_full(sk)) {
+diff --git a/net/ipv4/tcp_ipv4.c b/net/ipv4/tcp_ipv4.c
+index 7808bf1..56ed11e 100644
+--- a/net/ipv4/tcp_ipv4.c
++++ b/net/ipv4/tcp_ipv4.c
+@@ -1221,7 +1221,7 @@ static int tcp_v4_send_synack(const struct sock *sk, struct dst_entry *dst,
+  */
+ static void tcp_v4_reqsk_destructor(struct request_sock *req)
+ {
+-	kfree(rcu_dereference_protected(inet_rsk(req)->ireq_opt, 1));
++	kfree_rcu(rcu_dereference_protected(inet_rsk(req)->ireq_opt, 1), rcu);
+ }
+ 
+ #ifdef CONFIG_TCP_MD5SIG
+@@ -2308,6 +2308,7 @@ lookup:
+ 		}
+ 	}
+ 
++	isn = 0;
+ process:
+ 	if (static_branch_unlikely(&ip4_min_ttl)) {
+ 		/* min_ttl can be changed concurrently from do_ip_setsockopt() */
+@@ -2337,6 +2338,7 @@ process:
+ 	th = (const struct tcphdr *)skb->data;
+ 	iph = ip_hdr(skb);
+ 	tcp_v4_fill_cb(skb, iph, th);
++	TCP_SKB_CB(skb)->tcp_tw_isn = isn;
+ 
+ 	skb->dev = NULL;
+ 
+diff --git a/net/ipv6/tcp_ipv6.c b/net/ipv6/tcp_ipv6.c
+index a84dbd5..aedacb1 100644
+--- a/net/ipv6/tcp_ipv6.c
++++ b/net/ipv6/tcp_ipv6.c
+@@ -1866,6 +1866,7 @@ lookup:
+ 		}
+ 	}
+ 
++	isn = 0;
+ process:
+ 	if (static_branch_unlikely(&ip6_min_hopcount)) {
+ 		/* min_hopcount can be changed concurrently from do_ipv6_setsockopt() */
+@@ -1895,6 +1896,7 @@ process:
+ 	th = (const struct tcphdr *)skb->data;
+ 	hdr = ipv6_hdr(skb);
+ 	tcp_v6_fill_cb(skb, hdr, th);
++	TCP_SKB_CB(skb)->tcp_tw_isn = isn;
+ 
+ 	skb->dev = NULL;
+ 
+diff --git a/net/netlink/af_netlink.c b/net/netlink/af_netlink.c
+index 8b06046..b703e41 100644
+--- a/net/netlink/af_netlink.c
++++ b/net/netlink/af_netlink.c
+@@ -463,7 +463,7 @@ netlink_unlock_table(void)
+ 
+ struct netlink_compare_arg
+ {
+-	possible_net_t pnet;
++	u64 net_cookie;
+ 	u32 portid;
+ };
+ 
+@@ -478,14 +478,14 @@ static inline int netlink_compare(struct rhashtable_compare_arg *arg,
+ 	const struct netlink_sock *nlk = ptr;
+ 
+ 	return nlk->portid != x->portid ||
+-	       !net_eq(sock_net(&nlk->sk), read_pnet(&x->pnet));
++	       sock_net(&nlk->sk)->net_cookie != x->net_cookie;
+ }
+ 
+ static void netlink_compare_arg_init(struct netlink_compare_arg *arg,
+ 				     struct net *net, u32 portid)
+ {
+ 	memset(arg, 0, sizeof(*arg));
+-	write_pnet(&arg->pnet, net);
++	arg->net_cookie = net->net_cookie;
+ 	arg->portid = portid;
+ }
+ 

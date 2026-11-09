@@ -62,67 +62,6 @@ index 7e9b996..e3d3350 100644
  	}
  out:
  	mutex_unlock(&icc_lock);
-diff --git a/drivers/vhost/vhost.c b/drivers/vhost/vhost.c
-index 276dded..a1c8157 100644
---- a/drivers/vhost/vhost.c
-+++ b/drivers/vhost/vhost.c
-@@ -2122,6 +2122,14 @@ static long vhost_vring_set_num_addr(struct vhost_dev *d,
- 		BUG();
- 	}
- 
-+	/*
-+	 * The metadata cache holds the IOTLB mapping that backed the previous
-+	 * desc/avail/used addresses and vring size, both of which are being
-+	 * replaced here.  iotlb_access_ok() takes a cache hit as proof that the
-+	 * region was validated, so the stale entries have to go.
-+	 */
-+	__vhost_vq_meta_reset(vq);
-+
- 	mutex_unlock(&vq->mutex);
- 
- 	return r;
-diff --git a/fs/exec.c b/fs/exec.c
-index 965fdc5..c42867a 100644
---- a/fs/exec.c
-+++ b/fs/exec.c
-@@ -1256,6 +1256,22 @@ int begin_new_exec(struct linux_binprm * bprm)
- 	retval = de_thread(me);
- 	if (retval)
- 		goto out;
-+
-+	/*
-+	 * This must be done here to ensure that POSIX CPU timers which were
-+	 * armed on the current task are dequeued from me::posix_cputimers.
-+	 * Otherwise in case of a TID switch the deletion of the related POSIX
-+	 * timer would not remove an enqueued timer because the TID lookup
-+	 * of the old TID fails.
-+	 */
-+#ifdef CONFIG_POSIX_TIMERS
-+	spin_lock_irq(&me->sighand->siglock);
-+	posix_cpu_timers_exit(me);
-+	spin_unlock_irq(&me->sighand->siglock);
-+	exit_itimers(me);
-+	flush_itimer_signals();
-+#endif
-+
- 	/* see the comment in check_unsafe_exec() */
- 	current->fs->in_exec = 0;
- 	/*
-@@ -1316,14 +1332,6 @@ int begin_new_exec(struct linux_binprm * bprm)
- 	if (retval)
- 		goto out_unlock;
- 
--#ifdef CONFIG_POSIX_TIMERS
--	spin_lock_irq(&me->sighand->siglock);
--	posix_cpu_timers_exit(me);
--	spin_unlock_irq(&me->sighand->siglock);
--	exit_itimers(me);
--	flush_itimer_signals();
--#endif
--
- 	/*
- 	 * Make the signal table private.
- 	 */
 diff --git a/fs/fs-writeback.c b/fs/fs-writeback.c
 index ce332d8..502adb9 100644
 --- a/fs/fs-writeback.c
@@ -1171,27 +1110,6 @@ index 574fe74..92168ce 100644
  
  	/* class->lock effectively protects the zpage migration */
  	spin_lock(&class->lock);
-diff --git a/net/bridge/netfilter/nf_conntrack_bridge.c b/net/bridge/netfilter/nf_conntrack_bridge.c
-index 6482de4..10127b7 100644
---- a/net/bridge/netfilter/nf_conntrack_bridge.c
-+++ b/net/bridge/netfilter/nf_conntrack_bridge.c
-@@ -40,9 +40,13 @@ static int nf_br_ip_fragment(struct net *net, struct sock *sk,
- 	int err = 0;
- 
- 	/* for offloaded checksums cleanup checksum before fragmentation */
--	if (skb->ip_summed == CHECKSUM_PARTIAL &&
--	    (err = skb_checksum_help(skb)))
--		goto blackhole;
-+	if (skb->ip_summed == CHECKSUM_PARTIAL) {
-+		err = ip_check_csum_start(skb);
-+		if (!err)
-+			err = skb_checksum_help(skb);
-+		if (err)
-+			goto blackhole;
-+	}
- 
- 	iph = ip_hdr(skb);
- 
 diff --git a/net/core/page_pool.c b/net/core/page_pool.c
 index 458b040..8052a44 100644
 --- a/net/core/page_pool.c
@@ -1206,39 +1124,6 @@ index 458b040..8052a44 100644
  	*offset = pool->frag_offset;
  
  	if (netmem && *offset + size > max_size) {
-diff --git a/net/core/sock.c b/net/core/sock.c
-index 4d4f4f8..3359110 100644
---- a/net/core/sock.c
-+++ b/net/core/sock.c
-@@ -3728,7 +3728,14 @@ int sock_gettstamp(struct socket *sock, void __user *userstamp,
- 	struct sock *sk = sock->sk;
- 	struct timespec64 ts;
- 
--	sock_enable_timestamp(sk, SOCK_TIMESTAMP);
-+	/* sk->sk_flags must only be changed under the socket lock,
-+	 * because sock_set_flag() uses non atomic operations.
-+	 */
-+	if (!sock_flag(sk, SOCK_TIMESTAMP)) {
-+		lock_sock(sk);
-+		sock_enable_timestamp(sk, SOCK_TIMESTAMP);
-+		release_sock(sk);
-+	}
- 	ts = ktime_to_timespec64(sock_read_timestamp(sk));
- 	if (ts.tv_sec == -1)
- 		return -ENOENT;
-diff --git a/net/ipv4/af_inet.c b/net/ipv4/af_inet.c
-index fbf366b..7ed1b9a 100644
---- a/net/ipv4/af_inet.c
-+++ b/net/ipv4/af_inet.c
-@@ -156,7 +156,7 @@ void inet_sock_destruct(struct sock *sk)
- 	WARN_ON_ONCE(sk->sk_wmem_queued);
- 	WARN_ON_ONCE(sk_forward_alloc_get(sk));
- 
--	kfree(rcu_dereference_protected(inet->inet_opt, 1));
-+	kfree_rcu(rcu_dereference_protected(inet->inet_opt, 1), rcu);
- 	dst_release(rcu_dereference_protected(sk->sk_dst_cache, 1));
- 	dst_release(rcu_dereference_protected(sk->sk_rx_dst, 1));
- }
 diff --git a/net/ipv4/inet_connection_sock.c b/net/ipv4/inet_connection_sock.c
 index 74ac047..6b59c4c 100644
 --- a/net/ipv4/inet_connection_sock.c
@@ -1258,27 +1143,6 @@ index 74ac047..6b59c4c 100644
  			return true;
  	}
  #endif
-diff --git a/net/ipv4/ip_output.c b/net/ipv4/ip_output.c
-index ba51fc4..5faafa1 100644
---- a/net/ipv4/ip_output.c
-+++ b/net/ipv4/ip_output.c
-@@ -779,9 +779,13 @@ int ip_do_fragment(struct net *net, struct sock *sk, struct sk_buff *skb,
- 	int err = 0;
- 
- 	/* for offloaded checksums cleanup checksum before fragmentation */
--	if (skb->ip_summed == CHECKSUM_PARTIAL &&
--	    (err = skb_checksum_help(skb)))
--		goto fail;
-+	if (skb->ip_summed == CHECKSUM_PARTIAL) {
-+		err = ip_check_csum_start(skb);
-+		if (!err)
-+			err = skb_checksum_help(skb);
-+		if (err)
-+			goto fail;
-+	}
- 
- 	/*
- 	 *	Point into the IP datagram header.
 diff --git a/net/ipv4/tcp.c b/net/ipv4/tcp.c
 index 09e2f85..9fe10f2 100644
 --- a/net/ipv4/tcp.c
@@ -1413,115 +1277,6 @@ index a84dbd5..aedacb1 100644
  
  	skb->dev = NULL;
  
-diff --git a/net/netfilter/nf_conntrack_expect.c b/net/netfilter/nf_conntrack_expect.c
-index 21fa550..008073e 100644
---- a/net/netfilter/nf_conntrack_expect.c
-+++ b/net/netfilter/nf_conntrack_expect.c
-@@ -654,7 +654,7 @@ static int exp_seq_show(struct seq_file *s, void *v)
- 	if (expect->flags & NF_CT_EXPECT_USERSPACE)
- 		seq_printf(s, "%sUSERSPACE", delim);
- 
--	helper = rcu_dereference(nfct_help(expect->master)->helper);
-+	helper = rcu_dereference(expect->helper);
- 	if (helper) {
- 		seq_printf(s, "%s%s", expect->flags ? " " : "", helper->name);
- 		if (helper->expect_policy[expect->class].name[0])
-diff --git a/net/netfilter/nf_conntrack_helper.c b/net/netfilter/nf_conntrack_helper.c
-index ceb48c3..627d218 100644
---- a/net/netfilter/nf_conntrack_helper.c
-+++ b/net/netfilter/nf_conntrack_helper.c
-@@ -395,14 +395,10 @@ EXPORT_SYMBOL_GPL(nf_conntrack_helper_register);
- 
- static bool expect_iter_me(struct nf_conntrack_expect *exp, void *data)
- {
--	struct nf_conn_help *help = nfct_help(exp->master);
- 	const struct nf_conntrack_helper *me = data;
- 	const struct nf_conntrack_helper *this;
- 
--	if (exp->helper == me)
--		return true;
--
--	this = rcu_dereference_protected(help->helper,
-+	this = rcu_dereference_protected(exp->helper,
- 					 lockdep_is_held(&nf_conntrack_expect_lock));
- 	return this == me;
- }
-diff --git a/net/netfilter/nf_conntrack_netlink.c b/net/netfilter/nf_conntrack_netlink.c
-index 18a91c0..25b699a 100644
---- a/net/netfilter/nf_conntrack_netlink.c
-+++ b/net/netfilter/nf_conntrack_netlink.c
-@@ -3004,11 +3004,11 @@ ctnetlink_exp_dump_expect(struct sk_buff *skb,
- ctnetlink_exp_dump_expect(struct sk_buff *skb,
- 			  const struct nf_conntrack_expect *exp)
- {
- 	struct nf_conn *master = exp->master;
- 	long timeout = ((long)exp->timeout.expires - (long)jiffies) / HZ;
--	struct nf_conn_help *help;
-+	struct nf_conntrack_helper *helper;
- #if IS_ENABLED(CONFIG_NF_NAT)
- 	struct nlattr *nest_parms;
- 	struct nf_conntrack_tuple nat_tuple = {};
- #endif
- 	struct nf_ct_helper_expectfn *expfn;
-@@ -3051,15 +3051,12 @@ ctnetlink_exp_dump_expect(struct sk_buff *skb,
- 	    nla_put_be32(skb, CTA_EXPECT_FLAGS, htonl(exp->flags)) ||
- 	    nla_put_be32(skb, CTA_EXPECT_CLASS, htonl(exp->class)))
- 		goto nla_put_failure;
--	help = nfct_help(master);
--	if (help) {
--		struct nf_conntrack_helper *helper;
- 
--		helper = rcu_dereference(help->helper);
--		if (helper &&
--		    nla_put_string(skb, CTA_EXPECT_HELP_NAME, helper->name))
--			goto nla_put_failure;
--	}
-+	helper = rcu_dereference(exp->helper);
-+	if (helper &&
-+	    nla_put_string(skb, CTA_EXPECT_HELP_NAME, helper->name))
-+		goto nla_put_failure;
-+
- 	expfn = nf_ct_helper_expectfn_find_by_symbol(exp->expectfn);
- 	if (expfn != NULL &&
- 	    nla_put_string(skb, CTA_EXPECT_FN, expfn->name))
-@@ -3371,12 +3368,9 @@ static int ctnetlink_get_expect(struct sk_buff *skb,
- static bool expect_iter_name(struct nf_conntrack_expect *exp, void *data)
- {
- 	struct nf_conntrack_helper *helper;
--	const struct nf_conn_help *m_help;
- 	const char *name = data;
- 
--	m_help = nfct_help(exp->master);
--
--	helper = rcu_dereference(m_help->helper);
-+	helper = rcu_dereference(exp->helper);
- 	if (!helper)
- 		return false;
- 
-@@ -3511,9 +3505,9 @@ ctnetlink_alloc_expect(const struct nlattr * const cda[], struct nf_conn *ct,
- 		       struct nf_conntrack_tuple *tuple,
- 		       struct nf_conntrack_tuple *mask)
- {
--	u_int32_t class = 0;
- 	struct nf_conntrack_expect *exp;
- 	struct nf_conn_help *help;
-+	u32 class = 0;
- 	int err;
- 
- 	help = nfct_help(ct);
-diff --git a/net/netfilter/nf_conntrack_sip.c b/net/netfilter/nf_conntrack_sip.c
-index d0eac27..bde6eaf 100644
---- a/net/netfilter/nf_conntrack_sip.c
-+++ b/net/netfilter/nf_conntrack_sip.c
-@@ -924,7 +924,7 @@ static int set_expected_rtp_rtcp(struct sk_buff *skb, unsigned int protoff,
- 		exp = __nf_ct_expect_find(net, nf_ct_zone(ct), &tuple);
- 
- 		if (!exp || exp->master == ct ||
--		    nfct_help(exp->master)->helper != nfct_help(ct)->helper ||
-+		    exp->helper != nfct_help(ct)->helper ||
- 		    exp->class != class)
- 			break;
- #if IS_ENABLED(CONFIG_NF_NAT)
 diff --git a/net/netfilter/nfnetlink_queue.c b/net/netfilter/nfnetlink_queue.c
 index d2773ce..437c4b7 100644
 --- a/net/netfilter/nfnetlink_queue.c
@@ -1798,31 +1553,6 @@ index d2773ce..437c4b7 100644
  	rcu_barrier(); /* Wait for completion of call_rcu()'s */
  }
  
-diff --git a/net/netfilter/xt_CHECKSUM.c b/net/netfilter/xt_CHECKSUM.c
-index c8a639f..9fe0e1c 100644
---- a/net/netfilter/xt_CHECKSUM.c
-+++ b/net/netfilter/xt_CHECKSUM.c
-@@ -15,6 +15,7 @@
- 
- #include <linux/netfilter_ipv4/ip_tables.h>
- #include <linux/netfilter_ipv6/ip6_tables.h>
-+#include <net/ip.h>
- 
- MODULE_LICENSE("GPL");
- MODULE_AUTHOR("Michael S. Tsirkin <mst@redhat.com>");
-@@ -25,8 +26,11 @@ MODULE_ALIAS("ip6t_CHECKSUM");
- static unsigned int
- checksum_tg(struct sk_buff *skb, const struct xt_action_param *par)
- {
--	if (skb->ip_summed == CHECKSUM_PARTIAL && !skb_is_gso(skb))
-+	if (skb->ip_summed == CHECKSUM_PARTIAL && !skb_is_gso(skb)) {
-+		if (xt_family(par) == NFPROTO_IPV4 && ip_check_csum_start(skb))
-+			return NF_DROP;
- 		skb_checksum_help(skb);
-+	}
- 
- 	return XT_CONTINUE;
- }
 diff --git a/net/netlink/af_netlink.c b/net/netlink/af_netlink.c
 index 8b06046..b703e41 100644
 --- a/net/netlink/af_netlink.c
@@ -1852,48 +1582,4 @@ index 8b06046..b703e41 100644
 +	arg->net_cookie = net->net_cookie;
  	arg->portid = portid;
  }
- 
-diff --git a/net/unix/garbage.c b/net/unix/garbage.c
-index 66fd606..65c2ed2 100644
---- a/net/unix/garbage.c
-+++ b/net/unix/garbage.c
-@@ -173,6 +173,7 @@ static void unix_del_edge(struct scm_fp_list *fpl, struct unix_edge *edge)
- 	if (!vertex->out_degree) {
- 		edge->predecessor->vertex = NULL;
- 		list_move_tail(&vertex->entry, &fpl->vertices);
-+		list_del(&vertex->scc_entry);
- 	}
- }
- 
-diff --git a/net/xfrm/xfrm_output.c b/net/xfrm/xfrm_output.c
-index 85f8acd..3248f67 100644
---- a/net/xfrm/xfrm_output.c
-+++ b/net/xfrm/xfrm_output.c
-@@ -810,16 +810,22 @@ int xfrm_output(struct sock *sk, struct sk_buff *skb)
- 	}
- 
- 	if (skb->ip_summed == CHECKSUM_PARTIAL) {
--		err = skb_checksum_help(skb);
--		if (err) {
--			XFRM_INC_STATS(net, LINUX_MIB_XFRMOUTERROR);
--			kfree_skb(skb);
--			return err;
-+		if (skb->protocol == htons(ETH_P_IP)) {
-+			err = ip_check_csum_start(skb);
-+			if (err)
-+				goto error;
- 		}
-+		err = skb_checksum_help(skb);
-+		if (err)
-+			goto error;
- 	}
- 
- out:
- 	return xfrm_output2(net, sk, skb);
-+error:
-+	XFRM_INC_STATS(net, LINUX_MIB_XFRMOUTERROR);
-+	kfree_skb(skb);
-+	return err;
- }
- EXPORT_SYMBOL_GPL(xfrm_output);
  

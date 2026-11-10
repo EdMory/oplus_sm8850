@@ -1428,7 +1428,7 @@ jobs:
           echo "正在按 GKI 方式集成 NoMount(内置编译进内核)…"
           cd kernel_workspace/common
           # NoMount 官方 setup 脚本可自动识别 GKI 的 common/fs 目录结构，完成源码拉取、fs/nomount 符号链接、fs/Makefile 与 fs/Kconfig 的挂载
-          curl -LSs "https://raw.githubusercontent.com/maxsteeel/nomount/refs/heads/dev/kernel/setup.sh" | bash -s dev
+          curl -LSs "https://raw.githubusercontent.com/maxsteeel/nomount/refs/heads/dev/kernel/setup.sh" | bash -s master
           # 移除嵌套 Git 仓库，避免污染内核树版本信息
           rm -rf ./NoMount/.git
           # 校验集成结果，防止静默失败

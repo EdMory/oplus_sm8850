@@ -1492,7 +1492,21 @@ jobs:
           fi
           patch -p1 -F 0 < $PATCH
           echo "cherry-pick backport 补丁集(10条)应用完成"
-          
+
+      - name: 应用 cherry-pick 补丁集(44条)
+        run: |
+          echo "正在集成 6.12.69->115 补丁集(44条)..."
+          cd kernel_workspace/common
+          PATCH=cherry-pick-6.12.115.patch
+          wget -O $PATCH https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/$PATCH \
+            || wget -O $PATCH https://github.com/EdMory/oplus_sm8850/raw/refs/heads/main/other_patch/$PATCH
+          # 零 fuzz 干跑：任何一个 hunk 无法精确落位就直接失败
+          if ! patch -p1 --dry-run -F 0 < $PATCH; then
+            echo "错误：$PATCH 无法零 fuzz 应用，请确认内核源码未被上游改动（可关闭 cherry_pick_enable 后重试）"; exit 1
+          fi
+          patch -p1 -F 0 < $PATCH
+          echo "cherry-pick 补丁集(44条)应用完成"
+         
       - name: 添加制作名称
         run: |
           cd kernel_workspace

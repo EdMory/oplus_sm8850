@@ -27,11 +27,15 @@ on:
         required: true
         type: boolean
         default: 'false'
-      nomount_enable:
-        description: '是否开启 NoMount (以VFS替代传统挂载式模块注入)'
+      vfs_provider:
+        description: 'VFS 模块注入方案'
         required: true
-        type: boolean
-        default: 'true'
+        type: choice
+        default: 'hybridmount'
+        options:
+          - 'none'
+          - 'nomount'
+          - 'hybridmount'
       kpm_enable:
         description: '是否开启 KPN (使用KpatchNext独立实现)'
         required: true
@@ -1422,16 +1426,29 @@ jobs:
           curl -sSL https://github.com/cctv18/Baseband-guard/raw/master/setup.sh | bash
           sed -i '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/selinux/selinux,baseband_guard/ } }' security/Kconfig
 
-      - name: 集成 NoMount(按 GKI 方式内置编译)
-        if: inputs.nomount_enable
+      - name: 集成 VFS Provider (NoMount / HybridMount)
         run: |
-          echo "正在按 GKI 方式集成 NoMount(内置编译进内核)…"
+          VFS="${{ github.event.inputs.vfs_provider }}"
           cd kernel_workspace/common
-          curl -LSs "https://raw.githubusercontent.com/maxsteeel/nomount/refs/heads/dev/kernel/setup.sh" | bash -s dev
-          rm -rf ./NoMount/.git
-          echo "CONFIG_KEYS=y" >> ./arch/arm64/configs/gki_defconfig
-          echo "CONFIG_NOMOUNT=y" >> ./arch/arm64/configs/gki_defconfig
-          echo "NoMount 集成完成！"
+
+          if [ "$VFS" = "nomount" ]; then
+            echo "正在集成 NoMount..."
+            curl -LSs "https://raw.githubusercontent.com/maxsteeel/nomount/refs/heads/dev/kernel/setup.sh" | bash -s dev
+            rm -rf ./NoMount/.git
+            echo "CONFIG_KEYS=y" >> arch/arm64/configs/gki_defconfig
+            echo "CONFIG_NOMOUNT=y" >> arch/arm64/configs/gki_defconfig
+            echo "NoMount 集成完成。"
+
+          elif [ "$VFS" = "hybridmount" ]; then
+            echo "正在集成 HybridMount VFS..."
+            # HybridMount 脚本会自动检测并拒绝已集成 NoMount 的树
+            curl -LSs "https://raw.githubusercontent.com/Hybrid-Mount/meta-hybrid_mount/dev/module/vfs/setup.sh" | bash
+            echo "CONFIG_HYBRIDMOUNT=y" >> arch/arm64/configs/gki_defconfig
+            echo "HybridMount 集成完成。"
+
+          else
+            echo "vfs_provider = none，跳过 VFS 模块集成。"
+          fi
 
       - name: 安装性能优化补丁集
         if: inputs.perf_patch_enable
@@ -1726,7 +1743,7 @@ jobs:
           echo "KSU Branch: ${KSU_TYPENAME}" >> ./ak3.log
           echo "KSU Ver: ${KSUVER}" >> ./ak3.log
           echo "SuSFS: ${{ github.event.inputs.susfs_enable }}" >> ./ak3.log
-          echo "NoMount: ${{ github.event.inputs.nomount_enable }}" >> ./ak3.log
+          echo "VFS Provider: ${{ github.event.inputs.vfs_provider }}"
           echo "KPM: ${{ github.event.inputs.kpm_enable }}" >> ./ak3.log
           echo "LZ4: ${{ github.event.inputs.lz4_enable }}" >> ./ak3.log
           echo "LZ4KD: ${{ github.event.inputs.lz4kd_enable }}" >> ./ak3.log
@@ -1816,7 +1833,7 @@ jobs:
           - 机型：骁龙8E Gen5通用 ${{ env.KERNEL_VERSION }}.${{ env.SUB_VERSION }} 内核
           - KSU分支：${{ env.KSU_TYPENAME }}
           - SuSFS支持：${{ github.event.inputs.susfs_enable }}
-          - NoMount支持：${{ github.event.inputs.nomount_enable }}
+          - VFS挂载支持：${{ github.event.inputs.vfs_provider }}
           - KPM支持 ：${{ github.event.inputs.kpm_enable }}
           - LZ4支持：${{ github.event.inputs.lz4_enable }}
           - LZ4KD支持：${{ github.event.inputs.lz4kd_enable }}

@@ -31,7 +31,7 @@ on:
         description: 'VFS 模块注入方案'
         required: true
         type: choice
-        default: 'hybridmount'
+        default: 'nomount'
         options:
           - 'none'
           - 'nomount'

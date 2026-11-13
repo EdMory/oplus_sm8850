@@ -31,7 +31,7 @@
 - [x] CherryPick了部分来自6.12.92基线提交，优化了调度器表现
 - [x] 加入一些网络连接性能优化配置选项（用于为 ipset 及需要 iptables 等高级网络功能内核支持的程序提供支持）
 - [x] Droidspaces 容器化支持（比传统 Docker/LXC 更轻量化，便于移植的完整 Linux 环境容器实现）
-- [x] 添加了对[Mountify](https://github.com/backslashxx/mountify),[NoMount](https://[https://github.com/maxsteeel/nomount),[HybridMount](https://github.com/Hybrid-Mount/meta-hybrid_mount)模块的支持
+- [x] 添加了对[Mountify](https://github.com/backslashxx/mountify),[NoMount](https://github.com/maxsteeel/nomount),[HybridMount](https://github.com/Hybrid-Mount/meta-hybrid_mount)模块的支持
 - [x] 加入Re:Kernel支持，与Freezer，NoActive等LSP模块配合降低功耗
 - [x] 加入[BBG(By @showdo)](https://github.com/vc-teahouse/Baseband-guard)，有效防止恶意格机脚本/程序对系统分区的破坏
 ##### 

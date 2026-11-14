@@ -22,13 +22,12 @@
 - [x] ReSukiSU/SukiSU Ultra/KernelSU Next/原版KernelSU多版本KSU可选
 - [x] cctv18独家设计的 [ccache-ECS](https://github.com/cctv18/ccache-ECS) 缓存及大量编译流程优化，编译时间可稳定在约6min *(首次编译时会拉取公共预置ccache，从第二次开始没有大量配置改动的情况下，单次编译时间约6min；距离上一次调用两周未调用后缓存会被自动清除，此时编译会自动重建缓存)*
 - [x] 引入[Optprobe](https://lkml.rescloud.iu.edu/hypermail/linux/kernel/2503.3/02174.html)
-- [x] 引入 Clang20 与 [Oryon编译优化]([https://lkml.rescloud.iu.edu/hypermail/linux/kernel/2503.3/02174.html](https://lists.llvm.org/pipermail/cfe-commits/Week-of-Mon-20240603/585645.html))
 - [x] LZ4 1.10.0 & ZSTD 1.5.7 算法更新&优化补丁(来自[@ferstar](https://github.com/ferstar), 移植by [@Xiaomichael](https://github.com/Xiaomichael), 6.12版本补丁重制by [@cctv18](https://github.com/cctv18))
 - [x] 移植LZ4KD支持到6.12内核(可选补丁)
 - [x] 可选加入 BBR/Brutal 及一系列 tcp 拥塞控制算法
 - [x] [INTFP](https://github.com/firelzrd/intfp),[ISQRT](https://github.com/firelzrd/isqrt)移植
 - [x] [ADIOS](https://github.com/firelzrd/adios),[BORE](https://github.com/firelzrd/bore),[Cambyses](https://github.com/firelzrd/cambyses)移植
-- [x] CherryPick了部分来自6.12.92基线提交，优化了调度器表现
+- [x] CherryPick了部分上游提交，优化了调度器表现
 - [x] 加入一些网络连接性能优化配置选项（用于为 ipset 及需要 iptables 等高级网络功能内核支持的程序提供支持）
 - [x] Droidspaces 容器化支持（比传统 Docker/LXC 更轻量化，便于移植的完整 Linux 环境容器实现）
 - [x] 添加了对[Mountify](https://github.com/backslashxx/mountify),[NoMount](https://github.com/maxsteeel/nomount),[HybridMount](https://github.com/Hybrid-Mount/meta-hybrid_mount)模块的支持

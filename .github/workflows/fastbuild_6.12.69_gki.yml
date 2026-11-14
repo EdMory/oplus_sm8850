@@ -185,22 +185,10 @@ jobs:
           mv "android_gki_kernel_common-android16-6.12-2026-03" common &&
           rm -rf common.zip &
           
-          echo "正在克隆llvm-clang20工具链..." &&
-          mkdir -p clang20 &&
-          aria2c -s16 -x16 -k1M https://github.com/cctv18/oneplus_sm8650_toolchain/releases/download/LLVM-Clang20-r547379/clang-r547379.zip -o clang.zip &&
-          unzip -q clang.zip -d clang20 &&
-          # 兼容 zip 内存在多级顶层目录的情况：统一归一化到 clang20/{bin,lib,...}
-          if [ ! -x clang20/bin/clang ] && [ ! -f clang20/bin/clang ]; then
-            inner=$(find clang20 -maxdepth 3 -type d -name bin | head -n 1)
-            if [ -n "$inner" ]; then
-              top=$(dirname "$inner")
-              echo "检测到压缩包顶层目录为 $top，执行归一化..."
-              mv "$top"/* clang20/ 2>/dev/null || true
-              rmdir "$top" 2>/dev/null || true
-            fi
-          fi
-          test -f clang20/bin/clang || { echo "clang 解压异常：未找到 clang20/bin/clang"; exit 1; }
-          ./clang20/bin/clang --version | head -n 1 &&
+          echo "正在克隆llvm-clang19工具链..." &&
+          mkdir -p clang19 &&
+          aria2c -s16 -x16 -k1M https://github.com/cctv18/oneplus_sm8650_toolchain/releases/download/LLVM-Clang19-r536225/clang-r536225.zip -o clang.zip &&
+          unzip -q clang.zip -d clang19 &&
           rm -rf clang.zip &
           
           echo "正在克隆Rust 1.82.0工具链..." &&
@@ -531,6 +519,28 @@ jobs:
           grep -q 'CONFIG_LZ4K_OPLUS_DECOMPRESS=y' arch/arm64/configs/gki_defconfig \
             || echo "CONFIG_LZ4K_OPLUS_DECOMPRESS=y" >> arch/arm64/configs/gki_defconfig
             
+      - name: 应用 LZ4 NEON 加速挂钩
+        if: inputs.lz4_enable
+        run: |
+          echo "正在应用 LZ4 NEON 加速挂钩(将 zram/f2fs/incfs 的 LZ4 解压路由到 ARM64 NEON 汇编实现)…"
+          cd kernel_workspace/common
+          # 下载挂钩脚本(已随仓库 other_patch/ 分发, 与补丁同分支同版本)
+          wget -O apply_lz4_neon.sh https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/apply_lz4_neon.sh
+          
+          # 前置断言: 001-lz4.patch 必须已带入 NEON 实现(lz4armv8), 缺符号时在此fail-fast而非编译期
+          grep -rq "LZ4_arm64_decompress_safe" lib/ include/ \
+            || { echo "::error::前置检查失败: 内核树中不存在 LZ4_arm64_decompress_safe 符号(请确认 lz4_enable 开启且 001-lz4.patch 包含 lz4armv8 NEON 实现)"; exit 1; }
+          
+          # 幂等应用: 已修补自动跳过; 脚本内置失败计数, 任一文件失败即非零退出
+          bash apply_lz4_neon.sh
+          
+          # 结果双保险校验(防止正则未命中被误判通过)
+          grep -q "LZ4_arm64_decompress_safe" crypto/lz4.c || { echo "::error::crypto/lz4.c NEON 挂钩失败"; exit 1; }
+          grep -q "LZ4_arm64_decompress_safe" crypto/lz4hc.c || { echo "::error::crypto/lz4hc.c NEON 挂钩失败"; exit 1; }
+          grep -q "LZ4_arm64_decompress_safe" fs/f2fs/compress.c || { echo "::error::fs/f2fs/compress.c NEON 挂钩失败"; exit 1; }
+          [ ! -f fs/incfs/data_mgmt.c ] || grep -q "LZ4_arm64_decompress_safe" fs/incfs/data_mgmt.c || { echo "::error::incfs NEON 挂钩失败"; exit 1; }
+          echo "LZ4 NEON 加速挂钩完成"
+          
       - name: 应用 PMICWD 修复补丁
         run: |
           echo "正在应用PMICWD修复补丁(移除 ktime_get() 内 WARN_ON(timekeeping_suspended), 消除 suspend 期 PMICWD 刷屏 WARN)…"
@@ -1602,7 +1612,6 @@ jobs:
           # 3. 配置KCFLAGS
           KCFLAGS+=" -no-canonical-prefixes"
           KCFLAGS+=" -O2"
-          KCFLAGS+=" -mcpu=oryon-1"
           KCFLAGS+=" -pipe"
           KCFLAGS+=" -Wno-error"
           KCFLAGS+=" -fno-stack-protector"

@@ -346,10 +346,27 @@ jobs:
             KSU_VERSION=$(expr $(curl -sI "https://api.github.com/repos/KOWX712/KernelSU/commits?sha=main&per_page=1" | grep -i "link:" | sed -n 's/.*page=\([0-9]*\)>; rel="last".*/\1/p') "+" 30000)
             echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
             echo "ksuver=$KSU_VERSION" >> $GITHUB_OUTPUT
-            sed -i "s/DKSU_VERSION=16/DKSU_VERSION=${KSU_VERSION}/" kernel/Kbuild
           else
             echo "已选择无内置KernelSU模式，跳过KernelSU配置..."
           fi
+
+      - name: 修正 KernelSU 新布局头文件路径
+        if: inputs.ksu_type == 'KowSU'
+        run: |
+          set -eux
+          KSU_KERNEL=$(find "$GITHUB_WORKSPACE/kernel_workspace" -maxdepth 1 -name KernelSU)/kernel
+          ls -l "$KSU_KERNEL/include" || echo "!! include 目录缺失"
+          ls -l "$KSU_KERNEL/include/uapi" || echo "!! include/uapi 缺失"
+          # 1) include/*.h 桥接到 kernel 根  ->  #include "klog.h" 由 -I$(KSU_KERNEL_DIR) 命中
+          for h in "$KSU_KERNEL"/include/*.h; do
+            ln -sfn "include/$(basename "$h")" "$KSU_KERNEL/$(basename "$h")"
+          done
+          # 2) uapi 目录桥接到 kernel 根 ->  #include "uapi/app_profile.h" 由 -I$(KSU_KERNEL_DIR) 命中
+          if [ -e "$KSU_KERNEL/uapi" ] && [ ! -L "$KSU_KERNEL/uapi" ]; then
+            mv "$KSU_KERNEL/uapi" "$KSU_KERNEL/uapi.bak"
+          fi
+          ln -sfn ../uapi "$KSU_KERNEL/uapi"
+          ls -l "$KSU_KERNEL/klog.h" "$KSU_KERNEL/uapi/app_profile.h"
 
       - name: 应用 KernelSU & SUSFS 补丁
         if: inputs.susfs_enable

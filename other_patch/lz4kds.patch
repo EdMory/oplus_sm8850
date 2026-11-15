@@ -5663,7 +5663,7 @@ new file mode 100644
 index 0000000..0000001
 --- /dev/null
 +++ b/drivers/crystalfrostwork/crystal_hybridswap/memcg.c
-@@ -0,0 +1,2676 @@
+@@ -0,0 +1,2684 @@
 +// SPDX-License-Identifier: GPL-2.0
 +#define pr_fmt(fmt) "crystal_hybridswap: " fmt
 +
@@ -5689,7 +5689,15 @@ index 0000000..0000001
 +#include <trace/hooks/cgroup.h>
 +#include <trace/hooks/mm.h>
 +#include <trace/hooks/vmscan.h>
-+#include <linux/vmscan_balance.h>
++
++/*
++ * enum scan_balance is defined in mm/vmscan.c and not exported by the GKI
++ * ABI.  trace/hooks/vmscan.h forward-declares it; we only need SCAN_ANON
++ * whose value (2) is stable across the 6.6/6.12 lineage.
++ */
++#ifndef SCAN_ANON
++enum scan_balance { SCAN_EQUAL = 0, SCAN_FRACT, SCAN_ANON, SCAN_FILE };
++#endif
 +
 +#include "crystal_hybridswap_internal.h"
 +
@@ -8499,7 +8507,7 @@ new file mode 100644
 index 0000000..0000001
 --- /dev/null
 +++ b/drivers/crystalfrostwork/crystal_hybridswap/pressure.c
-@@ -0,0 +1,224 @@
+@@ -0,0 +1,222 @@
 +// SPDX-License-Identifier: GPL-2.0
 +#define pr_fmt(fmt) "crystal_hybridswap: " fmt
 +
@@ -8511,8 +8519,6 @@ index 0000000..0000001
 +#include <linux/seq_file.h>
 +#include <linux/slab.h>
 +#include <linux/string.h>
-+
-+#include <linux/crystal_hybridswap.h>
 +
 +#include "crystal_hybridswap_internal.h"
 +

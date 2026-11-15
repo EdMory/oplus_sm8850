@@ -22306,7 +22306,7 @@ new file mode 100644
 index 0000000..0000001
 --- /dev/null
 +++ b/drivers/crystalfrostwork/crystal_hybridswap/zram_drv.c
-@@ -0,0 +1,6169 @@
+@@ -0,0 +1,6168 @@
 +/*
 + * Compressed RAM block device
 + *
@@ -22350,7 +22350,6 @@ index 0000000..0000001
 +#include <linux/debugfs.h>
 +#include <linux/cpuhotplug.h>
 +#include <linux/part_stat.h>
-+#include <linux/sysms_finder.h>
 +
 +#include "zram_drv.h"
 +#include "crystal_hybridswap_internal.h"

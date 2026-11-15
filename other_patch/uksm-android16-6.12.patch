@@ -84,10 +84,11 @@ diff --git a/include/linux/ksm.h b/include/linux/ksm.h
 index ec9c05044d4f..d4f29e209c9a 100644
 --- a/include/linux/ksm.h
 +++ b/include/linux/ksm.h
-@@ -27,6 +27,10 @@ int ksm_disable(struct mm_struct *mm);
+@@ -26,6 +26,11 @@ int ksm_disable(struct mm_struct *mm);
+ 
  int __ksm_enter(struct mm_struct *mm);
  void __ksm_exit(struct mm_struct *mm);
- 
++
 +void rmap_walk_ksm(struct folio *folio, struct rmap_walk_control *rwc);
 +void folio_migrate_ksm(struct folio *newfolio, struct folio *folio);
 +
@@ -137,19 +138,19 @@ index ec9c05044d4f..d4f29e209c9a 100644
  #else  /* !CONFIG_KSM */
  
  static inline void ksm_add_vma(struct vm_area_struct *vma)
-@@ -155,4 +192,6 @@ static inline void folio_migrate_ksm(struct folio *newfolio, struct folio *old)
+@@ -155,5 +192,7 @@ static inline void folio_migrate_ksm(struct folio *newfolio, struct folio *old)
  #endif /* CONFIG_MMU */
  #endif /* !CONFIG_KSM */
  
 +#include <linux/uksm.h>
 +
  #endif /* __LINUX_KSM_H */
-
+ 
 diff --git a/include/linux/mm_types.h b/include/linux/mm_types.h
 index 6e3bdf8e38bc..11966ddea8c9 100644
 --- a/include/linux/mm_types.h
 +++ b/include/linux/mm_types.h
-@@ -807,5 +807,6 @@ struct vm_area_struct {
+@@ -807,6 +807,7 @@ struct vm_area_struct {
  	struct vm_userfaultfd_ctx vm_userfaultfd_ctx;
  
 -	ANDROID_KABI_RESERVE(1);
@@ -157,12 +158,12 @@ index 6e3bdf8e38bc..11966ddea8c9 100644
 +	ANDROID_KABI_USE(1, struct vma_slot *uksm_vma_slot);
  	ANDROID_KABI_RESERVE(2);
  	ANDROID_KABI_RESERVE(3);
-
+ 
 diff --git a/include/linux/mmzone.h b/include/linux/mmzone.h
 index 80bc5640bb60..5759345b9175 100644
 --- a/include/linux/mmzone.h
 +++ b/include/linux/mmzone.h
-@@ -154,6 +154,9 @@ enum zone_stat_item {
+@@ -154,7 +154,10 @@ enum zone_stat_item {
  	NR_FREE_CMA_PAGES,
  #ifdef CONFIG_UNACCEPTED_MEMORY
  	NR_UNACCEPTED,
@@ -172,7 +173,7 @@ index 80bc5640bb60..5759345b9175 100644
  #endif
  	NR_VM_ZONE_STAT_ITEMS };
  
-
+ 
 diff --git a/include/linux/pgtable.h b/include/linux/pgtable.h
 index e8b2ac6bd2ae..800ec19ae534 100644
 --- a/include/linux/pgtable.h
@@ -205,7 +206,7 @@ index e8b2ac6bd2ae..800ec19ae534 100644
  }
  
  #define my_zero_pfn(addr)	page_to_pfn(ZERO_PAGE(addr))
-@@ -1571,7 +1584,7 @@ static inline int is_zero_pfn(unsigned long pfn)
+@@ -1571,8 +1584,8 @@ static inline int is_zero_pfn(unsigned long pfn)
  static inline int is_zero_pfn(unsigned long pfn)
  {
  	extern unsigned long zero_pfn;
@@ -214,13 +215,13 @@ index e8b2ac6bd2ae..800ec19ae534 100644
  }
  
  static inline unsigned long my_zero_pfn(unsigned long addr)
-
+ 
 diff --git a/include/linux/sradix-tree.h b/include/linux/sradix-tree.h
 new file mode 100644
 index 000000000000..98fbaad79ce8
 --- /dev/null
 +++ b/include/linux/sradix-tree.h
-@@ -0,0 +1,82 @@
+@@ -0 +1,83 @@
 +#ifndef _LINUX_SRADIX_TREE_H
 +#define _LINUX_SRADIX_TREE_H
 +
@@ -303,13 +304,13 @@ index 000000000000..98fbaad79ce8
 +extern int sradix_tree_delete(struct sradix_tree_root *root, unsigned long index);
 +
 +#endif /* _LINUX_SRADIX_TREE_H */
-
+ 
 diff --git a/include/linux/uksm.h b/include/linux/uksm.h
 new file mode 100644
 index 000000000000..0bfa28ab9175
 --- /dev/null
 +++ b/include/linux/uksm.h
-@@ -0,0 +1,149 @@
+@@ -0 +1,150 @@
 +#ifndef __LINUX_UKSM_H
 +#define __LINUX_UKSM_H
 +/*
@@ -459,7 +460,7 @@ index 000000000000..0bfa28ab9175
 +}
 +#endif /* !CONFIG_UKSM */
 +#endif /* __LINUX_UKSM_H */
-
+ 
 diff --git a/kernel/fork.c b/kernel/fork.c
 index 22f43721d031..397236cedf7e 100644
 --- a/kernel/fork.c
@@ -476,19 +477,19 @@ index 22f43721d031..397236cedf7e 100644
  	vma_numab_state_free(vma);
  	free_anon_vma_name(vma);
  	kmem_cache_free(vm_area_cachep, vma);
-@@ -718,5 +723,6 @@ static __latent_entropy int dup_mmap(struct mm_struct *mm,
+@@ -718,6 +723,7 @@ static __latent_entropy int dup_mmap(struct mm_struct *mm,
  		vma_iter_bulk_store(&vmi, tmp);
  
 +		uksm_add_vma_new(tmp, "dup_mmap");
  		mm->map_count++;
  
  		if (tmp->vm_ops && tmp->vm_ops->open)
-
+ 
 diff --git a/lib/Makefile b/lib/Makefile
 index 773adf88af41..ed65d8069021 100644
 --- a/lib/Makefile
 +++ b/lib/Makefile
-@@ -29,7 +29,7 @@ CFLAGS_string.o += -fno-stack-protector
+@@ -29,8 +29,8 @@ CFLAGS_string.o += -fno-stack-protector
  endif
  
  lib-y := ctype.o string.o vsprintf.o cmdline.o \
@@ -497,13 +498,13 @@ index 773adf88af41..ed65d8069021 100644
  	 maple_tree.o idr.o extable.o irq_regs.o argv_split.o \
  	 flex_proportions.o ratelimit.o \
  	 is_single_threaded.o plist.o decompress.o kobject_uevent.o \
-
+ 
 diff --git a/lib/sradix-tree.c b/lib/sradix-tree.c
 new file mode 100644
 index 000000000000..ab21e6309b93
 --- /dev/null
 +++ b/lib/sradix-tree.c
-@@ -0,0 +1,476 @@
+@@ -0 +1,477 @@
 +#include <linux/errno.h>
 +#include <linux/mm.h>
 +#include <linux/mman.h>
@@ -980,12 +981,12 @@ index 000000000000..ab21e6309b93
 +
 +	return 0;
 +}
-
+ 
 diff --git a/mm/Kconfig b/mm/Kconfig
 index 33fa51d608dc..a93c4af56ac7 100644
 --- a/mm/Kconfig
 +++ b/mm/Kconfig
-@@ -739,6 +739,32 @@ config KSM
+@@ -739,7 +739,33 @@ config KSM
  	  See Documentation/mm/ksm.rst for more information: KSM is inactive
  	  until a program has madvised that an area is MADV_MERGEABLE, and
  	  root has set /sys/kernel/mm/ksm/run to 1 (if CONFIG_SYSFS is set).
@@ -1018,12 +1019,12 @@ index 33fa51d608dc..a93c4af56ac7 100644
  
  config DEFAULT_MMAP_MIN_ADDR
  	int "Low address space to protect from user allocation"
-
+ 
 diff --git a/mm/Makefile b/mm/Makefile
 index d5639b036166..82915febfa81 100644
 --- a/mm/Makefile
 +++ b/mm/Makefile
-@@ -83,7 +83,8 @@ obj-$(CONFIG_NUMA) 	+= mempolicy.o
+@@ -83,8 +83,9 @@ obj-$(CONFIG_NUMA) 	+= mempolicy.o
  obj-$(CONFIG_SPARSEMEM)	+= sparse.o
  obj-$(CONFIG_SPARSEMEM_VMEMMAP) += sparse-vmemmap.o
  obj-$(CONFIG_MMU_NOTIFIER) += mmu_notifier.o
@@ -1033,7 +1034,7 @@ index d5639b036166..82915febfa81 100644
  obj-$(CONFIG_PAGE_POISONING) += page_poison.o
  obj-$(CONFIG_KASAN)	+= kasan/
  obj-$(CONFIG_KFENCE) += kfence/
-
+ 
 diff --git a/mm/memory.c b/mm/memory.c
 index bdf77a3ec47b..d5f4e092ea85 100644
 --- a/mm/memory.c
@@ -1107,7 +1108,7 @@ index bdf77a3ec47b..d5f4e092ea85 100644
 +	}
  
  	__folio_mark_uptodate(new_folio);
-@@ -3416,8 +3429,10 @@ static vm_fault_t wp_page_copy(struct vm_fault *vmf)
+@@ -3416,9 +3429,11 @@ static vm_fault_t wp_page_copy(struct vm_fault *vmf)
  			dec_mm_counter(mm, mm_counter_file(old_folio));
  			inc_mm_counter(mm, MM_ANONPAGES);
  		}
@@ -1118,7 +1119,7 @@ index bdf77a3ec47b..d5f4e092ea85 100644
  		inc_mm_counter(mm, MM_ANONPAGES);
  	}
  	flush_cache_page(vma, vmf->address, pte_pfn(vmf->orig_pte));
-
+ 
 diff --git a/mm/mmap.c b/mm/mmap.c
 index 79d541f1502b..5c80efa4d7b0 100644
 --- a/mm/mmap.c
@@ -1158,20 +1159,20 @@ index 79d541f1502b..5c80efa4d7b0 100644
 +	uksm_add_vma_new(vma, "do_brk_flags");
  out:
  	perf_event_mmap(vma);
-@@ -2190,5 +2196,6 @@ static struct vm_area_struct *__install_special_mapping(
+@@ -2190,6 +2196,7 @@ static struct vm_area_struct *__install_special_mapping(
  	vm_stat_account(mm, vma->vm_flags, len >> PAGE_SHIFT);
  
  	perf_event_mmap(vma);
 +	uksm_add_vma_new(vma, "__install_special_mapping");
  
  	return vma;
-
+ 
 diff --git a/mm/uksm.c b/mm/uksm.c
 new file mode 100644
 index 000000000000..1a961de48e01
 --- /dev/null
 +++ b/mm/uksm.c
-@@ -0,0 +1,5745 @@
+@@ -0 +1,5746 @@
 +/*
 + * Ultra KSM. Copyright (C) 2011-2012 Nai Xia
 + *
@@ -6917,7 +6918,7 @@ index 000000000000..1a961de48e01
 +late_initcall(uksm_init);
 +#endif
 +
-
+ 
 diff --git a/mm/vma.c b/mm/vma.c
 index 7621384d64cf..4503f6d4078d 100644
 --- a/mm/vma.c
@@ -6998,19 +6999,19 @@ index 7621384d64cf..4503f6d4078d 100644
  	validate_mm(vma->vm_mm);
  	return 0;
  }
-@@ -1724,5 +1744,6 @@ struct vm_area_struct *copy_vma(struct vm_area_struct **vmap,
+@@ -1724,6 +1744,7 @@ struct vm_area_struct *copy_vma(struct vm_area_struct **vmap,
  		if (vma_link(mm, new_vma))
  			goto out_vma_link;
  		*need_rmap_locks = false;
 +		uksm_add_vma_new(new_vma, "copy_vma");
  	}
  	return new_vma;
-
+ 
 diff --git a/mm/vmstat.c b/mm/vmstat.c
 index ac6a5aa34eab..1fc70a26f6ae 100644
 --- a/mm/vmstat.c
 +++ b/mm/vmstat.c
-@@ -1273,8 +1273,9 @@ const char * const vmstat_text[] = {
+@@ -1273,6 +1273,9 @@ const char * const vmstat_text[] = {
  	"pgdemote_kswapd",
  	"pgdemote_direct",
  	"pgdemote_khugepaged",
@@ -7020,9 +7021,3 @@ index ac6a5aa34eab..1fc70a26f6ae 100644
  	/* system-wide enum vm_stat_item counters */
  	"nr_dirty_threshold",
  	"nr_dirty_background_threshold",
--- 
-2.47.1
-
---
-2.47.1
-

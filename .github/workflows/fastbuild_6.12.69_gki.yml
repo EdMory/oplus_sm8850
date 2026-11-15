@@ -420,29 +420,29 @@ jobs:
           wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/lz4kds.patch
           patch -p1 -F 0 --no-backup-if-mismatch < lz4kds.patch
           # Crystal Hybridswap (lz4kds) 替代原生 zram，CONFIG_ZRAM 必须关闭(其 Kconfig 已声明 depends on ZRAM=n)
-          echo "CONFIG_ZRAM=n" >> ./common/arch/arm64/configs/gki_defconfig
+          echo "CONFIG_ZRAM=n" >> ./arch/arm64/configs/gki_defconfig
           # 框架入口
-          echo "CONFIG_CRYSTALFROSTWORK=y" >> ./common/arch/arm64/configs/gki_defconfig
+          echo "CONFIG_CRYSTALFROSTWORK=y" >> ./arch/arm64/configs/gki_defconfig
           # Crystal Hybridswap 核心
-          echo "CONFIG_CRYSTAL_HYBRIDSWAP=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_WRITEBACK=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_TRACK_ENTRY_ACTIME=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_MEMORY_TRACKING=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_MULTI_COMP=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_CRYSTAL_HYBRIDSWAP_ERM_AVAIL_BUFFER_DEFAULT_ON=y" >> ./common/arch/arm64/configs/gki_defconfig
+          echo "CONFIG_CRYSTAL_HYBRIDSWAP=y" >> ./arch/arm64/configs/gki_defconfig
+          echo "CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_WRITEBACK=y" >> ./arch/arm64/configs/gki_defconfig
+          echo "CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_TRACK_ENTRY_ACTIME=y" >> ./arch/arm64/configs/gki_defconfig
+          echo "CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_MEMORY_TRACKING=y" >> ./arch/arm64/configs/gki_defconfig
+          echo "CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_MULTI_COMP=y" >> ./arch/arm64/configs/gki_defconfig
+          echo "CONFIG_CRYSTAL_HYBRIDSWAP_ERM_AVAIL_BUFFER_DEFAULT_ON=y" >> ./arch/arm64/configs/gki_defconfig
           # SDDC + 私有 LZ4KD codec（4KiB 页，ARM64）
-          echo "CONFIG_CRYSTAL_HYBRIDSWAP_SDDC=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_CRYSTAL_HYBRIDSWAP_SDDC_LZ4KD=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_CRYSTAL_HYBRIDSWAP_SDDC_ZMS_NATIVE=y" >> ./common/arch/arm64/configs/gki_defconfig
+          echo "CONFIG_CRYSTAL_HYBRIDSWAP_SDDC=y" >> ./arch/arm64/configs/gki_defconfig
+          echo "CONFIG_CRYSTAL_HYBRIDSWAP_SDDC_LZ4KD=y" >> ./arch/arm64/configs/gki_defconfig
+          echo "CONFIG_CRYSTAL_HYBRIDSWAP_SDDC_ZMS_NATIVE=y" >> ./arch/arm64/configs/gki_defconfig
           # 默认压缩算法: lz4kds (私有 delta-capable backend)
-          echo 'CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_DEF_COMP="lz4kds"' >> ./common/arch/arm64/configs/gki_defconfig
+          echo 'CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_DEF_COMP="lz4kds"' >> ./arch/arm64/configs/gki_defconfig
           # 锁定 primary compressor 防止 vendor userspace 覆盖
-          echo "CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_LOCK_DEF_COMP=y" >> ./common/arch/arm64/configs/gki_defconfig
+          echo "CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_LOCK_DEF_COMP=y" >> ./arch/arm64/configs/gki_defconfig
           # 兼容占位 API（可选，vendor userspace 不需要时保持关闭）
-          echo "CONFIG_CRYSTAL_HYBRIDSWAP_LEGACY_EMPTY_APIS=n" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_CRYSTAL_HYBRIDSWAP_LEGACY_SWAPD_MEMCGS_PARAM=n" >> ./common/arch/arm64/configs/gki_defconfig
+          echo "CONFIG_CRYSTAL_HYBRIDSWAP_LEGACY_EMPTY_APIS=n" >> ./arch/arm64/configs/gki_defconfig
+          echo "CONFIG_CRYSTAL_HYBRIDSWAP_LEGACY_SWAPD_MEMCGS_PARAM=n" >> ./arch/arm64/configs/gki_defconfig
           # KUnit 测试保持关闭（生产内核）
-          echo "CONFIG_CRYSTAL_HYBRIDSWAP_SDDC_KUNIT_TEST=n" >> ./common/arch/arm64/configs/gki_defconfig
+          echo "CONFIG_CRYSTAL_HYBRIDSWAP_SDDC_KUNIT_TEST=n" >> ./arch/arm64/configs/gki_defconfig
           if ! grep -q 'drivers/crystalfrostwork/Kconfig' drivers/Kconfig; then
             # 优先在 rekernel source 行后插入；若该行不存在则在 endmenu 前插入
             if grep -q 'source "drivers/rekernel/Kconfig"' drivers/Kconfig; then

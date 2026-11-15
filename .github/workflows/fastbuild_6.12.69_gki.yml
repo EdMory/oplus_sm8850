@@ -443,6 +443,31 @@ jobs:
           echo "CONFIG_CRYSTAL_HYBRIDSWAP_LEGACY_SWAPD_MEMCGS_PARAM=n" >> ./common/arch/arm64/configs/gki_defconfig
           # KUnit 测试保持关闭（生产内核）
           echo "CONFIG_CRYSTAL_HYBRIDSWAP_SDDC_KUNIT_TEST=n" >> ./common/arch/arm64/configs/gki_defconfig
+          if ! grep -q 'drivers/crystalfrostwork/Kconfig' drivers/Kconfig; then
+            # 优先在 rekernel source 行后插入；若该行不存在则在 endmenu 前插入
+            if grep -q 'source "drivers/rekernel/Kconfig"' drivers/Kconfig; then
+              sed -i '/source "drivers\/rekernel\/Kconfig"/a\\nsource "drivers/crystalfrostwork/Kconfig"' drivers/Kconfig
+            else
+              sed -i '/^endmenu/i\source "drivers/crystalfrostwork/Kconfig"\n' drivers/Kconfig
+            fi
+            echo "已注入 drivers/Kconfig 钩子"
+          else
+            echo "drivers/Kconfig 钩子已存在，跳过"
+          fi
+          grep -q 'drivers/crystalfrostwork/Kconfig' drivers/Kconfig || { echo "错误: drivers/Kconfig 钩子注入失败"; exit 1; }
+          
+          # 注入 drivers/Makefile 钩子（幂等：已有则跳过）
+          if ! grep -q 'CONFIG_CRYSTALFROSTWORK' drivers/Makefile; then
+            # 优先在 rekernel 行后追加；若该行不存在则追加到文件末尾
+            if grep -q 'CONFIG_REKERNEL' drivers/Makefile; then
+              sed -i '/CONFIG_REKERNEL.*rekernel\//a\\nobj-$(CONFIG_CRYSTALFROSTWORK)\t+= crystalfrostwork/' drivers/Makefile
+            else
+              printf '\nobj-$(CONFIG_CRYSTALFROSTWORK)\t+= crystalfrostwork/\n' >> drivers/Makefile
+            fi
+            echo "已注入 drivers/Makefile 钩子"
+          else
+            echo "drivers/Makefile 钩子已存在，跳过"
+          fi
           echo "LZ4KDS 补丁应用完成"
 
       - name: 应用 LZ4 NEON 加速挂钩

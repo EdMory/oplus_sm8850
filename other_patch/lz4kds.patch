@@ -23473,8 +23473,8 @@ index 0000000..0000001
 +		goto out;
 +	}
 +
-+	bdev_file = bdev_open_by_dev(inode->i_rdev, BLK_OPEN_READ | BLK_OPEN_WRITE,
-+				     zram, NULL);
++	bdev_file = bdev_file_open_by_dev(inode->i_rdev, BLK_OPEN_READ | BLK_OPEN_WRITE,
++				      zram, NULL);
 +	if (IS_ERR(bdev_file)) {
 +		err = PTR_ERR(bdev_file);
 +		chs_log(CHS_LOG_ERR,

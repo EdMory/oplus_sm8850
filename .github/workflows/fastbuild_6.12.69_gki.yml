@@ -15,7 +15,7 @@ on:
         description: '选择 KernelSU 分支'
         required: true
         type: choice
-        default: 'KowSU'
+        default: 'BakaSU'
         options:
           - 'BakaSU'
           - 'KowSU'
@@ -446,7 +446,7 @@ jobs:
           # 固定 zram 大小为物理内存的 200%（12GB RAM → 24GB zram）
           # 拦截 disksize 写操作并替换为此比例，用户态写入的值被忽略
           echo "CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_PIN_SIZE=y" >> ./arch/arm64/configs/gki_defconfig
-          echo "CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_PIN_SIZE_PCT=150" >> ./arch/arm64/configs/gki_defconfig
+          echo "CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_PIN_SIZE_PCT=163" >> ./arch/arm64/configs/gki_defconfig
           if ! grep -q 'drivers/crystalfrostwork/Kconfig' drivers/Kconfig; then
             # 优先在 rekernel source 行后插入；若该行不存在则在 endmenu 前插入
             if grep -q 'source "drivers/rekernel/Kconfig"' drivers/Kconfig; then

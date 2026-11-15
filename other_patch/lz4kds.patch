@@ -6421,7 +6421,7 @@ index 0000000..0000001
 +			break;
 +
 +		reclaimed = try_to_free_mem_cgroup_pages(memcg, todo, GFP_KERNEL,
-+						      reclaim_options);
++						      reclaim_options, NULL);
 +		chs_log(CHS_LOG_INFO,
 +			"force_shrink_%s batch memcg=%s target=%lu batch=%lu reclaimed=%lu total=%lu\n",
 +			memcg_force_shrink_type(req->file), req->memcg_name,
@@ -8507,7 +8507,7 @@ new file mode 100644
 index 0000000..0000001
 --- /dev/null
 +++ b/drivers/crystalfrostwork/crystal_hybridswap/pressure.c
-@@ -0,0 +1,222 @@
+@@ -0,0 +1,224 @@
 +// SPDX-License-Identifier: GPL-2.0
 +#define pr_fmt(fmt) "crystal_hybridswap: " fmt
 +
@@ -8582,10 +8582,10 @@ index 0000000..0000001
 +	}
 +
 +	efile = fdget(efd);
-+	if (!efile.file)
++	if (!fd_file(efile))
 +		return -EBADF;
 +
-+	ctx = eventfd_ctx_fileget(efile.file);
++	ctx = eventfd_ctx_fileget(fd_file(efile));
 +	fdput(efile);
 +	if (IS_ERR(ctx))
 +		return PTR_ERR(ctx);
@@ -8629,10 +8629,12 @@ index 0000000..0000001
 +	 */
 +	mutex_lock(&pressure_lock);
 +	ctx = pressure_events[level];
-+	if (ctx)
-+		ret = eventfd_signal(ctx, 1);
-+	else
++	if (ctx) {
++		eventfd_signal(ctx);
++		ret = 0;
++	} else {
 +		ret = -ENOENT;
++	}
 +	mutex_unlock(&pressure_lock);
 +
 +	pressure_record(level, reason, ret);

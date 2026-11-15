@@ -22306,7 +22306,7 @@ new file mode 100644
 index 0000000..0000001
 --- /dev/null
 +++ b/drivers/crystalfrostwork/crystal_hybridswap/zram_drv.c
-@@ -0,0 +1,6168 @@
+@@ -0,0 +1,6157 @@
 +/*
 + * Compressed RAM block device
 + *
@@ -23333,7 +23333,8 @@ index 0000000..0000001
 +	zms_destroy(zram->zms);
 +	zram->zms = NULL;
 +	bdev = zram->bdev;
-+	blkdev_put(bdev, zram);
++	fput(zram->bdev_file);
++	zram->bdev_file = NULL;
 +	/* hope filp_close flush all of IO */
 +	filp_close(zram->backing_dev, NULL);
 +	zram->backing_dev = NULL;
@@ -23401,6 +23402,7 @@ index 0000000..0000001
 +	u64 backing_pages;
 +	unsigned long nr_pages;
 +	struct block_device *bdev = NULL;
++	struct file *bdev_file = NULL;
 +	struct zms *zms = NULL;
 +	bool late_bind;
 +	int err;
@@ -23449,7 +23451,7 @@ index 0000000..0000001
 +		goto out;
 +	}
 +
-+	backing_dev = filp_open_block(path, O_RDWR | O_LARGEFILE, 0);
++	backing_dev = filp_open(path, O_RDWR | O_LARGEFILE, 0);
 +	if (IS_ERR(backing_dev)) {
 +		err = PTR_ERR(backing_dev);
 +		chs_log(CHS_LOG_ERR,
@@ -23471,16 +23473,17 @@ index 0000000..0000001
 +		goto out;
 +	}
 +
-+	bdev = blkdev_get_by_dev(inode->i_rdev, BLK_OPEN_READ | BLK_OPEN_WRITE,
-+				 zram, NULL);
-+	if (IS_ERR(bdev)) {
-+		err = PTR_ERR(bdev);
++	bdev_file = bdev_open_by_dev(inode->i_rdev, BLK_OPEN_READ | BLK_OPEN_WRITE,
++				     zram, NULL);
++	if (IS_ERR(bdev_file)) {
++		err = PTR_ERR(bdev_file);
 +		chs_log(CHS_LOG_ERR,
 +			"backing_dev get failed path=%s late=%d ret=%d\n",
 +			path, late_bind, err);
-+		bdev = NULL;
++		bdev_file = NULL;
 +		goto out;
 +	}
++	bdev = file_bdev(bdev_file);
 +
 +	backing_pages = i_size_read(inode) >> PAGE_SHIFT;
 +	/* Refuse to use zero sized device (also prevents self reference) */
@@ -23500,7 +23503,7 @@ index 0000000..0000001
 +	}
 +	nr_pages = (unsigned long)backing_pages;
 +
-+	err = set_blocksize(bdev, PAGE_SIZE);
++	err = set_blocksize(bdev_file, PAGE_SIZE);
 +	if (err) {
 +		chs_log(CHS_LOG_ERR,
 +			"backing_dev set blocksize failed path=%s late=%d ret=%d\n",
@@ -23520,6 +23523,7 @@ index 0000000..0000001
 +	}
 +
 +	zram->bdev = bdev;
++	zram->bdev_file = bdev_file;
 +	zram->backing_dev = backing_dev;
 +	zram->zms = zms;
 +	zram_zms_start_gc(zram);
@@ -23536,8 +23540,8 @@ index 0000000..0000001
 +out:
 +	zms_destroy(zms);
 +
-+	if (bdev)
-+		blkdev_put(bdev, zram);
++	if (bdev_file)
++		fput(bdev_file);
 +
 +	if (backing_dev)
 +		filp_close(backing_dev, NULL);
@@ -23627,7 +23631,7 @@ index 0000000..0000001
 +	if (crystal_hybridswap_system_sleeping())
 +		return false;
 +
-+	if (!check_charging_state())
++	if (false /* check_charging_state() removed: not available in GKI */)
 +		return false;
 +
 +	if (!stats || !stats->nr_blocks || !stats->used_blocks)
@@ -28187,11 +28191,25 @@ index 0000000..0000001
 +#endif
 +
 +	/* gendisk structure */
-+	zram->disk = blk_alloc_disk(NUMA_NO_NODE);
-+	if (!zram->disk) {
++	{
++		struct queue_limits lim = {
++			.logical_block_size	= ZRAM_LOGICAL_BLOCK_SIZE,
++			.physical_block_size	= PAGE_SIZE,
++			.io_min			= PAGE_SIZE,
++			.io_opt			= PAGE_SIZE,
++			.max_discard_sectors	= UINT_MAX,
++			.discard_granularity	= PAGE_SIZE,
++			.max_write_zeroes_sectors =
++				(ZRAM_LOGICAL_BLOCK_SIZE == PAGE_SIZE) ?
++				UINT_MAX : 0,
++		};
++		zram->disk = blk_alloc_disk(&lim, NUMA_NO_NODE);
++	}
++	if (IS_ERR_OR_NULL(zram->disk)) {
 +		pr_err("Error allocating disk structure for device %d\n",
 +			device_id);
-+		ret = -ENOMEM;
++		ret = IS_ERR(zram->disk) ? PTR_ERR(zram->disk) : -ENOMEM;
++		zram->disk = NULL;
 +		goto out_free_idr;
 +	}
 +
@@ -28207,35 +28225,6 @@ index 0000000..0000001
 +
 +	/* Actual capacity set using sysfs (/sys/block/zram<id>/disksize */
 +	set_capacity(zram->disk, 0);
-+	/* zram devices sort of resembles non-rotational disks */
-+	blk_queue_flag_set(QUEUE_FLAG_NONROT, zram->disk->queue);
-+	blk_queue_flag_set(QUEUE_FLAG_SYNCHRONOUS, zram->disk->queue);
-+	blk_queue_write_cache(zram->disk->queue, true, false);
-+
-+	/*
-+	 * To ensure that we always get PAGE_SIZE aligned
-+	 * and n*PAGE_SIZED sized I/O requests.
-+	 */
-+	blk_queue_physical_block_size(zram->disk->queue, PAGE_SIZE);
-+	blk_queue_logical_block_size(zram->disk->queue,
-+					ZRAM_LOGICAL_BLOCK_SIZE);
-+	blk_queue_io_min(zram->disk->queue, PAGE_SIZE);
-+	blk_queue_io_opt(zram->disk->queue, PAGE_SIZE);
-+	zram->disk->queue->limits.discard_granularity = PAGE_SIZE;
-+	blk_queue_max_discard_sectors(zram->disk->queue, UINT_MAX);
-+
-+	/*
-+	 * zram_bio_discard() will clear all logical blocks if logical block
-+	 * size is identical with physical block size(PAGE_SIZE). But if it is
-+	 * different, we will skip discarding some parts of logical blocks in
-+	 * the part of the request range which isn't aligned to physical block
-+	 * size.  So we can't ensure that all discarded logical blocks are
-+	 * zeroed.
-+	 */
-+	if (ZRAM_LOGICAL_BLOCK_SIZE == PAGE_SIZE)
-+		blk_queue_max_write_zeroes_sectors(zram->disk->queue, UINT_MAX);
-+
-+	blk_queue_flag_set(QUEUE_FLAG_STABLE_WRITES, zram->disk->queue);
 +	ret = device_add_disk(NULL, zram->disk, zram_disk_groups);
 +	if (ret)
 +		goto out_cleanup_disk;
@@ -28480,7 +28469,7 @@ new file mode 100644
 index 0000000..0000001
 --- /dev/null
 +++ b/drivers/crystalfrostwork/crystal_hybridswap/zram_drv.h
-@@ -0,0 +1,297 @@
+@@ -0,0 +1,298 @@
 +/*
 + * Compressed RAM block device
 + *
@@ -28754,6 +28743,7 @@ index 0000000..0000001
 +	unsigned long prefetch_ttl_ms;
 +	bool prefetch_fault_valid;
 +	bool prefetch_enable;
++	struct file *bdev_file;		/* bdev_open_by_dev() handle (6.12+) */
 +	struct block_device *bdev;
 +	struct zms *zms;
 +	struct work_struct zms_gc_work;

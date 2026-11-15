@@ -9276,7 +9276,7 @@ index 0000000..0000001
 +#include <linux/xarray.h>
 +#include <linux/zsmalloc.h>
 +#include <linux/bit_spinlock.h>
-+#include <asm/unaligned.h>
++#include <linux/unaligned.h>
 +
 +#if IS_ENABLED(CONFIG_CRYSTAL_HYBRIDSWAP_SDDC_KUNIT_TEST)
 +#include <kunit/test.h>

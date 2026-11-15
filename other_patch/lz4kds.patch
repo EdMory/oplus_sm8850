@@ -13,29 +13,10 @@ This module provides:
 
 Requires: CONFIG_ZRAM=n (conflicts), CONFIG_BLOCK, CONFIG_MEMCG
 Supports: SM8850 (GKI 6.12.69) and any arm64 4KiB-page GKI build
+
+NOTE: drivers/Kconfig and drivers/Makefile hook lines are injected by the
+build workflow (sed/echo), NOT by this patch, to avoid context mismatch.
 ---
-
-diff --git a/drivers/Kconfig b/drivers/Kconfig
---- a/drivers/Kconfig
-+++ b/drivers/Kconfig
-@@ -246,5 +246,7 @@
- source "drivers/dpll/Kconfig"
- 
- source "drivers/rekernel/Kconfig"
- 
-+source "drivers/crystalfrostwork/Kconfig"
-+
- endmenu
-
-diff --git a/drivers/Makefile b/drivers/Makefile
---- a/drivers/Makefile
-+++ b/drivers/Makefile
-@@ -198,3 +198,5 @@
- 
- #Re-Kernel Support
- obj-$(CONFIG_REKERNEL)		+= rekernel/
-+
-+obj-$(CONFIG_CRYSTALFROSTWORK)	+= crystalfrostwork/
 
 diff --git a/drivers/crystalfrostwork/Kconfig b/drivers/crystalfrostwork/Kconfig
 new file mode 100644
@@ -58,7 +39,6 @@ index 0000000..0000001
 +source "drivers/crystalfrostwork/crystal_hybridswap/Kconfig"
 +
 +endif
-
 diff --git a/drivers/crystalfrostwork/Makefile b/drivers/crystalfrostwork/Makefile
 new file mode 100644
 index 0000000..0000001
@@ -71,7 +51,6 @@ index 0000000..0000001
 +
 +obj-$(CONFIG_CRYSTALFROSTWORK)	+= framework.o
 +obj-$(CONFIG_CRYSTAL_HYBRIDSWAP)	+= crystal_hybridswap/
-
 diff --git a/drivers/crystalfrostwork/crystal_hybridswap/Kconfig b/drivers/crystalfrostwork/crystal_hybridswap/Kconfig
 new file mode 100644
 index 0000000..0000001
@@ -316,7 +295,6 @@ index 0000000..0000001
 +	  Raise this only with that figure in mind, and verify with
 +	  /proc/vmallocinfo (the disksize_store and zms_create entries) rather
 +	  than by watching MemFree.
-
 diff --git a/drivers/crystalfrostwork/crystal_hybridswap/Makefile b/drivers/crystalfrostwork/crystal_hybridswap/Makefile
 new file mode 100644
 index 0000000..0000001
@@ -349,7 +327,6 @@ index 0000000..0000001
 +
 +zram-$(CONFIG_CRYSTAL_HYBRIDSWAP_SDDC_KUNIT_TEST) += \
 +	sddc/crystal_sddc_codec_test.o
-
 diff --git a/drivers/crystalfrostwork/crystal_hybridswap/README.md b/drivers/crystalfrostwork/crystal_hybridswap/README.md
 new file mode 100644
 index 0000000..0000001
@@ -869,7 +846,6 @@ index 0000000..0000001
 +- Keep memcg parameter parsing strict enough to reject malformed input but readable enough for platform scripts.
 +- Keep multi-zram selection deterministic for the same runtime state.
 +- Keep documentation focused on current module behavior, supported interfaces, and maintenance invariants.
-
 diff --git a/drivers/crystalfrostwork/crystal_hybridswap/README_ZH.md b/drivers/crystalfrostwork/crystal_hybridswap/README_ZH.md
 new file mode 100644
 index 0000000..0000001
@@ -1378,7 +1354,6 @@ index 0000000..0000001
 +- memcg 参数解析应既能拒绝非法输入，又便于平台脚本读取和写入。
 +- multi-zram 选择在相同运行状态下应保持可预期。
 +- 文档应聚焦当前模块行为、受支持接口和维护不变量。
-
 diff --git a/drivers/crystalfrostwork/crystal_hybridswap/core.c b/drivers/crystalfrostwork/crystal_hybridswap/core.c
 new file mode 100644
 index 0000000..0000001
@@ -4824,7 +4799,6 @@ index 0000000..0000001
 +MODULE_AUTHOR("whitewhale");
 +MODULE_DESCRIPTION("Compressed RAM Block Device with Crystal Hybridswap support");
 +MODULE_LICENSE("GPL");
-
 diff --git a/drivers/crystalfrostwork/crystal_hybridswap/crystal_hybridswap_internal.h b/drivers/crystalfrostwork/crystal_hybridswap/crystal_hybridswap_internal.h
 new file mode 100644
 index 0000000..0000001
@@ -5684,7 +5658,6 @@ index 0000000..0000001
 +void crystal_hybridswap_pressure_exit(void);
 +
 +#endif /* _CRYSTAL_HYBRIDSWAP_INTERNAL_H */
-
 diff --git a/drivers/crystalfrostwork/crystal_hybridswap/memcg.c b/drivers/crystalfrostwork/crystal_hybridswap/memcg.c
 new file mode 100644
 index 0000000..0000001
@@ -8367,7 +8340,6 @@ index 0000000..0000001
 +		memcg_free_entry_locked(entry);
 +	mutex_unlock(&memcg_lock);
 +}
-
 diff --git a/drivers/crystalfrostwork/crystal_hybridswap/param.c b/drivers/crystalfrostwork/crystal_hybridswap/param.c
 new file mode 100644
 index 0000000..0000001
@@ -8522,7 +8494,6 @@ index 0000000..0000001
 +		return -EINVAL;
 +	}
 +}
-
 diff --git a/drivers/crystalfrostwork/crystal_hybridswap/pressure.c b/drivers/crystalfrostwork/crystal_hybridswap/pressure.c
 new file mode 100644
 index 0000000..0000001
@@ -8753,7 +8724,6 @@ index 0000000..0000001
 +		}
 +	}
 +}
-
 diff --git a/drivers/crystalfrostwork/crystal_hybridswap/sddc/DESIGN.md b/drivers/crystalfrostwork/crystal_hybridswap/sddc/DESIGN.md
 new file mode 100644
 index 0000000..0000001
@@ -9271,7 +9241,6 @@ index 0000000..0000001
 +`CONFIG_CRYSTAL_HYBRIDSWAP_SDDC_KUNIT_TEST`. Tests should preserve the wire
 +validation, cookie generation, slot mutation, owner transfer, admission, and
 +writeback snapshot invariants described above.
-
 diff --git a/drivers/crystalfrostwork/crystal_hybridswap/sddc/crystal_sddc.c b/drivers/crystalfrostwork/crystal_hybridswap/sddc/crystal_sddc.c
 new file mode 100644
 index 0000000..0000001
@@ -14390,7 +14359,6 @@ index 0000000..0000001
 +	return !zram->limit_pages || pages <= zram->limit_pages;
 +}
 +#endif /* CONFIG_CRYSTAL_HYBRIDSWAP_SDDC */
-
 diff --git a/drivers/crystalfrostwork/crystal_hybridswap/sddc/crystal_sddc.h b/drivers/crystalfrostwork/crystal_hybridswap/sddc/crystal_sddc.h
 new file mode 100644
 index 0000000..0000001
@@ -14734,7 +14702,6 @@ index 0000000..0000001
 +#endif
 +
 +#endif /* _CRYSTAL_SDDC_H_ */
-
 diff --git a/drivers/crystalfrostwork/crystal_hybridswap/sddc/crystal_sddc_codec.c b/drivers/crystalfrostwork/crystal_hybridswap/sddc/crystal_sddc_codec.c
 new file mode 100644
 index 0000000..0000001
@@ -14915,7 +14882,6 @@ index 0000000..0000001
 +	memcpy(dst, restored, *dst_len);
 +	return 0;
 +}
-
 diff --git a/drivers/crystalfrostwork/crystal_hybridswap/sddc/crystal_sddc_codec.h b/drivers/crystalfrostwork/crystal_hybridswap/sddc/crystal_sddc_codec.h
 new file mode 100644
 index 0000000..0000001
@@ -14960,7 +14926,6 @@ index 0000000..0000001
 +		unsigned int *restored_len);
 +
 +#endif /* _CRYSTAL_SDDC_CODEC_H_ */
-
 diff --git a/drivers/crystalfrostwork/crystal_hybridswap/sddc/crystal_sddc_codec_test.c b/drivers/crystalfrostwork/crystal_hybridswap/sddc/crystal_sddc_codec_test.c
 new file mode 100644
 index 0000000..0000001
@@ -15249,7 +15214,6 @@ index 0000000..0000001
 +};
 +
 +kunit_test_suite(crystal_sddc_codec_test_suite);
-
 diff --git a/drivers/crystalfrostwork/crystal_hybridswap/sddc/lz4kd/lz4kd.h b/drivers/crystalfrostwork/crystal_hybridswap/sddc/lz4kd/lz4kd.h
 new file mode 100644
 index 0000000..0000001
@@ -15506,7 +15470,6 @@ index 0000000..0000001
 +
 +
 +#endif /* _LZ4KD_H */
-
 diff --git a/drivers/crystalfrostwork/crystal_hybridswap/sddc/lz4kd/lz4kd_decode.c b/drivers/crystalfrostwork/crystal_hybridswap/sddc/lz4kd/lz4kd_decode.c
 new file mode 100644
 index 0000000..0000001
@@ -15777,7 +15740,6 @@ index 0000000..0000001
 +			(uint8_t *)out + out_max, NR_8KB_LOG2,
 +			BLOCK_8KB_LOG2);
 +}
-
 diff --git a/drivers/crystalfrostwork/crystal_hybridswap/sddc/lz4kd/lz4kd_encode.c b/drivers/crystalfrostwork/crystal_hybridswap/sddc/lz4kd/lz4kd_encode.c
 new file mode 100644
 index 0000000..0000001
@@ -16215,7 +16177,6 @@ index 0000000..0000001
 +			(uint8_t*)out,
 +			in_max, out_limit);
 +}
-
 diff --git a/drivers/crystalfrostwork/crystal_hybridswap/sddc/lz4kd/lz4kd_encode_delta.c b/drivers/crystalfrostwork/crystal_hybridswap/sddc/lz4kd/lz4kd_encode_delta.c
 new file mode 100644
 index 0000000..0000001
@@ -16445,7 +16406,6 @@ index 0000000..0000001
 +	crystal_lz4kd_simd_finish(&simd);
 +	return ret;
 +}
-
 diff --git a/drivers/crystalfrostwork/crystal_hybridswap/sddc/lz4kd/lz4kd_encode_private.h b/drivers/crystalfrostwork/crystal_hybridswap/sddc/lz4kd/lz4kd_encode_private.h
 new file mode 100644
 index 0000000..0000001
@@ -16562,7 +16522,6 @@ index 0000000..0000001
 +void crystal_lz4kd_simd_finish(struct crystal_lz4kd_simd *simd);
 +
 +#endif /* _LZ4KD_ENCODE_PRIVATE_H */
-
 diff --git a/drivers/crystalfrostwork/crystal_hybridswap/sddc/lz4kd/lz4kd_neon.c b/drivers/crystalfrostwork/crystal_hybridswap/sddc/lz4kd/lz4kd_neon.c
 new file mode 100644
 index 0000000..0000001
@@ -16618,7 +16577,6 @@ index 0000000..0000001
 +	}
 +	return r;
 +}
-
 diff --git a/drivers/crystalfrostwork/crystal_hybridswap/sddc/lz4kd/lz4kd_neon.h b/drivers/crystalfrostwork/crystal_hybridswap/sddc/lz4kd/lz4kd_neon.h
 new file mode 100644
 index 0000000..0000001
@@ -16636,7 +16594,6 @@ index 0000000..0000001
 +					const u8 *end);
 +
 +#endif /* _LZ4KD_NEON_H */
-
 diff --git a/drivers/crystalfrostwork/crystal_hybridswap/sddc/lz4kd/lz4kd_private.h b/drivers/crystalfrostwork/crystal_hybridswap/sddc/lz4kd/lz4kd_private.h
 new file mode 100644
 index 0000000..0000001
@@ -16831,7 +16788,6 @@ index 0000000..0000001
 +}
 +
 +#endif /* _LZ4KD_PRIVATE_H */
-
 diff --git a/drivers/crystalfrostwork/crystal_hybridswap/stats.c b/drivers/crystalfrostwork/crystal_hybridswap/stats.c
 new file mode 100644
 index 0000000..0000001
@@ -17633,7 +17589,6 @@ index 0000000..0000001
 +	debugfs_remove_recursive(chs.debugfs_root);
 +	chs.debugfs_root = NULL;
 +}
-
 diff --git a/drivers/crystalfrostwork/crystal_hybridswap/zcomp.c b/drivers/crystalfrostwork/crystal_hybridswap/zcomp.c
 new file mode 100644
 index 0000000..0000001
@@ -18143,7 +18098,6 @@ index 0000000..0000001
 +	}
 +	return comp;
 +}
-
 diff --git a/drivers/crystalfrostwork/crystal_hybridswap/zcomp.h b/drivers/crystalfrostwork/crystal_hybridswap/zcomp.h
 new file mode 100644
 index 0000000..0000001
@@ -18240,7 +18194,6 @@ index 0000000..0000001
 +
 +bool zcomp_set_max_streams(struct zcomp *comp, int num_strm);
 +#endif /* _ZCOMP_H_ */
-
 diff --git a/drivers/crystalfrostwork/crystal_hybridswap/zms.c b/drivers/crystalfrostwork/crystal_hybridswap/zms.c
 new file mode 100644
 index 0000000..0000001
@@ -21187,7 +21140,6 @@ index 0000000..0000001
 +MODULE_AUTHOR("whitewhale");
 +MODULE_DESCRIPTION("Crystal ZMS packed compressed-object backing store");
 +MODULE_LICENSE("GPL");
-
 diff --git a/drivers/crystalfrostwork/crystal_hybridswap/zms.h b/drivers/crystalfrostwork/crystal_hybridswap/zms.h
 new file mode 100644
 index 0000000..0000001
@@ -21366,7 +21318,6 @@ index 0000000..0000001
 +int zms_compact(struct zms *zms, gfp_t gfp, struct zms_io *io);
 +
 +#endif
-
 diff --git a/drivers/crystalfrostwork/crystal_hybridswap/zram_bridge.c b/drivers/crystalfrostwork/crystal_hybridswap/zram_bridge.c
 new file mode 100644
 index 0000000..0000001
@@ -22350,7 +22301,6 @@ index 0000000..0000001
 +	atomic64_inc(&chs.stats.zram_unregister);
 +	crystal_hybridswap_resume_auto_policy();
 +}
-
 diff --git a/drivers/crystalfrostwork/crystal_hybridswap/zram_drv.c b/drivers/crystalfrostwork/crystal_hybridswap/zram_drv.c
 new file mode 100644
 index 0000000..0000001
@@ -28526,7 +28476,6 @@ index 0000000..0000001
 +
 +module_param(num_devices, uint, 0);
 +MODULE_PARM_DESC(num_devices, "Number of pre-created zram devices");
-
 diff --git a/drivers/crystalfrostwork/crystal_hybridswap/zram_drv.h b/drivers/crystalfrostwork/crystal_hybridswap/zram_drv.h
 new file mode 100644
 index 0000000..0000001
@@ -28830,7 +28779,6 @@ index 0000000..0000001
 +void zram_memcg_stats_sub_current(struct zram *zram, u32 index);
 +void update_used_max(struct zram *zram, const unsigned long pages);
 +#endif
-
 diff --git a/drivers/crystalfrostwork/framework.c b/drivers/crystalfrostwork/framework.c
 new file mode 100644
 index 0000000..0000001
@@ -28883,7 +28831,6 @@ index 0000000..0000001
 +MODULE_LICENSE("Proprietary");
 +
 +early_initcall(framework_init)
-
 diff --git a/include/linux/crystalfrostwork.h b/include/linux/crystalfrostwork.h
 new file mode 100644
 index 0000000..0000001

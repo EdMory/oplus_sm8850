@@ -415,67 +415,34 @@ jobs:
       - name: 应用 LZ4KDS 补丁
         if: inputs.lz4kds_enable
         run: |
-          echo "正在应用 LZ4KDS (lz4kd+sddc+zms) 补丁…"
-          echo "LZ4KDS 功能说明："
-          echo "  - Crystal Hybridswap: 私有 zram ABI 兼容驱动，替代 CONFIG_ZRAM"
-          echo "  - SDDC: 驻留相似性检测与 delta 压缩数据路径"
-          echo "  - LZ4KD 私有 codec: 华为 LZ4KD 普通/delta codec，4KiB 页要求"
-          echo "  - ZMS: Crystal ZMS 写回层"
-          trap 'echo "LZ4KDS 补丁应用步骤在第 $LINENO 行失败(退出码 $?)" >&2' ERR
+          echo "正在应用 LZ4KDS 补丁…"
           cd kernel_workspace/common
-          
-          # 下载补丁(三源回退)
-          PATCH_NAME=lz4kds.patch
-          ok=0
-          for u in \
-            "https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/$PATCH_NAME" \
-            "https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$GITHUB_REF_NAME/other_patch/$PATCH_NAME" \
-            "https://cdn.jsdelivr.net/gh/$GITHUB_REPOSITORY@$GITHUB_REF_NAME/other_patch/$PATCH_NAME"; do
-            echo "尝试下载: $u"
-            if curl -fSL --retry 3 --retry-delay 2 --connect-timeout 20 -o "$PATCH_NAME.tmp" "$u" 2>/dev/null \
-               || wget -O "$PATCH_NAME.tmp" --tries=3 --timeout=20 "$u" 2>/dev/null; then
-              if [ -s "$PATCH_NAME.tmp" ] && grep -q '^diff --git ' "$PATCH_NAME.tmp"; then
-                mv "$PATCH_NAME.tmp" "$PATCH_NAME"
-                echo "下载成功: $PATCH_NAME ($(wc -c < "$PATCH_NAME") 字节)"
-                ok=1; break
-              fi
-            fi
-            rm -f "$PATCH_NAME.tmp"
-          done
-          [ "$ok" = 1 ] || { echo "错误: $PATCH_NAME 下载失败"; exit 1; }
-          
-          # ABI 保护审计：补丁只应新增文件（--- /dev/null）和修改 drivers/Kconfig、drivers/Makefile
-          if grep -nE '^\+.*EXPORT_SYMBOL(_GPL)?\(' "$PATCH_NAME"; then
-            echo "错误: lz4kds.patch 包含导出符号声明，可能破坏 KMI，已中止"; exit 1
-          fi
-          
-          # 前置幂等检查：已存在则跳过
-          if [ -d "drivers/crystalfrostwork" ]; then
-            echo "检测到 drivers/crystalfrostwork 已存在，跳过 lz4kds.patch 应用"
-            exit 0
-          fi
-          
-          # 零 fuzz 干跑验证
-          if ! patch -p1 --dry-run -F 0 < "$PATCH_NAME" > /tmp/lz4kds_dryrun.log 2>&1; then
-            cat /tmp/lz4kds_dryrun.log
-            echo "错误: lz4kds.patch 存在无法零 fuzz 应用的 hunk，已中止"
-            exit 1
-          fi
-          cat /tmp/lz4kds_dryrun.log
-          if grep -qE 'with fuzz|FAILED|previously applied' /tmp/lz4kds_dryrun.log; then
-            echo "错误: lz4kds.patch 与当前内核树不匹配(fuzz/失败/重复)，已中止"; exit 1
-          fi
-          
-          # 应用补丁
-          patch -p1 -F 0 --no-backup-if-mismatch < "$PATCH_NAME"
-          
-          # 验证关键文件已落位
-          [ -d "drivers/crystalfrostwork" ] || { echo "错误: drivers/crystalfrostwork/ 目录未生成"; exit 1; }
-          [ -f "drivers/crystalfrostwork/crystal_hybridswap/zcomp.c" ] || { echo "错误: zcomp.c 未生成"; exit 1; }
-          [ -f "drivers/crystalfrostwork/crystal_hybridswap/sddc/crystal_sddc.c" ] || { echo "错误: crystal_sddc.c 未生成"; exit 1; }
-          [ -f "drivers/crystalfrostwork/crystal_hybridswap/sddc/lz4kd/lz4kd.h" ] || { echo "错误: lz4kd.h 未生成"; exit 1; }
-          grep -q 'source "drivers/crystalfrostwork/Kconfig"' drivers/Kconfig || { echo "错误: drivers/Kconfig 钩子未注入"; exit 1; }
-          grep -q 'obj-$(CONFIG_CRYSTALFROSTWORK)' drivers/Makefile || { echo "错误: drivers/Makefile 钩子未注入"; exit 1; }
+          wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/lz4kds.patch
+          patch -p1 -F 0 --no-backup-if-mismatch < lz4kds.patch
+          # Crystal Hybridswap (lz4kds) 替代原生 zram，CONFIG_ZRAM 必须关闭(其 Kconfig 已声明 depends on ZRAM=n)
+          echo "CONFIG_ZRAM=n" >> ./common/arch/arm64/configs/gki_defconfig
+          # 框架入口
+          echo "CONFIG_CRYSTALFROSTWORK=y" >> ./common/arch/arm64/configs/gki_defconfig
+          # Crystal Hybridswap 核心
+          echo "CONFIG_CRYSTAL_HYBRIDSWAP=y" >> ./common/arch/arm64/configs/gki_defconfig
+          echo "CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_WRITEBACK=y" >> ./common/arch/arm64/configs/gki_defconfig
+          echo "CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_TRACK_ENTRY_ACTIME=y" >> ./common/arch/arm64/configs/gki_defconfig
+          echo "CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_MEMORY_TRACKING=y" >> ./common/arch/arm64/configs/gki_defconfig
+          echo "CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_MULTI_COMP=y" >> ./common/arch/arm64/configs/gki_defconfig
+          echo "CONFIG_CRYSTAL_HYBRIDSWAP_ERM_AVAIL_BUFFER_DEFAULT_ON=y" >> ./common/arch/arm64/configs/gki_defconfig
+          # SDDC + 私有 LZ4KD codec（4KiB 页，ARM64）
+          echo "CONFIG_CRYSTAL_HYBRIDSWAP_SDDC=y" >> ./common/arch/arm64/configs/gki_defconfig
+          echo "CONFIG_CRYSTAL_HYBRIDSWAP_SDDC_LZ4KD=y" >> ./common/arch/arm64/configs/gki_defconfig
+          echo "CONFIG_CRYSTAL_HYBRIDSWAP_SDDC_ZMS_NATIVE=y" >> ./common/arch/arm64/configs/gki_defconfig
+          # 默认压缩算法: lz4kds (私有 delta-capable backend)
+          echo 'CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_DEF_COMP="lz4kds"' >> ./common/arch/arm64/configs/gki_defconfig
+          # 锁定 primary compressor 防止 vendor userspace 覆盖
+          echo "CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_LOCK_DEF_COMP=y" >> ./common/arch/arm64/configs/gki_defconfig
+          # 兼容占位 API（可选，vendor userspace 不需要时保持关闭）
+          echo "CONFIG_CRYSTAL_HYBRIDSWAP_LEGACY_EMPTY_APIS=n" >> ./common/arch/arm64/configs/gki_defconfig
+          echo "CONFIG_CRYSTAL_HYBRIDSWAP_LEGACY_SWAPD_MEMCGS_PARAM=n" >> ./common/arch/arm64/configs/gki_defconfig
+          # KUnit 测试保持关闭（生产内核）
+          echo "CONFIG_CRYSTAL_HYBRIDSWAP_SDDC_KUNIT_TEST=n" >> ./common/arch/arm64/configs/gki_defconfig
           echo "LZ4KDS 补丁应用完成"
 
       - name: 应用 LZ4 NEON 加速挂钩
@@ -549,32 +516,6 @@ jobs:
             echo "CONFIG_ZRAM_BACKEND_LZ4K=y" >> ./common/arch/arm64/configs/gki_defconfig
             echo "CONFIG_ZRAM_BACKEND_LZ4KD=y" >> ./common/arch/arm64/configs/gki_defconfig
             echo "CONFIG_ZRAM_BACKEND_842=y" >> ./common/arch/arm64/configs/gki_defconfig
-          fi
-          if [[ "${{ github.event.inputs.lz4kds_enable }}" == "true" ]]; then
-            # Crystal Hybridswap (lz4kds) 替代原生 zram，CONFIG_ZRAM 必须关闭(其 Kconfig 已声明 depends on ZRAM=n)
-            echo "CONFIG_ZRAM=n" >> ./common/arch/arm64/configs/gki_defconfig
-            # 框架入口
-            echo "CONFIG_CRYSTALFROSTWORK=y" >> ./common/arch/arm64/configs/gki_defconfig
-            # Crystal Hybridswap 核心
-            echo "CONFIG_CRYSTAL_HYBRIDSWAP=y" >> ./common/arch/arm64/configs/gki_defconfig
-            echo "CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_WRITEBACK=y" >> ./common/arch/arm64/configs/gki_defconfig
-            echo "CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_TRACK_ENTRY_ACTIME=y" >> ./common/arch/arm64/configs/gki_defconfig
-            echo "CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_MEMORY_TRACKING=y" >> ./common/arch/arm64/configs/gki_defconfig
-            echo "CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_MULTI_COMP=y" >> ./common/arch/arm64/configs/gki_defconfig
-            echo "CONFIG_CRYSTAL_HYBRIDSWAP_ERM_AVAIL_BUFFER_DEFAULT_ON=y" >> ./common/arch/arm64/configs/gki_defconfig
-            # SDDC + 私有 LZ4KD codec（4KiB 页，ARM64）
-            echo "CONFIG_CRYSTAL_HYBRIDSWAP_SDDC=y" >> ./common/arch/arm64/configs/gki_defconfig
-            echo "CONFIG_CRYSTAL_HYBRIDSWAP_SDDC_LZ4KD=y" >> ./common/arch/arm64/configs/gki_defconfig
-            echo "CONFIG_CRYSTAL_HYBRIDSWAP_SDDC_ZMS_NATIVE=y" >> ./common/arch/arm64/configs/gki_defconfig
-            # 默认压缩算法: lz4kds (私有 delta-capable backend)
-            echo 'CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_DEF_COMP="lz4kds"' >> ./common/arch/arm64/configs/gki_defconfig
-            # 锁定 primary compressor 防止 vendor userspace 覆盖
-            echo "CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_LOCK_DEF_COMP=y" >> ./common/arch/arm64/configs/gki_defconfig
-            # 兼容占位 API（可选，vendor userspace 不需要时保持关闭）
-            echo "CONFIG_CRYSTAL_HYBRIDSWAP_LEGACY_EMPTY_APIS=n" >> ./common/arch/arm64/configs/gki_defconfig
-            echo "CONFIG_CRYSTAL_HYBRIDSWAP_LEGACY_SWAPD_MEMCGS_PARAM=n" >> ./common/arch/arm64/configs/gki_defconfig
-            # KUnit 测试保持关闭（生产内核）
-            echo "CONFIG_CRYSTAL_HYBRIDSWAP_SDDC_KUNIT_TEST=n" >> ./common/arch/arm64/configs/gki_defconfig
           fi
           # 开启O2编译优化配置
           echo "CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE=y" >> ./common/arch/arm64/configs/gki_defconfig

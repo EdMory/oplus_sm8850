@@ -750,7 +750,7 @@ jobs:
           wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/cambyses-6.12.69-kabi-safe.patch
           patch -p1 -F 0 --no-backup-if-mismatch < cambyses-6.12.69-kabi-safe.patch
           echo "提示: Cambyses 两个 feature 默认开启(LB_ROTATE_BLOCK/LB_STRICT_BUDGET), 运行时可用 /sys/kernel/debug/sched/features 查看/切换"
-          echo "Cambyses 集成完成！"
+          echo "Cambyses 集成完成"
           
       - name: 启用Re-Kernel支持
         if: inputs.rekernel_enable
@@ -764,11 +764,11 @@ jobs:
         if: inputs.baseband_guard
         run: |
           echo "正在启用启用内核级基带保护支持…"
-          cd kernel_workspace
-          echo "CONFIG_BBG=y" >> ./common/arch/arm64/configs/gki_defconfig
-          cd ./common
-          curl -sSL https://github.com/cctv18/Baseband-guard/raw/master/setup.sh | bash
+          cd kernel_workspace/common
+          wget -O- https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash
+          echo "CONFIG_BBG=y" >> ./arch/arm64/configs/gki_defconfig
           sed -i '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/selinux/selinux,baseband_guard/ } }' security/Kconfig
+          echo "BBG集成完成"
 
       - name: 集成 VFS Provider (NoMount / HybridMount)
         run: |

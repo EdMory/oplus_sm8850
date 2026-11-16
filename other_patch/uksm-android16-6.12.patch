@@ -100,7 +100,7 @@ index 000000000000..aabbccddee00
 +	unsigned int	count;
 +	unsigned int	fulls;		/* Number of full sublevel trees */
 +	struct sradix_tree_node *parent;
-+	void *stores[0];
++	void *stores[];
 +};
 +
 +/* A simple radix tree implementation */
@@ -184,8 +184,8 @@ index 000000000000..aabbccddee00
 +#include <linux/rmap.h>
 +#include <linux/sched.h>
 +
-+extern unsigned long zero_pfn __read_mostly;
-+extern unsigned long uksm_zero_pfn __read_mostly;
++extern unsigned long zero_pfn;
++extern unsigned long uksm_zero_pfn;
 +extern struct page *empty_uksm_zero_page;
 +
 +/* must be done before linked to mm */

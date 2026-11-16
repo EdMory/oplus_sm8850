@@ -1480,8 +1480,8 @@ jobs:
           grep -q '^CONFIG_UKSM=' arch/arm64/configs/gki_defconfig \
             || echo "CONFIG_UKSM=y" >> arch/arm64/configs/gki_defconfig
           # 确保 KSM_LEGACY 关闭（与 UKSM 互斥）
-          grep -q '^CONFIG_KSM_LEGACY=' arch/arm64/configs/gki_defconfig \
-            || echo "CONFIG_KSM_LEGACY=n" >> arch/arm64/configs/gki_defconfig
+          #grep -q '^CONFIG_KSM_LEGACY=' arch/arm64/configs/gki_defconfig \
+          #  || echo "CONFIG_KSM_LEGACY=n" >> arch/arm64/configs/gki_defconfig
           echo "提示: UKSM 已启用，uksmd 守护线程自动扫描所有匿名 VMA; 运行时可用 /sys/kernel/mm/uksm/ 查看统计与调节参数"
           echo "UKSM 集成完成"
          

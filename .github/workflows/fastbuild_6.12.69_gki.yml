@@ -390,7 +390,7 @@ jobs:
         if: inputs.lz4_enable
         run: |
           echo "正在添加lz4 1.10.0 & zstd 1.5.8补丁…"
-          cd kernel_workspace
+          cd kernel_workspace/common
           wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/zram_patch/001-lz4.patch
           wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/zram_patch/002-zstd.patch
           patch -p1 --no-backup-if-mismatch -F 0 < 001-lz4.patch

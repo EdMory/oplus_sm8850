@@ -734,6 +734,7 @@ jobs:
           echo "基于一加调度移植, 独立调度类与 SCHED_CLASS_EXT/BORE 共存; 使用 android_oem_data1 槽位承载 TS/OPS/RQ, 不触碰 ANDROID_KABI_RESERVE"
           # 任何命令失败时打印出错行号: 避免 set -e 静默退出后失败点无法定位
           trap 'echo "HMBIRD 集成步骤在脚本第 $LINENO 行失败(退出码 $?)" >&2' ERR
+          cd kernel_workspace/common
           wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/hmbird-6.12.69-kabi-safe.patch
           patch -p1 --no-backup-if-mismatch -F 0 < hmbird-6.12.69-kabi-safe.patch
           echo "CONFIG_HMBIRD_SCHED=y" >> ./arch/arm64/configs/gki_defconfig

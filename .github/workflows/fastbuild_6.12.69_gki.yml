@@ -57,11 +57,6 @@ on:
         required: true
         type: boolean
         default: 'true'
-      uksm_enable:
-        description: '是否安装 UKSM 补丁'
-        required: true
-        type: boolean
-        default: 'true'
       droidspaces_enable:
         description: '是否开启 Droidspaces 容器支持(轻量化的完整Linux容器支持)'
         required: true
@@ -1471,26 +1466,6 @@ jobs:
           patch -p1 -F 0 < $PATCH
           echo "cherry-pick 补丁集(44条)应用完成"
           
-      - name: 集成 UKSM (Ultra Kernel Samepage Merging)
-        if: inputs.uksm_enable
-        run: |
-          echo "正在集成 UKSM (Ultra Kernel Samepage Merging; 全系统透明匿名页合并，无需 MADV_MERGEABLE; 使用 ANDROID_KABI_USE(1) 存储 vma_slot 指针，不改变 vm_area_struct 布局，KABI 安全)…"
-          trap 'echo "UKSM 集成步骤在脚本第 $LINENO 行失败(退出码 $?)" >&2' ERR
-          cd kernel_workspace/common
-          PATCH=uksm-android16-6.12.patch
-          wget -O $PATCH https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/$PATCH
-          patch -p1 -F 0 --no-backup-if-mismatch < "$PATCH"
-          # 写入 Kconfig 开关
-          grep -q '^CONFIG_KSM=' arch/arm64/configs/gki_defconfig \
-            || echo "CONFIG_KSM=y" >> arch/arm64/configs/gki_defconfig
-          grep -q '^CONFIG_UKSM=' arch/arm64/configs/gki_defconfig \
-            || echo "CONFIG_UKSM=y" >> arch/arm64/configs/gki_defconfig
-          # 确保 KSM_LEGACY 关闭（与 UKSM 互斥）
-          #grep -q '^CONFIG_KSM_LEGACY=' arch/arm64/configs/gki_defconfig \
-          #  || echo "CONFIG_KSM_LEGACY=n" >> arch/arm64/configs/gki_defconfig
-          echo "提示: UKSM 已启用，uksmd 守护线程自动扫描所有匿名 VMA; 运行时可用 /sys/kernel/mm/uksm/ 查看统计与调节参数"
-          echo "UKSM 集成完成"
-         
       - name: 添加制作名称
         run: |
           cd kernel_workspace

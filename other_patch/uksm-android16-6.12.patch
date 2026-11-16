@@ -1,4 +1,4 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+﻿From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: UKSM Android Port <uksm-port@android16-6.12>
 Date: Sun, 16 Nov 2026 00:00:00 +0800
 Subject: [PATCH] uksm: port to android16-6.12.69 GKI without breaking KABI
@@ -6596,9 +6596,31 @@ index 000000000000..aabbccddee00
 +#ifdef MODULE
 +subsys_initcall(ksm_init);
 +#else
-+late_initcall(uksm_init);
++/* late_initcall(uksm_init) BISECT DISABLED */
 +#endif
 +
+diff --git a/include/linux/ksm.h b/include/linux/ksm.h
+--- a/include/linux/ksm.h
++++ b/include/linux/ksm.h
+@@ -158,4 +158,6 @@
+ #endif /* CONFIG_MMU */
+ #endif /* !CONFIG_KSM */
+ 
++#include <linux/uksm.h>
++
+ #endif /* __LINUX_KSM_H */
+diff --git a/kernel/fork.c b/kernel/fork.c
+--- a/kernel/fork.c
++++ b/kernel/fork.c
+@@ -717,6 +717,8 @@
+ 		 */
+ 		vma_iter_bulk_store(&vmi, tmp);
+ 
++		uksm_add_vma_new(tmp, "dup_mmap");
++
+ 		mm->map_count++;
+ 
+ 		if (tmp->vm_ops && tmp->vm_ops->open)
 diff --git a/lib/Makefile b/lib/Makefile
 --- a/lib/Makefile
 +++ b/lib/Makefile
@@ -6641,3 +6663,115 @@ diff --git a/mm/Makefile b/mm/Makefile
  obj-$(CONFIG_PAGE_POISONING) += page_poison.o
  obj-$(CONFIG_KASAN)	+= kasan/
  obj-$(CONFIG_KFENCE) += kfence/
+diff --git a/mm/mmap.c b/mm/mmap.c
+--- a/mm/mmap.c
++++ b/mm/mmap.c
+@@ -1540,6 +1540,7 @@
+ 	/* Lock the VMA since it is modified after insertion into VMA tree */
+ 	vma_start_write(vma);
+ 	vma_iter_store_new(&vmi, vma);
++	uksm_add_vma_new(vma, "mmap_region");
+ 	mm->map_count++;
+ 	vma_link_file(vma);
+ 
+@@ -1596,6 +1597,7 @@
+ free_iter_vma:
+ 	vma_iter_free(&vmi);
+ free_vma:
++	uksm_remove_vma(vma, "mmap_region");
+ 	vm_area_free(vma);
+ unacct_error:
+ 	if (charged)
+@@ -1867,6 +1869,7 @@
+ 	mm->map_count++;
+ 	validate_mm(mm);
+ 	ksm_add_vma(vma);
++	uksm_add_vma_new(vma, "do_brk_flags");
+ out:
+ 	perf_event_mmap(vma);
+ 	mm->total_vm += len >> PAGE_SHIFT;
+@@ -2190,6 +2193,7 @@
+ 	vm_stat_account(mm, vma->vm_flags, len >> PAGE_SHIFT);
+ 
+ 	perf_event_mmap(vma);
++	uksm_add_vma_new(vma, "__install_special_mapping");
+ 
+ 	return vma;
+ 
+diff --git a/mm/vma.c b/mm/vma.c
+--- a/mm/vma.c
++++ b/mm/vma.c
+@@ -9,6 +9,7 @@
+ 
+ #include "vma_internal.h"
+ #include "vma.h"
++#include <linux/ksm.h>
+ 
+ static inline bool is_mergeable_vma(struct vma_merge_struct *vmg, bool merge_next)
+ {
+@@ -261,6 +262,7 @@
+ 		mpol_put(vma_policy(vp->remove));
+ 		if (!vp->remove2)
+ 			WARN_ON_ONCE(vp->vma->vm_end < vp->remove->vm_end);
++		uksm_remove_vma(vp->remove, "vma_complete");
+ 		vm_area_free(vp->remove);
+ 
+ 		/*
+@@ -339,6 +341,7 @@
+ 		fput(vma->vm_file);
+ 	}
+ 	mpol_put(vma_policy(vma));
++	uksm_remove_vma(vma, "remove vma");
+ 	vm_area_free(vma);
+ }
+ 
+@@ -448,6 +451,8 @@
+ 
+ 	/* vma_complete stores the new vma */
+ 	vma_complete(&vp, vmi, vma->vm_mm);
++	uksm_add_vma_new(vma, "__split_vma_1");
++	uksm_add_vma_new(new, "__split_vma_2");
+ 	validate_mm(vma->vm_mm);
+ 
+ 	/* Success. */
+@@ -624,20 +629,24 @@
+ 
+ 	vma_prepare(&vp);
+ 	vma_adjust_trans_huge(vmg->vma, vmg->start, vmg->end, adj_start);
++	uksm_remove_vma(vmg->vma, "vma_expand");
+ 	vma_set_range(vmg->vma, vmg->start, vmg->end, vmg->pgoff);
+ 
+ 	if (expanded)
+ 		vma_iter_store_overwrite(vmg->vmi, vmg->vma);
+ 
+ 	if (adj_start) {
++		uksm_remove_vma(adjust, "commit_merge_2");
+ 		adjust->vm_start += adj_start;
+ 		adjust->vm_pgoff += PHYS_PFN(adj_start);
++		uksm_add_vma_new(adjust, "commit_merge_2");
+ 		if (adj_start < 0) {
+ 			WARN_ON(expanded);
+ 			vma_iter_store_overwrite(vmg->vmi, adjust);
+ 		}
+ 	}
+ 
++	uksm_add_vma_new(vmg->vma, "vma_expand");
+ 	vma_complete(&vp, vmg->vmi, vmg->vma->vm_mm);
+ 
+ 	return 0;
+@@ -1103,6 +1112,7 @@
+ 	vma_iter_clear(vmi);
+ 	vma_set_range(vma, start, end, pgoff);
+ 	vma_complete(&vp, vmi, vma->vm_mm);
++	uksm_add_vma_new(vma, "vma_shrink");
+ 	validate_mm(vma->vm_mm);
+ 	return 0;
+ }
+@@ -1724,6 +1734,7 @@
+ 		if (vma_link(mm, new_vma))
+ 			goto out_vma_link;
+ 		*need_rmap_locks = false;
++		uksm_add_vma_new(new_vma, "copy_vma");
+ 	}
+ 	return new_vma;
+ 

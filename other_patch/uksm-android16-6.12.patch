@@ -184,8 +184,8 @@ index 000000000000..aabbccddee00
 +#include <linux/rmap.h>
 +#include <linux/sched.h>
 +
-+extern unsigned long zero_pfn __read_mostly;
-+extern unsigned long uksm_zero_pfn __read_mostly;
++extern unsigned long zero_pfn;
++extern unsigned long uksm_zero_pfn;
 +extern struct page *empty_uksm_zero_page;
 +
 +/* must be done before linked to mm */
@@ -6969,16 +6969,15 @@ diff --git a/mm/vma.c b/mm/vma.c
  	vma_complete(&vp, vmg->vmi, vmg->vma->vm_mm);
  
  	return 0;
-@@ -1103,6 +1112,8 @@
+@@ -1103,6 +1112,7 @@
  	vma_iter_clear(vmi);
  	vma_set_range(vma, start, end, pgoff);
  	vma_complete(&vp, vmi, vma->vm_mm);
-+	uksm_add_vma_new(vma, "__split_vma_1");
-+	uksm_add_vma_new(new, "__split_vma_2");
++	uksm_add_vma_new(vma, "vma_shrink");
  	validate_mm(vma->vm_mm);
  	return 0;
  }
-@@ -1724,6 +1735,7 @@
+@@ -1724,6 +1734,7 @@
  		if (vma_link(mm, new_vma))
  			goto out_vma_link;
  		*need_rmap_locks = false;

@@ -794,7 +794,7 @@ new file mode 100644
 index 000000000000..aabbccddee00
 --- /dev/null
 +++ b/mm/uksm.c
-@@ -0,0 +1,5806 @@
+@@ -0,0 +1,5803 @@
 +/*
 + * Ultra KSM. Copyright (C) 2011-2012 Nai Xia
 + *
@@ -2093,7 +2093,6 @@ index 000000000000..aabbccddee00
 +	if (!atomic_read(&uksm_initialized))
 +		return;
 +	struct vma_slot *slot;
-+	unsigned long new_flags = vma->vm_flags;
 +	unsigned long vm_pages = vma_pages(vma);
 +
 +	if (!vma_can_enter(vma)) {
@@ -2112,8 +2111,6 @@ index 000000000000..aabbccddee00
 +		hlist_add_head(&slot->hash_node, &uksm_vma_hash[_k]);
 +		spin_unlock(&uksm_vma_hash_lock);
 +	}
-+	new_flags |= VM_MERGEABLE;
-+	vm_flags_reset(vma, new_flags);
 +	slot->vma = vma;
 +	slot->mm = vma->vm_mm;
 +	slot->ctime_j = jiffies;

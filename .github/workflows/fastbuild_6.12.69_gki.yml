@@ -391,17 +391,9 @@ jobs:
         run: |
           echo "正在添加lz4 1.10.0 & zstd 1.5.8补丁…"
           cd kernel_workspace
-          git clone --depth=1 https://github.com/$GITHUB_REPOSITORY.git -b $GITHUB_REF_NAME $GITHUB_ACTOR
-          cp ./$GITHUB_ACTOR/zram_patch/001-lz4.patch ./common/
-          cp ./$GITHUB_ACTOR/zram_patch/002-zstd.patch ./common/
-          cd ./common
-          # 严格零 fuzz 应用 LZ4 1.10.0 补丁(已适配 GKI 6.12.69, 去除基于其他分支的 f2fs 依赖段)
-          patch -p1 --dry-run -F 0 < 001-lz4.patch > /tmp/lz4_dryrun.log 2>&1
-          cat /tmp/lz4_dryrun.log
+          wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/zram_patch/001-lz4.patch
+          wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/zram_patch/002-zstd.patch
           patch -p1 --no-backup-if-mismatch -F 0 < 001-lz4.patch
-          # 严格零 fuzz 应用 ZSTD 1.5.8 补丁(自 GKI 基线直达 1.5.8, 保留 compression_level 可调)
-          patch -p1 --dry-run -F 0 < 002-zstd.patch > /tmp/zstd_dryrun.log 2>&1
-          cat /tmp/zstd_dryrun.log
           patch -p1 --no-backup-if-mismatch -F 0 < 002-zstd.patch
           
       - name: 应用 LZ4KD 补丁
@@ -546,10 +538,6 @@ jobs:
           # 6.12内核Rust配置
           echo "CONFIG_RUST=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_ANDROID_BINDER_IPC_RUST=m" >> ./common/arch/arm64/configs/gki_defconfig
-          # 应用 CVE_2026_43499 修复补丁（新版内核源码已应用补丁，无需再应用）
-          # cd common
-          # wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/cve-2026-43499-rtmutex-6.12.patch
-          # patch -p1 -F 3 < cve-2026-43499-rtmutex-6.12.patch
           # 开启 arm64 OPTPROBE（kprobe 跳转优化）
           echo "CONFIG_OPTPROBES=y" >> ./common/arch/arm64/configs/gki_defconfig
           # 移植 arm64 OPTPROBE v7（HiSilicon，LKML 2503.3/02174）+ 修复版: bti j + 回调op传参(ldr x0,[x0]) + 指令安全检查(拒绝PC相对/PAC/分支/异常指令重放)，适配 6.12.69

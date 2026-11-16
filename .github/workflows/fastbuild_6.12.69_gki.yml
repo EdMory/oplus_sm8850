@@ -942,6 +942,7 @@ jobs:
           KCFLAGS+=" -Wno-error"
           KCFLAGS+=" -fno-stack-protector"
           KCFLAGS+=" -D__ANDROID_COMMON_KERNEL__"
+          KCFLAGS+=" -mcpu=oryon-1"
           export KCFLAGS
           # 4. 配置其他工具及选项（非必须，防错冗余）
           export HOSTCC=clang

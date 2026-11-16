@@ -1719,11 +1719,11 @@ jobs:
           echo "KPM: ${{ github.event.inputs.kpm_enable }}" >> ./ak3.log
           echo "LZ4: ${{ github.event.inputs.lz4_enable }}" >> ./ak3.log
           echo "LZ4KD: ${{ github.event.inputs.lz4kd_enable }}" >> ./ak3.log
-          echo "LZ4KDS(SDDC+ZMS): ${{ github.event.inputs.lz4kds_enable }}" >> ./ak3.log
+          echo "LZ4KDS: ${{ github.event.inputs.lz4kds_enable }}" >> ./ak3.log
           echo "Re-Kernel: ${{ github.event.inputs.rekernel_enable }}" >> ./ak3.log
           echo "BBG: ${{ github.event.inputs.baseband_guard }}" >> ./ak3.log
           echo "IPset: ${{ github.event.inputs.better_net }}" >> ./ak3.log
-          echo "BBR: ${{ github.event.inputs.bbr_enable }}" >> ./ak3.log
+          echo "BBR3: ${{ github.event.inputs.bbr_enable }}" >> ./ak3.log
           echo "Droidspaces: ${{ github.event.inputs.droidspaces_enable }}" >> ./ak3.log
           echo "INTFP: ${{ github.event.inputs.intfp_enable }}" >> ./ak3.log
           echo "ISQRT: ${{ github.event.inputs.isqrt_enable }}" >> ./ak3.log
@@ -1810,18 +1810,18 @@ jobs:
           - KPM支持 ：${{ github.event.inputs.kpm_enable }}
           - LZ4支持：${{ github.event.inputs.lz4_enable }}
           - LZ4KD支持：${{ github.event.inputs.lz4kd_enable }}
-          - LZ4KDS(SDDC+ZMS)支持：${{ github.event.inputs.lz4kds_enable }}
+          - LZ4KDS支持：${{ github.event.inputs.lz4kds_enable }}
           - Droidspaces 容器支持：${{ github.event.inputs.droidspaces_enable }}
           - 网络功能增强：${{ github.event.inputs.better_net }}
-          - BBR 等拥塞控制算法支持：${{ github.event.inputs.bbr_enable }}
+          - BBR3 等拥塞控制算法支持：${{ github.event.inputs.bbr_enable }}
           - Re-Kernel支持：${{ github.event.inputs.rekernel_enable }}
           - BBG支持：${{ github.event.inputs.baseband_guard }}
           - INTFP支持：${{ github.event.inputs.intfp_enable }}
           - ISQRT支持：${{ github.event.inputs.isqrt_enable }}
           - ADIOS IO调度器支持：${{ github.event.inputs.adios_enable }}
           - BORE 调度器支持：${{ github.event.inputs.bore_enable }}
-          - 性能优化补丁集：${{ github.event.inputs.perf_patch_enable }}
           - Cambyses 调度器优化：${{ github.event.inputs.cambyses_enable }}
+          - 性能优化补丁集：${{ github.event.inputs.perf_patch_enable }}
           - BakaSU管理器下载：[BakaSU_CI](https://github.com/cctv18/ReSukiSU_CI/releases)
           
           ### ⏫️ 更新内容：

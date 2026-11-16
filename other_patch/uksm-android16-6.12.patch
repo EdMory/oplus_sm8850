@@ -794,7 +794,7 @@ new file mode 100644
 index 000000000000..aabbccddee00
 --- /dev/null
 +++ b/mm/uksm.c
-@@ -0,0 +1,5803 @@
+@@ -0,0 +1,5804 @@
 +/*
 + * Ultra KSM. Copyright (C) 2011-2012 Nai Xia
 + *
@@ -862,6 +862,7 @@ index 000000000000..aabbccddee00
 +#include <linux/mm_inline.h>
 +#include <linux/swap.h>
 +#include <linux/ksm.h>
++#include <linux/uksm.h>
 +#include <linux/crypto.h>
 +#include <linux/scatterlist.h>
 +#include <crypto/hash.h>

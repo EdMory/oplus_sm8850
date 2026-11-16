@@ -6643,15 +6643,16 @@ diff --git a/include/linux/mm_types.h b/include/linux/mm_types.h
 diff --git a/include/linux/mmzone.h b/include/linux/mmzone.h
 --- a/include/linux/mmzone.h
 +++ b/include/linux/mmzone.h
-@@ -178,6 +178,8 @@
+@@ -177,6 +177,9 @@
+ 	NR_FREE_CMA_PAGES,
  #ifdef CONFIG_UNACCEPTED_MEMORY
  	NR_UNACCEPTED,
- #endif
++#endif
 +#ifdef CONFIG_UKSM
 +	NR_UKSM_ZERO_PAGES,
+ #endif
  	NR_VM_ZONE_STAT_ITEMS };
  
- enum node_stat_item {
 diff --git a/include/linux/pgtable.h b/include/linux/pgtable.h
 --- a/include/linux/pgtable.h
 +++ b/include/linux/pgtable.h

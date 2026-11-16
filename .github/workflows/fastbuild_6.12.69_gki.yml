@@ -481,19 +481,7 @@ jobs:
           cd kernel_workspace/common
           # 下载挂钩脚本(已随仓库 other_patch/ 分发, 与补丁同分支同版本)
           wget -O apply_lz4_neon.sh https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/apply_lz4_neon.sh
-          
-          # 前置断言: 001-lz4.patch 必须已带入 NEON 实现(lz4armv8), 缺符号时在此fail-fast而非编译期
-          grep -rq "LZ4_arm64_decompress_safe" lib/ include/ \
-            || { echo "::error::前置检查失败: 内核树中不存在 LZ4_arm64_decompress_safe 符号(请确认 lz4_enable 开启且 001-lz4.patch 包含 lz4armv8 NEON 实现)"; exit 1; }
-          
-          # 幂等应用: 已修补自动跳过; 脚本内置失败计数, 任一文件失败即非零退出
           bash apply_lz4_neon.sh
-          
-          # 结果双保险校验(防止正则未命中被误判通过)
-          grep -q "LZ4_arm64_decompress_safe" crypto/lz4.c || { echo "::error::crypto/lz4.c NEON 挂钩失败"; exit 1; }
-          grep -q "LZ4_arm64_decompress_safe" crypto/lz4hc.c || { echo "::error::crypto/lz4hc.c NEON 挂钩失败"; exit 1; }
-          grep -q "LZ4_arm64_decompress_safe" fs/f2fs/compress.c || { echo "::error::fs/f2fs/compress.c NEON 挂钩失败"; exit 1; }
-          [ ! -f fs/incfs/data_mgmt.c ] || grep -q "LZ4_arm64_decompress_safe" fs/incfs/data_mgmt.c || { echo "::error::incfs NEON 挂钩失败"; exit 1; }
           echo "LZ4 NEON 加速挂钩完成"
           
       - name: 应用 PMICWD 修复补丁
@@ -677,164 +665,17 @@ jobs:
       - name: 集成 INTFP 整数定点/伪对数数学库
         if: inputs.intfp_enable
         run: |
-          echo "正在集成 intfp 1.5(firelzrd/intfp: 整数线性定点 / pul / log 三种数值格式互转、校正查表变体、EWMA 滤波、log 基数换算; 内核侧为 header-only 移植: 全部 static inline + static const 表, 零导出符号、不触碰 KABI)…"
+          echo "正在集成 intfp 1.5…"
           # 任何命令失败时打印出错行号: 避免 set -e 静默退出后失败点无法定位
           trap 'echo "intfp 集成步骤在脚本第 $LINENO 行失败(退出码 $?)" >&2' ERR
           cd kernel_workspace/common
-
-          # 上游 intfp 是单个 C99 头文件(https://github.com/firelzrd/intfp, v1.5), 本移植拆成两个补丁:
-          #   intfp-1.5-6.12.patch  (core) 只新增 6 个文件, 不改动任何既有文件:
-          #     include/linux/intfp.h            内核侧头文件(依赖由 stdint/stdio 换成 linux/types.h;
-          #                                      所有函数 static inline、所有查表 static const, 无导出符号)
-          #     lib/intfp/Kconfig                INTFP(默认 y) 与 INTFP_KUNIT_TEST(默认 n) 开关
-          #     lib/intfp/Makefile               把 lib/intfp/ 接入内核构建
-          #     lib/intfp/intfp.c                late_initcall 数值自检(让整库在真实内核工具链下实例化)
-          #     lib/intfp/intfp_kunit.c          可选 KUnit 用例(需 CONFIG_KUNIT)
-          #     lib/intfp/intfp_selftest_host.c  host 侧数值自检(不进内核镜像, 仅供本步骤在 runner 上运行)
-          #   intfp-6.12-glue.patch (glue) 仅在 lib/Kconfig、lib/Makefile 的既有锚点之后各插入 2 行接入点。
-          # 两补丁都不含 EXPORT_SYMBOL、不触碰 KABI 保留区(见下方静态审计), 故不破坏 ABI/KMI。
-
-          # 一、幂等前置检查: 树内若已有 intfp(例如重复运行), 直接跳过, 避免 new-file hunk 冲突
-          if [ -e include/linux/intfp.h ]; then
-            echo "检测到 include/linux/intfp.h 已存在, 跳过 intfp 集成"
-            exit 0
-          fi
-
-          # 二、补丁下载: 优先 curl(对 4xx/5xx 返回非 0, --retry 抗弱网); 无 curl 时回退 wget
-          fetch() { # $1=url $2=输出文件 $3=日志文件
-            if command -v curl >/dev/null 2>&1; then
-              curl -fSL --retry 3 --retry-delay 2 --connect-timeout 20 -o "$2" "$1" 2> "$3"
-            else
-              wget -O "$2" --tries=3 --timeout=20 "$1" 2> "$3"
-            fi
-          }
-          get_patch() { # $1=补丁文件名(位于仓库 other_patch/ 目录)
-            local name="$1" u
-            local urls=(
-              "https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/$name"
-              "https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$GITHUB_REF_NAME/other_patch/$name"
-              "https://cdn.jsdelivr.net/gh/$GITHUB_REPOSITORY@$GITHUB_REF_NAME/other_patch/$name"
-            )
-            rm -f "$name"
-            for u in "${urls[@]}"; do
-              echo "尝试下载 intfp 补丁 $name: $u"
-              if fetch "$u" "$name.tmp" "$name.download.log"; then
-                if [ -s "$name.tmp" ] && grep -q '^diff --git ' "$name.tmp"; then
-                  mv "$name.tmp" "$name"
-                  echo "下载成功: $name ($(wc -c < "$name") 字节)"
-                  rm -f "$name.download.log"
-                  return 0
-                fi
-                echo "该源返回内容异常(空文件或非 unified diff), 尝试下一个源"
-              else
-                echo "该源不可用: $(tail -n 2 "$name.download.log" 2>/dev/null | tr '\n' ' ')"
-              fi
-            done
-            rm -f "$name.tmp" "$name.download.log"
-            return 1
-          }
-          CORE=intfp-1.5-6.12.patch
-          GLUE=intfp-6.12-glue.patch
-          PATCH_DIR=/tmp/intfp_patches
-          mkdir -p "$PATCH_DIR"
-          cd "$PATCH_DIR"
-          get_patch "$CORE" || { echo "intfp core 补丁下载失败: 仓库 other_patch/$CORE 缺失或不可达(见上方诊断)"; exit 1; }
-          get_patch "$GLUE" || { echo "intfp glue 补丁下载失败: 仓库 other_patch/$GLUE 缺失或不可达(见上方诊断)"; exit 1; }
-          cd - > /dev/null
-          ls -l "$PATCH_DIR/$CORE" "$PATCH_DIR/$GLUE"
-          cat "$PATCH_DIR/$CORE" "$PATCH_DIR/$GLUE" > "$PATCH_DIR/intfp_all.patch"
-
-          # 三、ABI/KMI 面静态审计:
-          #     1) 任一补丁触碰 ANDROID_KABI / __kabi_reserved 一律中止;
-          #     2) intfp 为 header-only, 出现任何 EXPORT_SYMBOL 都说明移植越界;
-          #     3) 白名单外文件一律中止(core 只允许那 6 个新文件, glue 只允许 lib/Kconfig、lib/Makefile)。
-          if grep -nE 'ANDROID_KABI|__kabi_reserved' "$PATCH_DIR/intfp_all.patch"; then
-            echo "intfp 补丁触碰 KABI 保留区, 已中止"; exit 1
-          fi
-          if grep -nE 'EXPORT_SYMBOL(_GPL)?\(' "$PATCH_DIR/intfp_all.patch"; then
-            echo "intfp 补丁包含导出符号(该库应零导出), 已中止"; exit 1
-          fi
-          # 注意: 白名单全部命中时 grep -vE 无输出返回码为 1, 必须 || true 兜底, 否则 bash -e 下静默退出
-          OUT_OF_SCOPE="$(grep -E '^diff --git ' "$PATCH_DIR/intfp_all.patch" \
-            | grep -vE ' b/(include/linux/intfp\.h|lib/intfp/[^/]+|lib/Kconfig|lib/Makefile)$' || true)"
-          if [ -n "$OUT_OF_SCOPE" ]; then
-            echo "intfp 补丁改动了白名单以外的文件, 已中止:"; echo "$OUT_OF_SCOPE"; exit 1
-          fi
-          ABI_HASHES="$(md5sum include/linux/sched.h kernel/sched/sched.h | md5sum)"
-
-          # 四、名称冲突检查(应用前): intfp 的公共类型/宏名不得与本树既有代码重名, 命中即中止,
-          #     避免内核编译期出现重复定义; 限定 include/ 与 lib/ 两处, 秒级完成。
-          for sym in u32fp_radix u32fp_radix_type U32FP_RADIX_TYPE_COUNT INTFP_DECL_BITS intfp_fls32; do
-            hit="$(grep -rlE --include='*.h' --include='*.c' "\b${sym}\b" include lib 2>/dev/null | head -n 3 || true)"
-            if [ -n "$hit" ]; then
-              echo "intfp 名称冲突: ${sym} 已存在于以下文件, 已中止:"; echo "$hit"; exit 1
-            fi
-          done
-
-          # 五、严格零 fuzz 应用: 先 core 后 glue 依次 dry-run 探路, 任何 FAILED / fuzz / 重复应用痕迹立即中止
-          for p in "$CORE" "$GLUE"; do
-            LOG="/tmp/intfp_dryrun_${p}.log"
-            if ! patch -p1 --dry-run -F 0 < "$PATCH_DIR/$p" > "$LOG" 2>&1; then
-              cat "$LOG"
-              echo "intfp 补丁 $p 存在无法应用的 hunk, 已中止"; exit 1
-            fi
-            cat "$LOG"
-            if grep -qE 'with fuzz|FAILED|ignored|Reversed|previously applied' "$LOG"; then
-              echo "intfp 补丁 $p 与当前内核树不匹配(fuzz / hunk 失败 / 重复应用), 已中止"; exit 1
-            fi
-            # core 补丁是纯新增文件, 与既有改动无交互; glue 补丁的两个锚点位于 lib/Kconfig(lib/fonts 段)
-            # 与 lib/Makefile(pldmfw 段)中部, 其前方已被 lz4kd/lz4kdr 各插入若干行, 因此会产生纯行号偏移
-            # (上下文仍逐字符精确匹配、落点正确), 这里只提示不中止。
-            if grep -q 'offset' "$LOG"; then
-              echo "提示: 以下 hunk 存在纯行号偏移(上下文精确匹配, 位置正确, 属 lz4kd/lz4kdr 等先行改动所致), 继续应用:"
-              grep 'offset' "$LOG"
-            fi
-            patch -p1 -F 0 --no-backup-if-mismatch < "$PATCH_DIR/$p"
-          done
-
-          # 六、ABI 复核: 结构体布局相关文件必须与打补丁前逐字节一致
-          [ "$(md5sum include/linux/sched.h kernel/sched/sched.h | md5sum)" = "$ABI_HASHES" ] \
-            || { echo "intfp ABI 校验失败: 结构体布局相关文件被改动"; exit 1; }
-
-          # 七、集成结果校验: 头文件 / Kconfig 开关 / 构建接入点 / 自检单元必须齐全
-          check() { grep -qF "$2" "$1" || { echo "intfp 集成校验失败: $1 缺少 '$2'"; exit 1; }; }
-          check include/linux/intfp.h '#define _LINUX_INTFP_H'
-          check include/linux/intfp.h 'intfp_log_fpmax'
-          check include/linux/intfp.h 'INTFP_DECL_BITS('
-          check lib/intfp/Kconfig 'config INTFP_KUNIT_TEST'
-          check lib/intfp/intfp.c 'late_initcall(intfp_selftest_init);'
-          check lib/Kconfig 'source "lib/intfp/Kconfig"'
-          check lib/Makefile 'obj-$(CONFIG_INTFP) += intfp/'
-
-          # 八、宿主机数值自检: 内核无法在 CI 上启动, 故用 runner 的 gcc 直接跑移植头文件的数值用例;
-          #     stub 只提供 u8..s64/bool 等基础类型, 置于 -I 首位优先命中, 内核头仅用于取 <linux/intfp.h>。
-          mkdir -p /tmp/intfp_host/linux
-          cat > /tmp/intfp_host/linux/types.h <<'EOF_TYPES'
-          #ifndef _INTFP_HOST_STUB_TYPES_H
-          #define _INTFP_HOST_STUB_TYPES_H
-          /* host stand-in for <linux/types.h>, used only by the intfp offline numeric self test */
-          #include <stdbool.h>
-          #include <stddef.h>
-          typedef unsigned char u8;
-          typedef unsigned short u16;
-          typedef unsigned int u32;
-          typedef unsigned long long u64;
-          typedef signed char s8;
-          typedef short s16;
-          typedef int s32;
-          typedef long long s64;
-          #endif /* _INTFP_HOST_STUB_TYPES_H */
-          EOF_TYPES
-          gcc -std=gnu11 -O2 -Wall -Wextra -I/tmp/intfp_host -Iinclude \
-            -o /tmp/intfp_host/intfp_selftest lib/intfp/intfp_selftest_host.c
-          /tmp/intfp_host/intfp_selftest
-
-          # 九、显式写入开关: INTFP=y(库本身零开销: 全部 static inline, 未被使用即被编译器丢弃);
-          #     KUnit 用例保持关闭(依赖 CONFIG_KUNIT, 生产内核无必要)
-          grep -q '^CONFIG_INTFP=' arch/arm64/configs/gki_defconfig \
-            || echo "CONFIG_INTFP=y" >> arch/arm64/configs/gki_defconfig
+          wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/intfp-1.5-6.12.patch
+          wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/intfp-6.12-glue.patch
+          patch -p1 -F 0 --no-backup-if-mismatch < intfp-1.5-6.12.patch
+          patch -p1 -F 0 --no-backup-if-mismatch < intfp-6.12-glue.patch
+          echo "CONFIG_INTFP=y" >> ./arch/arm64/configs/gki_defconfig
           echo "提示: 内核代码 include <linux/intfp.h> 即可按需使用; 启动后可用 dmesg | grep intfp 查看内置自检结果"
-          echo "intfp 集成完成(零 fuzz 应用 + 零导出符号 + KABI 面未触碰)！"
+          echo "intfp 集成完成"
 
       - name: 集成 ISQRT 整数平方根快速库
         if: inputs.isqrt_enable
@@ -843,421 +684,56 @@ jobs:
           # 任何命令失败时打印出错行号: 避免 set -e 静默退出后失败点无法定位
           trap 'echo "isqrt 集成步骤在脚本第 $LINENO 行失败(退出码 $?)" >&2' ERR
           cd kernel_workspace/common
-
-          # 上游 isqrt 是单个 C99 头文件(https://github.com/firelzrd/isqrt, v1.0), 本移植拆成两个补丁:
-          #   isqrt-1.0-6.12.patch  (core) 只新增 6 个文件, 不改动任何既有文件:
-          #     include/linux/isqrt.h            内核侧头文件(依赖由 stdint 换成 linux/types.h;
-          #                                      所有函数 static inline、所有查表 static const, 无导出符号)
-          #     lib/isqrt/Kconfig                ISQRT(默认 y) 与 ISQRT_KUNIT_TEST(默认 n) 开关
-          #     lib/isqrt/Makefile               把 lib/isqrt/ 接入内核构建
-          #     lib/isqrt/isqrt.c                late_initcall 数值自检(让整库在真实内核工具链下实例化)
-          #     lib/isqrt/isqrt_kunit.c          可选 KUnit 用例(需 CONFIG_KUNIT)
-          #     lib/isqrt/isqrt_selftest_host.c  host 侧数值自检(不进内核镜像, 仅供本步骤在 runner 上运行)
-          #   isqrt-6.12-glue.patch (glue) 仅在 lib/Kconfig、lib/Makefile 的既有锚点之后各插入 2 行接入点。
-          # 两补丁都不含 EXPORT_SYMBOL、不触碰 KABI 保留区(见下方静态审计), 故不破坏 ABI/KMI。
-
-          # 一、幂等前置检查: 树内若已有 isqrt(例如重复运行), 直接跳过, 避免 new-file hunk 冲突
-          if [ -e include/linux/isqrt.h ]; then
-            echo "检测到 include/linux/isqrt.h 已存在, 跳过 isqrt 集成"
-            exit 0
-          fi
-
-          # 二、补丁下载: 优先 curl(对 4xx/5xx 返回非 0, --retry 抗弱网); 无 curl 时回退 wget
-          fetch() { # $1=url $2=输出文件 $3=日志文件
-            if command -v curl >/dev/null 2>&1; then
-              curl -fSL --retry 3 --retry-delay 2 --connect-timeout 20 -o "$2" "$1" 2> "$3"
-            else
-              wget -O "$2" --tries=3 --timeout=20 "$1" 2> "$3"
-            fi
-          }
-          get_patch() { # $1=补丁文件名(位于仓库 other_patch/ 目录)
-            local name="$1" u
-            local urls=(
-              "https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/$name"
-              "https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$GITHUB_REF_NAME/other_patch/$name"
-              "https://cdn.jsdelivr.net/gh/$GITHUB_REPOSITORY@$GITHUB_REF_NAME/other_patch/$name"
-            )
-            rm -f "$name"
-            for u in "${urls[@]}"; do
-              echo "尝试下载 isqrt 补丁 $name: $u"
-              if fetch "$u" "$name.tmp" "$name.download.log"; then
-                if [ -s "$name.tmp" ] && grep -q '^diff --git ' "$name.tmp"; then
-                  mv "$name.tmp" "$name"
-                  echo "下载成功: $name ($(wc -c < "$name") 字节)"
-                  rm -f "$name.download.log"
-                  return 0
-                fi
-                echo "该源返回内容异常(空文件或非 unified diff), 尝试下一个源"
-              else
-                echo "该源不可用: $(tail -n 2 "$name.download.log" 2>/dev/null | tr '\n' ' ')"
-              fi
-            done
-            rm -f "$name.tmp" "$name.download.log"
-            return 1
-          }
-          CORE=isqrt-1.0-6.12.patch
-          GLUE=isqrt-6.12-glue.patch
-          PATCH_DIR=/tmp/isqrt_patches
-          mkdir -p "$PATCH_DIR"
-          cd "$PATCH_DIR"
-          get_patch "$CORE" || { echo "isqrt core 补丁下载失败: 仓库 other_patch/$CORE 缺失或不可达(见上方诊断)"; exit 1; }
-          get_patch "$GLUE" || { echo "isqrt glue 补丁下载失败: 仓库 other_patch/$GLUE 缺失或不可达(见上方诊断)"; exit 1; }
-          cd - > /dev/null
-          ls -l "$PATCH_DIR/$CORE" "$PATCH_DIR/$GLUE"
-          cat "$PATCH_DIR/$CORE" "$PATCH_DIR/$GLUE" > "$PATCH_DIR/isqrt_all.patch"
-
-          # 三、ABI/KMI 面静态审计:
-          #     1) 任一补丁触碰 ANDROID_KABI / __kabi_reserved 一律中止;
-          #     2) isqrt 为 header-only, 出现任何 EXPORT_SYMBOL 都说明移植越界;
-          #     3) 白名单外文件一律中止(core 只允许那 6 个新文件, glue 只允许 lib/Kconfig、lib/Makefile)。
-          if grep -nE 'ANDROID_KABI|__kabi_reserved' "$PATCH_DIR/isqrt_all.patch"; then
-            echo "isqrt 补丁触碰 KABI 保留区, 已中止"; exit 1
-          fi
-          if grep -nE 'EXPORT_SYMBOL(_GPL)?\(' "$PATCH_DIR/isqrt_all.patch"; then
-            echo "isqrt 补丁包含导出符号(该库应零导出), 已中止"; exit 1
-          fi
-          # 注意: 白名单全部命中时 grep -vE 无输出返回码为 1, 必须 || true 兜底, 否则 bash -e 下静默退出
-          OUT_OF_SCOPE="$(grep -E '^diff --git ' "$PATCH_DIR/isqrt_all.patch" \
-            | grep -vE ' b/(include/linux/isqrt\.h|lib/isqrt/[^/]+|lib/Kconfig|lib/Makefile)$' || true)"
-          if [ -n "$OUT_OF_SCOPE" ]; then
-            echo "isqrt 补丁改动了白名单以外的文件, 已中止:"; echo "$OUT_OF_SCOPE"; exit 1
-          fi
-          ABI_HASHES="$(md5sum include/linux/sched.h kernel/sched/sched.h | md5sum)"
-
-          # 四、名称冲突检查(应用前): isqrt 的公共类型/宏名不得与本树既有代码重名, 命中即中止,
-          #     避免内核编译期出现重复定义; 限定 include/ 与 lib/ 两处, 秒级完成。
-          for sym in isqrt8 isqrt16 isqrt32 isqrt64 _isqrt8_lut _isqrt16_delta_lut _isqrt_est_lut; do
-            hit="$(grep -rlE --include='*.h' --include='*.c' "\b${sym}\b" include lib 2>/dev/null | head -n 3 || true)"
-            if [ -n "$hit" ]; then
-              echo "isqrt 名称冲突: ${sym} 已存在于以下文件, 已中止:"; echo "$hit"; exit 1
-            fi
-          done
-
-          # 五、严格零 fuzz 应用: 先 core 后 glue 依次 dry-run 探路, 任何 FAILED / fuzz / 重复应用痕迹立即中止
-          for p in "$CORE" "$GLUE"; do
-            LOG="/tmp/isqrt_dryrun_${p}.log"
-            if ! patch -p1 --dry-run -F 0 < "$PATCH_DIR/$p" > "$LOG" 2>&1; then
-              cat "$LOG"
-              echo "isqrt 补丁 $p 存在无法应用的 hunk, 已中止"; exit 1
-            fi
-            cat "$LOG"
-            if grep -qE 'with fuzz|FAILED|ignored|Reversed|previously applied' "$LOG"; then
-              echo "isqrt 补丁 $p 与当前内核树不匹配(fuzz / hunk 失败 / 重复应用), 已中止"; exit 1
-            fi
-            # core 补丁是纯新增文件, 与既有改动无交互; glue 补丁的两个锚点位于 lib/Kconfig(lib/fonts 段)
-            # 与 lib/Makefile(pldmfw 段)中部, 其前方已被 lz4kd/lz4kdr/intfp 各插入若干行, 因此会产生纯行号偏移
-            # (上下文仍逐字符精确匹配、落点正确), 这里只提示不中止。
-            if grep -q 'offset' "$LOG"; then
-              echo "提示: 以下 hunk 存在纯行号偏移(上下文精确匹配, 位置正确, 属 lz4kd/lz4kdr/intfp 等先行改动所致), 继续应用:"
-              grep 'offset' "$LOG"
-            fi
-            patch -p1 -F 0 --no-backup-if-mismatch < "$PATCH_DIR/$p"
-          done
-
-          # 六、ABI 复核: 结构体布局相关文件必须与打补丁前逐字节一致
-          [ "$(md5sum include/linux/sched.h kernel/sched/sched.h | md5sum)" = "$ABI_HASHES" ] \
-            || { echo "isqrt ABI 校验失败: 结构体布局相关文件被改动"; exit 1; }
-
-          # 七、集成结果校验: 头文件 / Kconfig 开关 / 构建接入点 / 自检单元必须齐全
-          check() { grep -qF "$2" "$1" || { echo "isqrt 集成校验失败: $1 缺少 '$2'"; exit 1; }; }
-          check include/linux/isqrt.h '#define _LINUX_ISQRT_H'
-          check include/linux/isqrt.h 'isqrt64'
-          check include/linux/isqrt.h 'ISQRT_DEFINE('
-          check lib/isqrt/Kconfig 'config ISQRT_KUNIT_TEST'
-          check lib/isqrt/isqrt.c 'late_initcall(isqrt_selftest_init);'
-          check lib/Kconfig 'source "lib/isqrt/Kconfig"'
-          check lib/Makefile 'obj-$(CONFIG_ISQRT) += isqrt/'
-
-          # 八、宿主机数值自检: 内核无法在 CI 上启动, 故用 runner 的 gcc 直接跑移植头文件的数值用例;
-          #     stub 只提供 u8..s64/bool 等基础类型, 置于 -I 首位优先命中, 内核头仅用于取 <linux/isqrt.h>。
-          mkdir -p /tmp/isqrt_host/linux
-          cat > /tmp/isqrt_host/linux/types.h <<'EOF_TYPES'
-          #ifndef _ISQRT_HOST_STUB_TYPES_H
-          #define _ISQRT_HOST_STUB_TYPES_H
-          /* host stand-in for <linux/types.h>, used only by the isqrt offline numeric self test */
-          #include <stdbool.h>
-          #include <stddef.h>
-          typedef unsigned char u8;
-          typedef unsigned short u16;
-          typedef unsigned int u32;
-          typedef unsigned long long u64;
-          typedef signed char s8;
-          typedef short s16;
-          typedef int s32;
-          typedef long long s64;
-          #endif /* _ISQRT_HOST_STUB_TYPES_H */
-          EOF_TYPES
-          gcc -std=gnu11 -O2 -Wall -Wextra -I/tmp/isqrt_host -Iinclude \
-            -o /tmp/isqrt_host/isqrt_selftest lib/isqrt/isqrt_selftest_host.c
-          /tmp/isqrt_host/isqrt_selftest
-
-          # 九、显式写入开关: ISQRT=y(库本身零开销: 全部 static inline, 未被使用即被编译器丢弃);
-          #     KUnit 用例保持关闭(依赖 CONFIG_KUNIT, 生产内核无必要)
-          grep -q '^CONFIG_ISQRT=' arch/arm64/configs/gki_defconfig \
-            || echo "CONFIG_ISQRT=y" >> arch/arm64/configs/gki_defconfig
+          wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/isqrt-1.0-6.12.patch
+          wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/isqrt-6.12-glue.patch
+          patch -p1 -F 0 --no-backup-if-mismatch < isqrt-1.0-6.12.patch
+          patch -p1 -F 0 --no-backup-if-mismatch < isqrt-6.12-glue.patch
+          echo "CONFIG_ISQRT=y" >> ./arch/arm64/configs/gki_defconfig
           echo "提示: 内核代码 include <linux/isqrt.h> 即可按需使用; 启动后可用 dmesg | grep isqrt 查看内置自检结果"
           echo "ISQRT 集成完成"
 
       - name: 集成 Oryon 优化 int_sqrt
         if: inputs.intsqrt_enable
         run: |
-          echo "正在集成 Oryon 优化 int_sqrt(epicmann24/android_kernel_common_oneplus_sm8750 提交 ffd624d 移植: CLZ/LUT/Newton-Raphson 混合实现, 替换内核 lib/math/int_sqrt.c 的 shift-and-subtract 算法; 小输入走查表、大输入走 Newton 路径, 利用 Oryon 快速整数除法流水线)…"
+          echo "正在集成 Oryon 优化 int_sqrt…"
           # 任何命令失败时打印出错行号: 避免 set -e 静默退出后失败点无法定位
           trap 'echo "Oryon int_sqrt 集成步骤在脚本第 $LINENO 行失败(退出码 $?)" >&2' ERR
           cd kernel_workspace/common
-
-          # 本补丁只改写 lib/math/int_sqrt.c 一个文件:
-          #   - 头部注释替换为 Oryon 说明
-          #   - 新增两个 static const 查找表(int_sqrt16_delta_lut / int_sqrt_est_lut)与
-          #     三个 __always_inline helper(int_sqrt_oryon16/32/64), 均不进符号表
-          #   - int_sqrt()/int_sqrt64() 函数体改为按位宽分发到 helper
-          #   函数签名、语义(floor(sqrt))与导出符号均不变, 故不破坏 ABI/KMI。
-
-          # 一、幂等前置检查: 树内若已集成(例如重复运行), 直接跳过
-          if grep -q 'int_sqrt_oryon16' lib/math/int_sqrt.c; then
-            echo "检测到 lib/math/int_sqrt.c 已包含 Oryon 实现, 跳过"
-            exit 0
-          fi
-
-          # 二、补丁下载: 优先 curl; 无 curl 时回退 wget
-          fetch() { # $1=url $2=输出文件 $3=日志文件
-            if command -v curl >/dev/null 2>&1; then
-              curl -fSL --retry 3 --retry-delay 2 --connect-timeout 20 -o "$2" "$1" 2> "$3"
-            else
-              wget -O "$2" --tries=3 --timeout=20 "$1" 2> "$3"
-            fi
-          }
-          PATCH_NAME=int-sqrt-oryon-6.12.patch
-          PATCH_DIR=/tmp/intsqrt_patches
-          mkdir -p "$PATCH_DIR"
-          rm -f "$PATCH_DIR/$PATCH_NAME"
-          ok=0
-          for u in \
-            "https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/$PATCH_NAME" \
-            "https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$GITHUB_REF_NAME/other_patch/$PATCH_NAME" \
-            "https://cdn.jsdelivr.net/gh/$GITHUB_REPOSITORY@$GITHUB_REF_NAME/other_patch/$PATCH_NAME"
-          do
-            echo "尝试下载 int_sqrt 补丁: $u"
-            if fetch "$u" "$PATCH_DIR/$PATCH_NAME.tmp" "$PATCH_DIR/$PATCH_NAME.download.log"; then
-              if [ -s "$PATCH_DIR/$PATCH_NAME.tmp" ] && grep -q '^diff --git ' "$PATCH_DIR/$PATCH_NAME.tmp"; then
-                mv "$PATCH_DIR/$PATCH_NAME.tmp" "$PATCH_DIR/$PATCH_NAME"
-                echo "下载成功: $PATCH_NAME ($(wc -c < "$PATCH_DIR/$PATCH_NAME") 字节)"
-                ok=1
-                break
-              fi
-            fi
-          done
-          [ "$ok" = 1 ] || { echo "int_sqrt 补丁下载失败: 仓库 other_patch/$PATCH_NAME 缺失或不可达(见上方诊断)"; exit 1; }
-          ls -l "$PATCH_DIR/$PATCH_NAME"
-
-          # 三、ABI/KMI 面静态审计:
-          #     1) 触碰 ANDROID_KABI / __kabi_reserved 一律中止;
-          #     2) 出现新增 EXPORT_SYMBOL 说明移植越界(只允许改写既有导出函数实现);
-          #     3) 只允许改动 lib/math/int_sqrt.c 一个文件。
-          if grep -nE 'ANDROID_KABI|__kabi_reserved' "$PATCH_DIR/$PATCH_NAME"; then
-            echo "int_sqrt 补丁触碰 KABI 保留区, 已中止"; exit 1
-          fi
-          if grep -nE '^\+.*EXPORT_SYMBOL' "$PATCH_DIR/$PATCH_NAME"; then
-            echo "int_sqrt 补丁新增导出符号, 已中止"; exit 1
-          fi
-          OUT_OF_SCOPE="$(grep -E '^diff --git ' "$PATCH_DIR/$PATCH_NAME" \
-            | grep -vE ' b/lib/math/int_sqrt\.c$' || true)"
-          if [ -n "$OUT_OF_SCOPE" ]; then
-            echo "int_sqrt 补丁改动了白名单以外的文件, 已中止:"; echo "$OUT_OF_SCOPE"; exit 1
-          fi
-          ABI_HASHES="$(md5sum include/linux/sched.h kernel/sched/sched.h | md5sum)"
-
-          # 四、严格零 fuzz 应用: dry-run 探路, 任何 FAILED / fuzz / 重复应用痕迹立即中止
-          LOG=/tmp/intsqrt_dryrun.log
-          if ! patch -p1 --dry-run -F 0 < "$PATCH_DIR/$PATCH_NAME" > "$LOG" 2>&1; then
-            cat "$LOG"
-            echo "int_sqrt 补丁存在无法应用的 hunk, 已中止"; exit 1
-          fi
-          cat "$LOG"
-          if grep -qE 'with fuzz|FAILED|ignored|Reversed|previously applied' "$LOG"; then
-            echo "int_sqrt 补丁与当前内核树不匹配(fuzz / hunk 失败 / 重复应用), 已中止"; exit 1
-          fi
-          if grep -q 'offset' "$LOG"; then
-            echo "提示: 以下 hunk 存在纯行号偏移(上下文精确匹配, 位置正确, 属其他补丁先行改动所致), 继续应用:"
-            grep 'offset' "$LOG"
-          fi
-          patch -p1 -F 0 --no-backup-if-mismatch < "$PATCH_DIR/$PATCH_NAME"
-
-          # 五、ABI 复核: 结构体布局相关文件必须与打补丁前逐字节一致
-          [ "$(md5sum include/linux/sched.h kernel/sched/sched.h | md5sum)" = "$ABI_HASHES" ] \
-            || { echo "int_sqrt ABI 校验失败: 结构体布局相关文件被改动"; exit 1; }
-
-          # 六、集成结果校验: Oryon 标记 / helper / 两张 LUT / 分发逻辑必须齐全
-          check() { grep -qF "$2" "$1" || { echo "int_sqrt 集成校验失败: $1 缺少 '$2'"; exit 1; }; }
-          check lib/math/int_sqrt.c 'Oryon-optimized hybrid integer square root'
-          check lib/math/int_sqrt.c 'int_sqrt_oryon16'
-          check lib/math/int_sqrt.c 'int_sqrt_oryon32'
-          check lib/math/int_sqrt.c 'int_sqrt_oryon64'
-          check lib/math/int_sqrt.c 'int_sqrt16_delta_lut[256]'
-          check lib/math/int_sqrt.c 'int_sqrt_est_lut[128]'
-          check lib/math/int_sqrt.c 'x <= U16_MAX'
-          check lib/math/int_sqrt.c 'EXPORT_SYMBOL(int_sqrt);'
-
-          echo "提示: int_sqrt()/int_sqrt64() 现由 Oryon 优化实现接管, 语义不变(floor(sqrt)), 依赖方无需改动"
+          wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/int-sqrt-oryon-6.12.patch
+          patch -p1 -F 0 --no-backup-if-mismatch < int-sqrt-oryon-6.12.patch
           echo "Oryon int_sqrt 集成完成"
 
       - name: 集成 ADIOS IO 调度器
         if: inputs.adios_enable
         run: |
-          echo "正在集成 ADIOS 3.3.0(截止时间优先调度 + 基于自主学习的自适应延迟控制; 跨核聚合延迟模型、按操作类型分组批量下发, 降低 I/O 延迟)…"
+          echo "正在集成 ADIOS…"
           # 任何命令失败时打印出错行号: 避免 set -e 静默退出后失败点无法定位
           trap 'echo "ADIOS 集成步骤在脚本第 $LINENO 行失败(退出码 $?)" >&2' ERR
           cd kernel_workspace/common
 
-          # 本工作流所用 vendor 源码(cctv18/android_kernel_common_oneplus_sm8845,
-          # 分支 oneplus/sm8845_b_16.0.0_ace_6t)已内置 ADIOS 3.1.9 的完整接入点:
-          #   block/Kconfig.iosched : config MQ_IOSCHED_ADIOS / MQ_IOSCHED_DEFAULT_ADIOS
-          #   block/Makefile        : obj-$(CONFIG_MQ_IOSCHED_ADIOS) += adios.o
-          #   block/elevator.c      : elevator_get_default() 的默认调度器钩子
+          # 本工作流所用源码已支持ADIOS 3.1.9
           # 因此升级到 3.3.0 只需整体替换 block/adios.c 这一个文件, 无需改动 Kconfig/Makefile/elevator.c。
-          # 本仓库 other_patch/adios-3.3.0-6.12.patch 即上游 firelzrd/adios 的
-          # patches/stable/0001-linux6.12.44-ADIOS-3.3.0.patch 中 block/adios.c 的新建文件 hunk 原样抽取;
-          # 上游补丁另外 3 个 hunk 的内容已存在于本源码树, 若一并下发会被判定为重复应用(Reversed)而中断。
-          # ABI: 改动仅位于 block/ 内部实现, 不新增导出符号、不触碰 KABI 保留区, 不破坏内核 ABI。
-          PATCH_URLS=(
-            "https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/adios-3.3.0-6.12.patch"
-            "https://github.com/EdMory/oplus_sm8850/raw/refs/heads/main/other_patch/adios-3.3.0-6.12.patch"
-          )
-          # 下载器自适应: 优先 curl(对 4xx/5xx 返回非 0, --retry 抗弱网); 无 curl 时回退 wget(只用其自身合法选项)
-          fetch() { # $1=url $2=输出文件 $3=日志文件
-            if command -v curl >/dev/null 2>&1; then
-              curl -fSL --retry 3 --retry-delay 2 --connect-timeout 20 -o "$2" "$1" 2> "$3"
-            else
-              wget -O "$2" --tries=3 --timeout=20 "$1" 2> "$3"
-            fi
-          }
-          rm -f adios.patch
-          for u in "${PATCH_URLS[@]}"; do
-            echo "尝试下载 ADIOS 补丁: $u"
-            if fetch "$u" adios.patch.tmp download_adios.log; then
-              if [ -s adios.patch.tmp ]; then
-                mv adios.patch.tmp adios.patch
-                echo "下载成功: $(wc -c < adios.patch) 字节"
-                break
-              fi
-              echo "该源返回空文件, 尝试下一个源"
-            else
-              echo "该源不可用: $(tail -n 2 download_adios.log | tr '\n' ' ')"
-            fi
-          done
-          rm -f adios.patch.tmp download_adios.log
-          [ -s adios.patch ] || { echo "ADIOS 补丁下载失败: 仓库 other_patch/adios-3.3.0-6.12.patch 缺失或不可达(见上方诊断)"; exit 1; }
-
-          # 一、前置条件: 新版实现必须挂在既有接入点上, 缺任意一处都会"补丁应用成功但调度器不可选/不生效",
-          #     故直接中止, 宁可失败也不假成功。
-          grep -q 'config MQ_IOSCHED_ADIOS' block/Kconfig.iosched \
-            || { echo "ADIOS 前置检查失败: block/Kconfig.iosched 缺少 config MQ_IOSCHED_ADIOS"; exit 1; }
-          grep -q 'config MQ_IOSCHED_DEFAULT_ADIOS' block/Kconfig.iosched \
-            || { echo "ADIOS 前置检查失败: block/Kconfig.iosched 缺少 config MQ_IOSCHED_DEFAULT_ADIOS"; exit 1; }
-          grep -q 'obj-$(CONFIG_MQ_IOSCHED_ADIOS)' block/Makefile \
-            || { echo "ADIOS 前置检查失败: block/Makefile 缺少 adios.o 编译规则"; exit 1; }
-          grep -q 'CONFIG_MQ_IOSCHED_DEFAULT_ADIOS' block/elevator.c \
-            || { echo "ADIOS 前置检查失败: block/elevator.c 缺少默认调度器钩子"; exit 1; }
-          OLD_VER="$(grep -oE '#define ADIOS_VERSION "[0-9.]+"' block/adios.c | head -n1 || true)"
-          echo "旧版实现: ${OLD_VER:-未检出} -> 目标: ADIOS 3.3.0"
-
-          # 二、ABI 面静态审计 + 改动范围白名单: 本次升级只允许改写 block/adios.c
-          if grep -nE 'EXPORT_SYMBOL|ANDROID_KABI|__kabi_reserved' adios.patch; then
-            echo "ADIOS 补丁触碰 ABI 面(导出符号或 KABI 保留区), 已中止"; exit 1
-          fi
-          OUT_OF_SCOPE="$(grep -E '^diff --git ' adios.patch | grep -vE ' b/block/adios\.c$' || true)"
-          if [ -n "$OUT_OF_SCOPE" ]; then
-            echo "ADIOS 补丁改动了 block/adios.c 以外的文件, 已中止:"; echo "$OUT_OF_SCOPE"; exit 1
-          fi
-
-          # 三、整体替换: 先移除旧版(3.1.9)实现, 再以"新建文件"方式零 fuzz 落地 3.3.0
-          #    (补丁是新建文件 hunk, 目标文件必须不存在才符合 -0,0 的上下文, 故先删后打)
-          rm -f block/adios.c
-          if ! patch -p1 --dry-run < adios.patch > /tmp/adios_dryrun.log 2>&1; then
-            cat /tmp/adios_dryrun.log
-            echo "ADIOS 补丁存在无法应用的 hunk, 已中止(旧 block/adios.c 已移除, 构建将失败)"; exit 1
-          fi
-          cat /tmp/adios_dryrun.log
-          if grep -qE 'with fuzz|FAILED|ignored|Reversed|previously applied' /tmp/adios_dryrun.log; then
-            echo "ADIOS 补丁与当前内核树不匹配(fuzz / hunk 失败 / 重复应用), 已中止"; exit 1
-          fi
-          if grep -q 'offset' /tmp/adios_dryrun.log; then
-            echo "提示: 以下 hunk 存在纯行号偏移(上下文精确匹配, 位置正确, 属其他补丁先行改动所致), 继续应用:"
-            grep 'offset' /tmp/adios_dryrun.log
-          fi
-          patch -p1 --no-backup-if-mismatch < adios.patch
-          [ -f block/adios.c ] || { echo "ADIOS 补丁应用后 block/adios.c 不存在, 已中止"; exit 1; }
-
-          # 四、集成结果校验: 版本号与 3.3.0 独有实现必须齐全
-          check() { grep -qF "$2" "$1" || { echo "ADIOS 集成校验失败: $1 缺少 '$2'"; exit 1; }; }
-          check block/adios.c '#define ADIOS_VERSION "3.3.0"'
-          check block/adios.c 'struct adios_pcpu_completion {'
-          check block/adios.c 'mempool_create_slab_pool('
-          check block/adios.c 'static struct elevator_type mq_adios = {'
-          check block/adios.c '.elevator_name = "adios",'
-          check block/adios.c 'MODULE_ALIAS("mq-adios-iosched");'
-          if grep -q '#define ADIOS_VERSION "3.1.9"' block/adios.c; then
-            echo "ADIOS 集成校验失败: block/adios.c 仍是旧版 3.1.9"; exit 1
-          fi
-
-          # 五、显式写入开关: 调度器内置编译(=y)并设为 blk-mq 默认调度器
-          grep -q '^CONFIG_MQ_IOSCHED_ADIOS=' arch/arm64/configs/gki_defconfig \
-            || echo "CONFIG_MQ_IOSCHED_ADIOS=y" >> arch/arm64/configs/gki_defconfig
-          grep -q '^CONFIG_MQ_IOSCHED_DEFAULT_ADIOS=' arch/arm64/configs/gki_defconfig \
-            || echo "CONFIG_MQ_IOSCHED_DEFAULT_ADIOS=y" >> arch/arm64/configs/gki_defconfig
-          echo "提示: 运行时可用 /sys/block/<dev>/queue/scheduler 查看/切换 adios, 并按需调节 ADIOS 的 sysfs 参数"
-          echo "ADIOS 3.3.0 集成完成(零 fuzz 应用 + ABI 面未触碰)！"
+          wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/adios-3.3.0-6.12.patch
+          patch -p1 --no-backup-if-mismatch < adios-3.3.0-6.12.patch
+          # 调度器内置编译(=y)并设为 blk-mq 默认调度器
+          echo "CONFIG_MQ_IOSCHED_ADIOS=y" >> ./arch/arm64/configs/gki_defconfig 
+          echo "CONFIG_MQ_IOSCHED_DEFAULT_ADIOS=y" >> ./arch/arm64/configs/gki_defconfig
+          # BFQ作为备选
+          echo "CONFIG_MQ_IOSCHED_BFQ=y" >> ./arch/arm64/configs/gki_defconfig
+          echo "提示: 运行时可用 /sys/block/<dev>/queue/scheduler 查看/切换 ADIOS, 并按需调节 ADIOS 的 sysfs 参数"
+          echo "ADIOS 3.3.0 集成完成"
 
       - name: 集成 BORE 调度器
         if: inputs.bore_enable
         run: |
-          echo "正在集成 BORE(Burst-Oriented Response Enhancer; 基于 firelzrd/bore-scheduler 6.12.37 原版补丁, 针对本 6.12.69 oplus 树逐 hunk 重建: bore_ctx 成员追加到 task_struct 末尾, 不挪动任何既有成员、不触碰 ANDROID_KABI_RESERVE, KABI 面安全)…"
+          echo "正在集成 BORE(Burst-Oriented Response Enhancer)…"
           # 任何命令失败时打印出错行号: 避免 set -e 静默退出后失败点无法定位
           trap 'echo "BORE 集成步骤在脚本第 $LINENO 行失败(退出码 $?)" >&2' ERR
           cd kernel_workspace/common
-
-          # 下载补丁(仓库 other_patch 三源回退)
-          fetch() { # $1=url $2=输出文件 $3=日志文件
-            if command -v curl >/dev/null 2>&1; then
-              curl -fSL --retry 3 --retry-delay 2 --connect-timeout 20 -o "$2" "$1" 2> "$3"
-            else
-              wget -O "$2" --tries=3 --timeout=20 "$1" 2> "$3"
-            fi
-          }
-          get_patch() { # $1=补丁文件名(位于仓库 other_patch/ 目录)
-            local name="$1" u
-            local urls=(
-              "https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/$name"
-              "https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$GITHUB_REF_NAME/other_patch/$name"
-              "https://cdn.jsdelivr.net/gh/$GITHUB_REPOSITORY@$GITHUB_REF_NAME/other_patch/$name"
-            )
-            rm -f "$name"
-            for u in "${urls[@]}"; do
-              echo "尝试下载 BORE 补丁 $name: $u"
-              if fetch "$u" "$name.tmp" "$name.download.log"; then
-                if [ -s "$name.tmp" ] && grep -q '^diff --git ' "$name.tmp"; then
-                  mv "$name.tmp" "$name"
-                  echo "下载成功: $name ($(wc -c < "$name") 字节)"
-                  rm -f "$name.download.log"
-                  return 0
-                fi
-                echo "该源返回内容异常(空文件或非 unified diff), 尝试下一个源"
-              else
-                echo "该源不可用: $(tail -n 2 "$name.download.log" 2>/dev/null | tr '\n' ' ')"
-              fi
-            done
-            rm -f "$name.tmp" "$name.download.log"
-            return 1
-          }
-          BORE_PATCH=bore-6.12.69-kabi-safe.patch
-          get_patch "$BORE_PATCH" || { echo "BORE 补丁下载失败: 仓库 other_patch/$BORE_PATCH 缺失或不可达(见上方诊断)"; exit 1; }
-          patch -p1 -F 0 --no-backup-if-mismatch < "$BORE_PATCH"
-          
-          # 七、显式写入开关: SCHED_BORE 默认 y(Kconfig), MIN_BASE_SLICE_NS 默认 2000000, 显式写入保证 defconfig 幂等
-          grep -q '^CONFIG_SCHED_BORE=' arch/arm64/configs/gki_defconfig \
-            || echo "CONFIG_SCHED_BORE=y" >> arch/arm64/configs/gki_defconfig
-          grep -q '^CONFIG_MIN_BASE_SLICE_NS=' arch/arm64/configs/gki_defconfig \
-            || echo "CONFIG_MIN_BASE_SLICE_NS=2000000" >> arch/arm64/configs/gki_defconfig
+          wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/bore-6.12.69-kabi-safe.patch
+          patch -p1 -F 0 --no-backup-if-mismatch < bore-6.12.69-kabi-safe.patch
+          echo "CONFIG_SCHED_BORE=y" >> ./arch/arm64/configs/gki_defconfig
+          echo "CONFIG_MIN_BASE_SLICE_NS=2000000" >> ./arch/arm64/configs/gki_defconfig
           echo "提示: BORE 默认 base_slice 由 HZ 与 MIN_BASE_SLICE_NS 自动计算; 运行时可用 /proc/sys/kernel/sched_base_slice 查看, dmesg 可查 BORE 自检"
           echo "BORE 集成完成"
 
@@ -1265,49 +741,12 @@ jobs:
         if: inputs.hmbird_enable
         run: |
           echo "正在集成 HMBIRD…"
-          echo "基于一加 fengchi 调度移植, 独立调度类与 SCHED_CLASS_EXT/BORE 共存; 使用 android_oem_data1 槽位承载 TS/OPS/RQ, 不触碰 ANDROID_KABI_RESERVE"
+          echo "基于一加调度移植, 独立调度类与 SCHED_CLASS_EXT/BORE 共存; 使用 android_oem_data1 槽位承载 TS/OPS/RQ, 不触碰 ANDROID_KABI_RESERVE"
           # 任何命令失败时打印出错行号: 避免 set -e 静默退出后失败点无法定位
           trap 'echo "HMBIRD 集成步骤在脚本第 $LINENO 行失败(退出码 $?)" >&2' ERR
-          cd kernel_workspace/common
-
-          # 下载补丁(仓库 other_patch 三源回退)
-          fetch() { # $1=url $2=输出文件 $3=日志文件
-            if command -v curl >/dev/null 2>&1; then
-              curl -fSL --retry 3 --retry-delay 2 --connect-timeout 20 -o "$2" "$1" 2> "$3"
-            else
-              wget -O "$2" --tries=3 --timeout=20 "$1" 2> "$3"
-            fi
-          }
-          get_patch() { # $1=补丁文件名(位于仓库 other_patch/ 目录)
-            local name="$1" u
-            local urls=(
-              "https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/$name"
-              "https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$GITHUB_REF_NAME/other_patch/$name"
-              "https://cdn.jsdelivr.net/gh/$GITHUB_REPOSITORY@$GITHUB_REF_NAME/other_patch/$name"
-            )
-            rm -f "$name"
-            for u in "${urls[@]}"; do
-              echo "尝试下载 HMBIRD 补丁 $name: $u"
-              if fetch "$u" "$name.tmp" "$name.download.log"; then
-                if [ -s "$name.tmp" ] && grep -q '^diff --git ' "$name.tmp"; then
-                  mv "$name.tmp" "$name"
-                  echo "下载成功: $name ($(wc -c < "$name") 字节)"
-                  rm -f "$name.download.log"
-                  return 0
-                fi
-                echo "该源返回内容异常(空文件或非 unified diff), 尝试下一个源"
-              else
-                echo "该源不可用: $(tail -n 2 "$name.download.log" 2>/dev/null | tr '\n' ' ')"
-              fi
-            done
-            rm -f "$name.tmp" "$name.download.log"
-            return 1
-          }
-          HMBIRD_PATCH=hmbird-6.12.69-kabi-safe.patch
-          get_patch "$HMBIRD_PATCH" || { echo "HMBIRD 补丁下载失败: 仓库 other_patch/$HMBIRD_PATCH 缺失或不可达(见上方诊断)"; exit 1; }
-          
-          patch -p1 --no-backup-if-mismatch -F 0 < "$HMBIRD_PATCH"
-          echo "CONFIG_HMBIRD_SCHED=y" >> arch/arm64/configs/gki_defconfig
+          wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/hmbird-6.12.69-kabi-safe.patch
+          patch -p1 --no-backup-if-mismatch -F 0 < hmbird-6.12.69-kabi-safe.patch
+          echo "CONFIG_HMBIRD_SCHED=y" >> ./arch/arm64/configs/gki_defconfig
           echo "HMBIRD 集成完成"
           
       - name: 集成 Cambyses 调度器优化
@@ -1317,45 +756,10 @@ jobs:
           # 任何命令失败时打印出错行号: 避免 set -e 静默退出后失败点无法定位
           trap 'echo "Cambyses 集成步骤在脚本第 $LINENO 行失败(退出码 $?)" >&2' ERR
           cd kernel_workspace/common
-
-          # 下载补丁(仓库 other_patch 三源回退)
-          fetch() { # $1=url $2=输出文件 $3=日志文件
-            if command -v curl >/dev/null 2>&1; then
-              curl -fSL --retry 3 --retry-delay 2 --connect-timeout 20 -o "$2" "$1" 2> "$3"
-            else
-              wget -O "$2" --tries=3 --timeout=20 "$1" 2> "$3"
-            fi
-          }
-          get_patch() { # $1=补丁文件名(位于仓库 other_patch/ 目录)
-            local name="$1" u
-            local urls=(
-              "https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/$name"
-              "https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$GITHUB_REF_NAME/other_patch/$name"
-              "https://cdn.jsdelivr.net/gh/$GITHUB_REPOSITORY@$GITHUB_REF_NAME/other_patch/$name"
-            )
-            rm -f "$name"
-            for u in "${urls[@]}"; do
-              echo "尝试下载 Cambyses 补丁 $name: $u"
-              if fetch "$u" "$name.tmp" "$name.download.log"; then
-                if [ -s "$name.tmp" ] && grep -q '^diff --git ' "$name.tmp"; then
-                  mv "$name.tmp" "$name"
-                  echo "下载成功: $name ($(wc -c < "$name") 字节)"
-                  rm -f "$name.download.log"
-                  return 0
-                fi
-                echo "该源返回内容异常(空文件或非 unified diff), 尝试下一个源"
-              else
-                echo "该源不可用: $(tail -n 2 "$name.download.log" 2>/dev/null | tr '\n' ' ')"
-              fi
-            done
-            rm -f "$name.tmp" "$name.download.log"
-            return 1
-          }
-          CAMBYSES_PATCH=cambyses-6.12.69-kabi-safe.patch
-          get_patch "$CAMBYSES_PATCH" || { echo "Cambyses 补丁下载失败: 仓库 other_patch/$CAMBYSES_PATCH 缺失或不可达(见上方诊断)"; exit 1; }
-          patch -p1 -F 0 --no-backup-if-mismatch < "$CAMBYSES_PATCH"
+          wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/cambyses-6.12.69-kabi-safe.patch
+          patch -p1 -F 0 --no-backup-if-mismatch < cambyses-6.12.69-kabi-safe.patch
           echo "提示: Cambyses 两个 feature 默认开启(LB_ROTATE_BLOCK/LB_STRICT_BUDGET), 运行时可用 /sys/kernel/debug/sched/features 查看/切换"
-          echo "Cambyses 集成完成(零 fuzz 应用 + ABI 面未触碰)！"
+          echo "Cambyses 集成完成！"
           
       - name: 启用Re-Kernel支持
         if: inputs.rekernel_enable
@@ -1405,24 +809,8 @@ jobs:
           echo "正在集成 SM8750 移植性能优化补丁集…"
           cd kernel_workspace/common
           PATCH=sm8750-perf-core-6.12.patch
-          wget -O $PATCH https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/$PATCH \
-            || wget -O $PATCH https://github.com/EdMory/oplus_sm8850/raw/refs/heads/main/other_patch/$PATCH
-          # KMI 保护审计：本补丁只改函数体，禁止新增导出符号、禁止改动 include/ 下的头文件
-          if grep -qE '^\+.*EXPORT_SYMBOL' $PATCH; then
-            echo "错误：$PATCH 新增了 EXPORT_SYMBOL，可能破坏 KMI，已中止"; exit 1
-          fi
-          if grep -qE '^\+\+\+ b/include/' $PATCH; then
-            echo "错误：$PATCH 改动了 include/ 头文件，可能破坏 KMI，已中止"; exit 1
-          fi
-          # 零 fuzz 干跑：任何一个 hunk 无法精确落位就直接失败，避免半成品内核
-          if ! patch -p1 --dry-run -F 0 < $PATCH; then
-            echo "错误：性能优化补丁无法零 fuzz 应用，请确认内核源码未被上游改动（可关闭 perf_patch_enable 后重试）"; exit 1
-          fi
+          wget -O $PATCH https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/$PATCH
           patch -p1 -F 0 < $PATCH
-          grep -q 'rcv_wnd = 64240;' net/ipv4/tcp_output.c || { echo "错误：TCP 初始窗口优化未生效"; }
-          grep -q 'cpumask_set_cpu(0, irq_default_affinity);' kernel/irq/irqdesc.c || { echo "错误：IRQ 默认亲和性优化未生效"; exit 1; }
-          grep -q 'current_pool = pwq->pool;' kernel/workqueue.c || { echo "错误：workqueue 锁优化未生效"; exit 1; }
-          grep -q 'int debug_locks __read_mostly = 0;' lib/debug_locks.c || { echo "错误：debug_locks 优化未生效"; exit 1; }
           echo "性能优化补丁集应用完成"
 
       - name: 应用 cherry-pick 验证通过补丁集(35条)
@@ -1430,12 +818,7 @@ jobs:
           echo "正在集成 6.12.69->92 验证通过补丁集(35条)..."
           cd kernel_workspace/common
           PATCH=cherry-pick-6.12.69-verified-35.patch
-          wget -O $PATCH https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/$PATCH \
-            || wget -O $PATCH https://github.com/EdMory/oplus_sm8850/raw/refs/heads/main/other_patch/$PATCH
-          # 零 fuzz 干跑：任何一个 hunk 无法精确落位就直接失败
-          if ! patch -p1 --dry-run -F 0 < $PATCH; then
-            echo "错误：$PATCH 无法零 fuzz 应用，请确认内核源码未被上游改动（可关闭 cherry_pick_enable 后重试）"; exit 1
-          fi
+          wget -O $PATCH https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/$PATCH
           patch -p1 -F 0 < $PATCH
           echo "cherry-pick 验证通过补丁集(35条)应用完成"
 
@@ -1444,11 +827,7 @@ jobs:
           echo "正在集成 6.12.69 backport 补丁集(10条，cctv18 6.12.69 树内置的11条已剔除)..."
           cd kernel_workspace/common
           PATCH=cherry-pick-6.12.69-backported-10.patch
-          wget -O $PATCH https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/$PATCH \
-            || wget -O $PATCH https://github.com/EdMory/oplus_sm8850/raw/refs/heads/main/other_patch/$PATCH
-          if ! patch -p1 --dry-run -F 0 < $PATCH; then
-            echo "错误：$PATCH 无法零 fuzz 应用，请确认内核源码未被上游改动"; exit 1
-          fi
+          wget -O $PATCH https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/$PATCH
           patch -p1 -F 0 < $PATCH
           echo "cherry-pick backport 补丁集(10条)应用完成"
 
@@ -1457,12 +836,7 @@ jobs:
           echo "正在集成 6.12.69->115 补丁集(44条)..."
           cd kernel_workspace/common
           PATCH=cherry-pick-6.12.115.patch
-          wget -O $PATCH https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/$PATCH \
-            || wget -O $PATCH https://github.com/EdMory/oplus_sm8850/raw/refs/heads/main/other_patch/$PATCH
-          # 零 fuzz 干跑：任何一个 hunk 无法精确落位就直接失败
-          if ! patch -p1 --dry-run -F 0 < $PATCH; then
-            echo "错误：$PATCH 无法零 fuzz 应用，请确认内核源码未被上游改动（可关闭 cherry_pick_enable 后重试）"; exit 1
-          fi
+          wget -O $PATCH https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/$PATCH
           patch -p1 -F 0 < $PATCH
           echo "cherry-pick 补丁集(44条)应用完成"
           

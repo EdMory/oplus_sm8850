@@ -6584,62 +6584,7 @@ index 000000000000..aabbccddee00
 diff --git a/include/linux/ksm.h b/include/linux/ksm.h
 --- a/include/linux/ksm.h
 +++ b/include/linux/ksm.h
-@@ -26,6 +26,11 @@
- 
- int __ksm_enter(struct mm_struct *mm);
- void __ksm_exit(struct mm_struct *mm);
-+
-+void rmap_walk_ksm(struct folio *folio, struct rmap_walk_control *rwc);
-+void folio_migrate_ksm(struct folio *newfolio, struct folio *folio);
-+
-+#ifdef CONFIG_KSM_LEGACY
- /*
-  * To identify zeropages that were mapped by KSM, we reuse the dirty bit
-  * in the PTE. If the PTE is dirty, the zeropage was mapped by KSM when
-@@ -101,6 +106,42 @@
- 		struct list_head *to_kill, int force_early);
- long ksm_process_profit(struct mm_struct *);
- 
-+#elif defined(CONFIG_UKSM)
-+
-+struct folio *ksm_might_need_to_copy(struct folio *folio,
-+			struct vm_area_struct *vma, unsigned long addr);
-+
-+void collect_procs_ksm(struct folio *folio, struct page *page,
-+		struct list_head *to_kill, int force_early);
-+
-+long ksm_process_profit(struct mm_struct *);
-+
-+static inline void ksm_might_unmap_zero_page(struct mm_struct *mm, pte_t pte)
-+{
-+}
-+
-+static inline long mm_ksm_zero_pages(struct mm_struct *mm)
-+{
-+	return 0;
-+}
-+
-+static inline int ksm_fork(struct mm_struct *mm, struct mm_struct *oldmm)
-+{
-+	return 0;
-+}
-+
-+static inline int ksm_execve(struct mm_struct *mm)
-+{
-+	return 0;
-+}
-+
-+static inline void ksm_exit(struct mm_struct *mm)
-+{
-+}
-+#endif /* !CONFIG_UKSM */
-+
-+
-+
- #else  /* !CONFIG_KSM */
- 
- static inline void ksm_add_vma(struct vm_area_struct *vma)
-@@ -158,4 +199,6 @@
+@@ -158,4 +158,6 @@
  #endif /* CONFIG_MMU */
  #endif /* !CONFIG_KSM */
  
@@ -6673,44 +6618,29 @@ diff --git a/lib/Makefile b/lib/Makefile
 diff --git a/mm/Kconfig b/mm/Kconfig
 --- a/mm/Kconfig
 +++ b/mm/Kconfig
-@@ -739,6 +739,28 @@
+@@ -739,6 +739,15 @@
  	  See Documentation/mm/ksm.rst for more information: KSM is inactive
  	  until a program has madvised that an area is MADV_MERGEABLE, and
  	  root has set /sys/kernel/mm/ksm/run to 1 (if CONFIG_SYSFS is set).
-+choice
-+	prompt "Choose UKSM/KSM strategy"
-+	default UKSM
-+	depends on KSM
-+	help
-+	  This option allows to select a UKSM/KSM stragety.
 +
 +config UKSM
-+	bool "Ultra-KSM for page merging"
++	bool "Ultra-KSM: automatic full-system page merging"
 +	depends on KSM
 +	help
-+	UKSM is inspired by the Linux kernel project - KSM(Kernel Same
-+	page Merging), but with a fundamentally rewritten core algorithm.
-+	For more information, please goto its project page.
-+	(github.com/dolohow/uksm)
-+
-+config KSM_LEGACY
-+	bool "Legacy KSM implementation"
-+	depends on KSM
-+	help
-+	The legacy KSM implementation from Red Hat.
-+endchoice
++	  UKSM (Ultra KSM) adds automatic anonymous page deduplication
++	  for all processes without requiring madvise(MADV_MERGEABLE).
++	  It runs as a background kernel thread (uksmd) alongside the
++	  existing KSM daemon. KSM must be enabled.
  
  config DEFAULT_MMAP_MIN_ADDR
  	int "Low address space to protect from user allocation"
 diff --git a/mm/Makefile b/mm/Makefile
 --- a/mm/Makefile
 +++ b/mm/Makefile
-@@ -84,7 +84,8 @@
- obj-$(CONFIG_SPARSEMEM)	+= sparse.o
+@@ -85,6 +85,7 @@
  obj-$(CONFIG_SPARSEMEM_VMEMMAP) += sparse-vmemmap.o
  obj-$(CONFIG_MMU_NOTIFIER) += mmu_notifier.o
--obj-$(CONFIG_KSM) += ksm.o
-+obj-$(CONFIG_KSM_LEGACY) += ksm.o
+ obj-$(CONFIG_KSM) += ksm.o
 +obj-$(CONFIG_UKSM) += uksm.o
  obj-$(CONFIG_PAGE_POISONING) += page_poison.o
  obj-$(CONFIG_KASAN)	+= kasan/

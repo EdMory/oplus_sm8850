@@ -6387,7 +6387,6 @@ index 000000000000..aabbccddee00
 +#ifndef CONFIG_KSM
 +int ksm_madvise(struct vm_area_struct *vma, unsigned long start,
 +		unsigned long end, int advice, unsigned long *vm_flags)
-+#endif /* !CONFIG_KSM */
 +{
 +	int err;
 +
@@ -6412,12 +6411,12 @@ index 000000000000..aabbccddee00
 +
 +	return 0;
 +}
++#endif /* !CONFIG_KSM */
 +
 +/* Common interface to ksm, actually the same. */
 +#ifndef CONFIG_KSM
 +struct folio *ksm_might_need_to_copy(struct folio *folio,
 +			struct vm_area_struct *vma, unsigned long addr)
-+#endif /* !CONFIG_KSM */
 +{
 +	struct page *page = folio_page(folio, 0);
 +	struct anon_vma *anon_vma = folio_anon_vma(folio);
@@ -6459,6 +6458,7 @@ index 000000000000..aabbccddee00
 +
 +	return new_folio;
 +}
++#endif /* !CONFIG_KSM */
 +
 +/* Copied from mm/ksm.c and required from 5.1 */
 +#ifdef UNDEFINED
@@ -6584,9 +6584,9 @@ index 000000000000..aabbccddee00
 +#ifndef CONFIG_KSM
 +void collect_procs_ksm(struct folio *folio, struct page *page,
 +		struct list_head *to_kill, int force_early)
-+#endif /* !CONFIG_KSM */
 +{
 +}
++#endif /* !CONFIG_KSM */
 +
 +#ifndef CONFIG_KSM
 +long ksm_process_profit(struct mm_struct *mm)

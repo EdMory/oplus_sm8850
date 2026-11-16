@@ -701,6 +701,8 @@ jobs:
 
           # 本工作流所用源码已支持ADIOS 3.1.9
           # 因此升级到 3.3.0 只需整体替换 block/adios.c 这一个文件, 无需改动 Kconfig/Makefile/elevator.c。
+          # 先移除旧版(3.1.9)实现, 再以"新建文件"方式落地 3.3.0
+          rm -f block/adios.c
           wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/adios-3.3.0-6.12.patch
           patch -p1 --no-backup-if-mismatch < adios-3.3.0-6.12.patch
           # 调度器内置编译(=y)并设为 blk-mq 默认调度器

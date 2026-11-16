@@ -184,8 +184,8 @@ index 000000000000..aabbccddee00
 +#include <linux/rmap.h>
 +#include <linux/sched.h>
 +
-+extern unsigned long zero_pfn;
-+extern unsigned long uksm_zero_pfn;
++extern unsigned long zero_pfn __read_mostly;
++extern unsigned long uksm_zero_pfn __read_mostly;
 +extern struct page *empty_uksm_zero_page;
 +
 +/* must be done before linked to mm */
@@ -978,7 +978,7 @@ index 000000000000..aabbccddee00
 +#else
 +static int is_full_zero(const void *s1, size_t len)
 +{
-+	unsigned long *src = s1;
++	const unsigned long *src = s1;
 +	int i;
 +
 +	len /= sizeof(*src);
@@ -6537,7 +6537,7 @@ index 000000000000..aabbccddee00
 +{
 +}
 +
-+long ksm_process_profit(struct mm_struct *)
++long ksm_process_profit(struct mm_struct *mm)
 +{
 +	return 0;
 +}

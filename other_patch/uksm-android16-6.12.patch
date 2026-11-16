@@ -3,7 +3,7 @@ From: UKSM Android Port <uksm-port@android16-6.12>
 Date: Sun, 16 Nov 2026 00:00:00 +0800
 Subject: [PATCH] uksm: port to android16-6.12.69 GKI without breaking KABI
 
-Uses ANDROID_KABI_USE(1) to store uksm_vma_slot in vm_area_struct.
+Uses external hash table for vma->slot mapping (zero vm_area_struct changes).
 ---
 diff --git a/Documentation/vm/uksm.txt b/Documentation/vm/uksm.txt
 new file mode 100644
@@ -165,7 +165,7 @@ new file mode 100644
 index 000000000000..aabbccddee00
 --- /dev/null
 +++ b/include/linux/uksm.h
-@@ -0,0 +1,149 @@
+@@ -0,0 +1,150 @@
 +#ifndef __LINUX_UKSM_H
 +#define __LINUX_UKSM_H
 +/*
@@ -191,6 +191,7 @@ index 000000000000..aabbccddee00
 +/* must be done before linked to mm */
 +extern void uksm_add_vma_new(struct vm_area_struct *vma, const char *where);
 +extern void uksm_remove_vma(struct vm_area_struct *vma, const char *where);
++extern struct vma_slot *uksm_slot_lookup(struct vm_area_struct *vma);
 +
 +#define UKSM_SLOT_NEED_SORT	(1 << 0)
 +#define UKSM_SLOT_NEED_RERAND	(1 << 1)
@@ -240,14 +241,14 @@ index 000000000000..aabbccddee00
 +
 +static inline void uksm_cow_page(struct vm_area_struct *vma, struct page *page)
 +{
-+	if (vma->uksm_vma_slot && PageKsm(page))
-+		vma->uksm_vma_slot->pages_cowed++;
++	if (uksm_slot_lookup(vma) && PageKsm(page))
++		uksm_slot_lookup(vma)->pages_cowed++;
 +}
 +
 +static inline void uksm_cow_pte(struct vm_area_struct *vma, pte_t pte)
 +{
-+	if (vma->uksm_vma_slot && pte_pfn(pte) == uksm_zero_pfn)
-+		vma->uksm_vma_slot->pages_cowed++;
++	if (uksm_slot_lookup(vma) && pte_pfn(pte) == uksm_zero_pfn)
++		uksm_slot_lookup(vma)->pages_cowed++;
 +}
 +
 +static inline int uksm_flags_can_scan(unsigned long vm_flags)
@@ -802,7 +803,7 @@ new file mode 100644
 index 000000000000..aabbccddee00
 --- /dev/null
 +++ b/mm/uksm.c
-@@ -0,0 +1,5745 @@
+@@ -0,0 +1,5842 @@
 +/*
 + * Ultra KSM. Copyright (C) 2011-2012 Nai Xia
 + *
@@ -1391,6 +1392,30 @@ index 000000000000..aabbccddee00
 +struct list_head vma_slot_del = LIST_HEAD_INIT(vma_slot_del);
 +static DEFINE_SPINLOCK(vma_slot_list_lock);
 +
++/* External vma->slot hash table (avoids touching vm_area_struct/KABI) */
++#define UKSM_VMA_HASH_BITS 8
++#define UKSM_VMA_HASH_SIZE (1 << UKSM_VMA_HASH_BITS)
++static struct hlist_head uksm_vma_hash[UKSM_VMA_HASH_SIZE];
++static DEFINE_SPINLOCK(uksm_vma_hash_lock);
++
++static inline unsigned int uksm_vma_hash_key(const struct vm_area_struct *vma)
++{
++	return hash_ptr((void *)vma, UKSM_VMA_HASH_BITS);
++}
++
++struct vma_slot *uksm_slot_lookup(struct vm_area_struct *vma)
++{
++	struct vma_slot *slot;
++	unsigned int key = uksm_vma_hash_key(vma);
++
++	hlist_for_each_entry(slot, &uksm_vma_hash[key], hash_node)
++		if (slot->vma == vma)
++			return slot;
++	return NULL;
++}
++EXPORT_SYMBOL_GPL(uksm_slot_lookup);
++
++
 +/* The unstable tree heads */
 +static struct rb_root root_unstable_tree = RB_ROOT;
 +
@@ -1831,6 +1856,11 @@ index 000000000000..aabbccddee00
 +	rmap_item->address &= PAGE_MASK;
 +	rmap_item->hash_max = 0;
 +
++	if (slot) {
++		spin_lock(&uksm_vma_hash_lock);
++		hlist_del_init(&slot->hash_node);
++		spin_unlock(&uksm_vma_hash_lock);
++	}
 +out:
 +	cond_resched();		/* we're called from many long loops */
 +}
@@ -1894,13 +1924,13 @@ index 000000000000..aabbccddee00
 +	unsigned long pages = 0;
 +	unsigned long vm_pages = 0;
 +
-+	if (!vma->uksm_vma_slot)
++	if (!uksm_slot_lookup(vma))
 +		return;
 +
 +	vm_pages = vma_pages(vma);
 +
 +	spin_lock(&vma_slot_list_lock);
-+	slot = vma->uksm_vma_slot;
++	slot = uksm_slot_lookup(vma);
 +	if (!slot) {
 +		pr_warn("==> uksm_remove_vma: no slot, vma = %p\n", vma);
 +		goto out;
@@ -1922,8 +1952,12 @@ index 000000000000..aabbccddee00
 +	}
 +	BUG_ON(pages != vm_pages);
 +
++	if (slot) {
++		spin_lock(&uksm_vma_hash_lock);
++		hlist_del_init(&slot->hash_node);
++		spin_unlock(&uksm_vma_hash_lock);
++	}
 +out:
-+	vma->uksm_vma_slot = NULL;
 +	spin_unlock(&vma_slot_list_lock);
 +}
 +
@@ -2068,17 +2102,21 @@ index 000000000000..aabbccddee00
 +	unsigned long vm_pages = vma_pages(vma);
 +
 +	if (!vma_can_enter(vma)) {
-+		vma->uksm_vma_slot = NULL;
 +		return;
 +	}
 +
 +	slot = alloc_vma_slot();
 +	if (!slot) {
-+		vma->uksm_vma_slot = NULL;
 +		return;
 +	}
 +
-+	vma->uksm_vma_slot = slot;
++	/* Store vma->slot in hash table (no KABI field used) */
++	{
++		unsigned int _k = uksm_vma_hash_key(vma);
++		spin_lock(&uksm_vma_hash_lock);
++		hlist_add_head(&slot->hash_node, &uksm_vma_hash[_k]);
++		spin_unlock(&uksm_vma_hash_lock);
++	}
 +	new_flags |= VM_MERGEABLE;
 +	vm_flags_reset(vma, new_flags);
 +	slot->vma = vma;
@@ -2400,6 +2438,11 @@ index 000000000000..aabbccddee00
 +	page_vma_mapped_walk_done(&pvmw);
 +out_mn:
 +	mmu_notifier_invalidate_range_end(&range);
++	if (slot) {
++		spin_lock(&uksm_vma_hash_lock);
++		hlist_del_init(&slot->hash_node);
++		spin_unlock(&uksm_vma_hash_lock);
++	}
 +out:
 +	return err;
 +}
@@ -2489,6 +2532,11 @@ index 000000000000..aabbccddee00
 +	err = 0;
 +out_mn:
 +	mmu_notifier_invalidate_range_end(&range);
++	if (slot) {
++		spin_lock(&uksm_vma_hash_lock);
++		hlist_del_init(&slot->hash_node);
++		spin_unlock(&uksm_vma_hash_lock);
++	}
 +out:
 +	return err;
 +}
@@ -2625,6 +2673,11 @@ index 000000000000..aabbccddee00
 +
 +out_unlock:
 +	unlock_page(page);
++	if (slot) {
++		spin_lock(&uksm_vma_hash_lock);
++		hlist_del_init(&slot->hash_node);
++		spin_unlock(&uksm_vma_hash_lock);
++	}
 +out:
 +	return err;
 +}
@@ -2683,6 +2736,11 @@ index 000000000000..aabbccddee00
 +
 +	pte_unmap_unlock(ptep, ptl);
 +	err = 0;
++	if (slot) {
++		spin_lock(&uksm_vma_hash_lock);
++		hlist_del_init(&slot->hash_node);
++		spin_unlock(&uksm_vma_hash_lock);
++	}
 +out:
 +	return err;
 +}
@@ -2807,6 +2865,11 @@ index 000000000000..aabbccddee00
 +
 +out_unlock:
 +	unlock_page(page);
++	if (slot) {
++		spin_lock(&uksm_vma_hash_lock);
++		hlist_del_init(&slot->hash_node);
++		spin_unlock(&uksm_vma_hash_lock);
++	}
 +out:
 +	return err;
 +}
@@ -3291,6 +3354,11 @@ index 000000000000..aabbccddee00
 +		*success1 = *success2 = 1;
 +	}
 +
++	if (slot) {
++		spin_lock(&uksm_vma_hash_lock);
++		hlist_del_init(&slot->hash_node);
++		spin_unlock(&uksm_vma_hash_lock);
++	}
 +out:
 +	return stable_node;
 +}
@@ -3614,6 +3682,11 @@ index 000000000000..aabbccddee00
 +		goto out;
 +
 +	break_ksm(vma, addr, false);
++	if (slot) {
++		spin_lock(&uksm_vma_hash_lock);
++		hlist_del_init(&slot->hash_node);
++		spin_unlock(&uksm_vma_hash_lock);
++	}
 +out:
 +	return;
 +}
@@ -3707,6 +3780,11 @@ index 000000000000..aabbccddee00
 +
 +out_unlock:
 +	unlock_page(page);
++	if (slot) {
++		spin_lock(&uksm_vma_hash_lock);
++		hlist_del_init(&slot->hash_node);
++		spin_unlock(&uksm_vma_hash_lock);
++	}
 +out:
 +	return err;
 +}
@@ -4884,6 +4962,11 @@ index 000000000000..aabbccddee00
 +			return STILL;
 +	}
 +
++	if (slot) {
++		spin_lock(&uksm_vma_hash_lock);
++		hlist_del_init(&slot->hash_node);
++		spin_unlock(&uksm_vma_hash_lock);
++	}
 +out:
 +	rshash_cont_obscure = 0;
 +	return ret;
@@ -5093,6 +5176,11 @@ index 000000000000..aabbccddee00
 +	kfree(slot->rmap_list_pool);
 +	kfree(slot->pool_counts);
 +
++	if (slot) {
++		spin_lock(&uksm_vma_hash_lock);
++		hlist_del_init(&slot->hash_node);
++		spin_unlock(&uksm_vma_hash_lock);
++	}
 +out:
 +	slot->rung = NULL;
 +	if (slot->flags & UKSM_SLOT_IN_UKSM) {
@@ -6068,6 +6156,11 @@ index 000000000000..aabbccddee00
 +		rung->cover_msecs = values[i];
 +	}
 +
++	if (slot) {
++		spin_lock(&uksm_vma_hash_lock);
++		hlist_del_init(&slot->hash_node);
++		spin_unlock(&uksm_vma_hash_lock);
++	}
 +out:
 +	kfree(p);
 +	return ret;
@@ -6334,6 +6427,11 @@ index 000000000000..aabbccddee00
 +	kmem_cache_destroy(stable_node_cache);
 +out_free1:
 +	kmem_cache_destroy(rmap_item_cache);
++	if (slot) {
++		spin_lock(&uksm_vma_hash_lock);
++		hlist_del_init(&slot->hash_node);
++		spin_unlock(&uksm_vma_hash_lock);
++	}
 +out:
 +	return -ENOMEM;
 +}
@@ -6627,19 +6725,6 @@ diff --git a/include/linux/ksm.h b/include/linux/ksm.h
 +#include <linux/uksm.h>
 +
  #endif /* __LINUX_KSM_H */
-diff --git a/include/linux/mm_types.h b/include/linux/mm_types.h
---- a/include/linux/mm_types.h
-+++ b/include/linux/mm_types.h
-@@ -806,7 +806,8 @@
- #endif
- 	struct vm_userfaultfd_ctx vm_userfaultfd_ctx;
- 
--	ANDROID_KABI_RESERVE(1);
-+	/* UKSM: repurpose KABI reserve slot 1 for uksm_vma_slot pointer */
-+	ANDROID_KABI_USE(1, struct vma_slot *uksm_vma_slot);
- 	ANDROID_KABI_RESERVE(2);
- 	ANDROID_KABI_RESERVE(3);
- 	ANDROID_KABI_RESERVE(4);
 diff --git a/include/linux/mmzone.h b/include/linux/mmzone.h
 --- a/include/linux/mmzone.h
 +++ b/include/linux/mmzone.h
@@ -6696,25 +6781,15 @@ diff --git a/include/linux/pgtable.h b/include/linux/pgtable.h
 diff --git a/kernel/fork.c b/kernel/fork.c
 --- a/kernel/fork.c
 +++ b/kernel/fork.c
-@@ -518,6 +518,9 @@
- {
- 	/* The vma should be detached while being destroyed. */
- 	vma_assert_detached(vma);
-+#ifdef CONFIG_UKSM
-+	uksm_remove_vma(vma, "vm_area_free");
-+#endif
- 	vma_numab_state_free(vma);
- 	free_anon_vma_name(vma);
- 	kmem_cache_free(vm_area_cachep, vma);
-@@ -716,6 +719,8 @@
- 		 * allocation is not necessary here, so it cannot fail.
+@@ -717,6 +717,8 @@
  		 */
  		vma_iter_bulk_store(&vmi, tmp);
-+
-+		uksm_add_vma_new(tmp, "dup_mmap");
  
++		uksm_add_vma_new(tmp, "dup_mmap");
++
  		mm->map_count++;
  
+ 		if (tmp->vm_ops && tmp->vm_ops->open)
 diff --git a/lib/Makefile b/lib/Makefile
 --- a/lib/Makefile
 +++ b/lib/Makefile

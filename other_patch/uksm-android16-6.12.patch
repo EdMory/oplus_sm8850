@@ -804,7 +804,7 @@ new file mode 100644
 index 000000000000..aabbccddee00
 --- /dev/null
 +++ b/mm/uksm.c
-@@ -0,0 +1,5754 @@
+@@ -0,0 +1,5777 @@
 +/*
 + * Ultra KSM. Copyright (C) 2011-2012 Nai Xia
 + *
@@ -1393,29 +1393,29 @@ index 000000000000..aabbccddee00
 +struct list_head vma_slot_del = LIST_HEAD_INIT(vma_slot_del);
 +static DEFINE_SPINLOCK(vma_slot_list_lock);
 +
-/* External vma->slot hash table - avoids touching vm_area_struct/KABI */
-#define UKSM_VMA_HASH_BITS 8
-#define UKSM_VMA_HASH_SIZE (1 << UKSM_VMA_HASH_BITS)
-static struct hlist_head uksm_vma_hash[UKSM_VMA_HASH_SIZE];
-static DEFINE_SPINLOCK(uksm_vma_hash_lock);
-
-static inline unsigned int uksm_vma_hash_key(const struct vm_area_struct *vma)
-{
-	return hash_ptr((void *)vma, UKSM_VMA_HASH_BITS);
-}
-
-struct vma_slot *uksm_slot_lookup(struct vm_area_struct *vma)
-{
-	struct vma_slot *slot;
-	unsigned int key = uksm_vma_hash_key(vma);
-
-	hlist_for_each_entry(slot, &uksm_vma_hash[key], hash_node)
-		if (slot->vma == vma)
-			return slot;
-	return NULL;
-}
-EXPORT_SYMBOL_GPL(uksm_slot_lookup);
-
++/* External vma->slot hash table - avoids touching vm_area_struct/KABI */
++#define UKSM_VMA_HASH_BITS 8
++#define UKSM_VMA_HASH_SIZE (1 << UKSM_VMA_HASH_BITS)
++static struct hlist_head uksm_vma_hash[UKSM_VMA_HASH_SIZE];
++static DEFINE_SPINLOCK(uksm_vma_hash_lock);
++
++static inline unsigned int uksm_vma_hash_key(const struct vm_area_struct *vma)
++{
++	return hash_ptr((void *)vma, UKSM_VMA_HASH_BITS);
++}
++
++struct vma_slot *uksm_slot_lookup(struct vm_area_struct *vma)
++{
++	struct vma_slot *slot;
++	unsigned int key = uksm_vma_hash_key(vma);
++
++	hlist_for_each_entry(slot, &uksm_vma_hash[key], hash_node)
++		if (slot->vma == vma)
++			return slot;
++	return NULL;
++}
++EXPORT_SYMBOL_GPL(uksm_slot_lookup);
++
 +
 +/* The unstable tree heads */
 +static struct rb_root root_unstable_tree = RB_ROOT;

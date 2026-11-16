@@ -165,7 +165,7 @@ new file mode 100644
 index 000000000000..aabbccddee00
 --- /dev/null
 +++ b/include/linux/uksm.h
-@@ -0,0 +1,150 @@
+@@ -0,0 +1,141 @@
 +#ifndef __LINUX_UKSM_H
 +#define __LINUX_UKSM_H
 +/*
@@ -229,26 +229,18 @@ index 000000000000..aabbccddee00
 +
 +static inline void uksm_unmap_zero_page(pte_t pte)
 +{
-+	if (pte_pfn(pte) == (unsigned long)-1)
-+		__dec_zone_page_state(NULL, NR_UKSM_ZERO_PAGES);
 +}
 +
 +static inline void uksm_map_zero_page(pte_t pte)
 +{
-+	if (pte_pfn(pte) == (unsigned long)-1)
-+		__inc_zone_page_state(NULL, NR_UKSM_ZERO_PAGES);
 +}
 +
 +static inline void uksm_cow_page(struct vm_area_struct *vma, struct page *page)
 +{
-+	if (uksm_slot_lookup(vma) && PageKsm(page))
-+		uksm_slot_lookup(vma)->pages_cowed++;
 +}
 +
 +static inline void uksm_cow_pte(struct vm_area_struct *vma, pte_t pte)
 +{
-+	if (vma->uksm_vma_slot && pte_pfn(pte) == (unsigned long)-1)
-+		uksm_slot_lookup(vma)->pages_cowed++;
 +}
 +
 +static inline int uksm_flags_can_scan(unsigned long vm_flags)
@@ -275,7 +267,6 @@ index 000000000000..aabbccddee00
 + */
 +static inline void uksm_bugon_zeropage(pte_t pte)
 +{
-+	BUG_ON(pte_pfn(pte) == (unsigned long)-1);
 +}
 +#else
 +static inline void uksm_add_vma_new(struct vm_area_struct *vma, const char *where)

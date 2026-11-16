@@ -165,7 +165,7 @@ new file mode 100644
 index 000000000000..aabbccddee00
 --- /dev/null
 +++ b/include/linux/uksm.h
-@@ -0,0 +1,150 @@
+@@ -0,0 +1,151 @@
 +#ifndef __LINUX_UKSM_H
 +#define __LINUX_UKSM_H
 +/*
@@ -204,6 +204,7 @@ index 000000000000..aabbccddee00
 +	unsigned long sindex;
 +
 +	struct list_head slot_list;
++	struct hlist_node hash_node; /* uksm_vma_hash */
 +	unsigned long fully_scanned_round;
 +	unsigned long dedup_num;
 +	unsigned long pages_scanned;
@@ -803,7 +804,7 @@ new file mode 100644
 index 000000000000..aabbccddee00
 --- /dev/null
 +++ b/mm/uksm.c
-@@ -0,0 +1,5842 @@
+@@ -0,0 +1,5754 @@
 +/*
 + * Ultra KSM. Copyright (C) 2011-2012 Nai Xia
 + *
@@ -1392,29 +1393,29 @@ index 000000000000..aabbccddee00
 +struct list_head vma_slot_del = LIST_HEAD_INIT(vma_slot_del);
 +static DEFINE_SPINLOCK(vma_slot_list_lock);
 +
-+/* External vma->slot hash table (avoids touching vm_area_struct/KABI) */
-+#define UKSM_VMA_HASH_BITS 8
-+#define UKSM_VMA_HASH_SIZE (1 << UKSM_VMA_HASH_BITS)
-+static struct hlist_head uksm_vma_hash[UKSM_VMA_HASH_SIZE];
-+static DEFINE_SPINLOCK(uksm_vma_hash_lock);
-+
-+static inline unsigned int uksm_vma_hash_key(const struct vm_area_struct *vma)
-+{
-+	return hash_ptr((void *)vma, UKSM_VMA_HASH_BITS);
-+}
-+
-+struct vma_slot *uksm_slot_lookup(struct vm_area_struct *vma)
-+{
-+	struct vma_slot *slot;
-+	unsigned int key = uksm_vma_hash_key(vma);
-+
-+	hlist_for_each_entry(slot, &uksm_vma_hash[key], hash_node)
-+		if (slot->vma == vma)
-+			return slot;
-+	return NULL;
-+}
-+EXPORT_SYMBOL_GPL(uksm_slot_lookup);
-+
+/* External vma->slot hash table - avoids touching vm_area_struct/KABI */
+#define UKSM_VMA_HASH_BITS 8
+#define UKSM_VMA_HASH_SIZE (1 << UKSM_VMA_HASH_BITS)
+static struct hlist_head uksm_vma_hash[UKSM_VMA_HASH_SIZE];
+static DEFINE_SPINLOCK(uksm_vma_hash_lock);
+
+static inline unsigned int uksm_vma_hash_key(const struct vm_area_struct *vma)
+{
+	return hash_ptr((void *)vma, UKSM_VMA_HASH_BITS);
+}
+
+struct vma_slot *uksm_slot_lookup(struct vm_area_struct *vma)
+{
+	struct vma_slot *slot;
+	unsigned int key = uksm_vma_hash_key(vma);
+
+	hlist_for_each_entry(slot, &uksm_vma_hash[key], hash_node)
+		if (slot->vma == vma)
+			return slot;
+	return NULL;
+}
+EXPORT_SYMBOL_GPL(uksm_slot_lookup);
+
 +
 +/* The unstable tree heads */
 +static struct rb_root root_unstable_tree = RB_ROOT;
@@ -1856,11 +1857,6 @@ index 000000000000..aabbccddee00
 +	rmap_item->address &= PAGE_MASK;
 +	rmap_item->hash_max = 0;
 +
-+	if (slot) {
-+		spin_lock(&uksm_vma_hash_lock);
-+		hlist_del_init(&slot->hash_node);
-+		spin_unlock(&uksm_vma_hash_lock);
-+	}
 +out:
 +	cond_resched();		/* we're called from many long loops */
 +}
@@ -2110,7 +2106,7 @@ index 000000000000..aabbccddee00
 +		return;
 +	}
 +
-+	/* Store vma->slot in hash table (no KABI field used) */
++	/* Store vma->slot in hash table */
 +	{
 +		unsigned int _k = uksm_vma_hash_key(vma);
 +		spin_lock(&uksm_vma_hash_lock);
@@ -2438,11 +2434,6 @@ index 000000000000..aabbccddee00
 +	page_vma_mapped_walk_done(&pvmw);
 +out_mn:
 +	mmu_notifier_invalidate_range_end(&range);
-+	if (slot) {
-+		spin_lock(&uksm_vma_hash_lock);
-+		hlist_del_init(&slot->hash_node);
-+		spin_unlock(&uksm_vma_hash_lock);
-+	}
 +out:
 +	return err;
 +}
@@ -2532,11 +2523,6 @@ index 000000000000..aabbccddee00
 +	err = 0;
 +out_mn:
 +	mmu_notifier_invalidate_range_end(&range);
-+	if (slot) {
-+		spin_lock(&uksm_vma_hash_lock);
-+		hlist_del_init(&slot->hash_node);
-+		spin_unlock(&uksm_vma_hash_lock);
-+	}
 +out:
 +	return err;
 +}
@@ -2673,11 +2659,6 @@ index 000000000000..aabbccddee00
 +
 +out_unlock:
 +	unlock_page(page);
-+	if (slot) {
-+		spin_lock(&uksm_vma_hash_lock);
-+		hlist_del_init(&slot->hash_node);
-+		spin_unlock(&uksm_vma_hash_lock);
-+	}
 +out:
 +	return err;
 +}
@@ -2736,11 +2717,6 @@ index 000000000000..aabbccddee00
 +
 +	pte_unmap_unlock(ptep, ptl);
 +	err = 0;
-+	if (slot) {
-+		spin_lock(&uksm_vma_hash_lock);
-+		hlist_del_init(&slot->hash_node);
-+		spin_unlock(&uksm_vma_hash_lock);
-+	}
 +out:
 +	return err;
 +}
@@ -2865,11 +2841,6 @@ index 000000000000..aabbccddee00
 +
 +out_unlock:
 +	unlock_page(page);
-+	if (slot) {
-+		spin_lock(&uksm_vma_hash_lock);
-+		hlist_del_init(&slot->hash_node);
-+		spin_unlock(&uksm_vma_hash_lock);
-+	}
 +out:
 +	return err;
 +}
@@ -3354,11 +3325,6 @@ index 000000000000..aabbccddee00
 +		*success1 = *success2 = 1;
 +	}
 +
-+	if (slot) {
-+		spin_lock(&uksm_vma_hash_lock);
-+		hlist_del_init(&slot->hash_node);
-+		spin_unlock(&uksm_vma_hash_lock);
-+	}
 +out:
 +	return stable_node;
 +}
@@ -3682,11 +3648,6 @@ index 000000000000..aabbccddee00
 +		goto out;
 +
 +	break_ksm(vma, addr, false);
-+	if (slot) {
-+		spin_lock(&uksm_vma_hash_lock);
-+		hlist_del_init(&slot->hash_node);
-+		spin_unlock(&uksm_vma_hash_lock);
-+	}
 +out:
 +	return;
 +}
@@ -3780,11 +3741,6 @@ index 000000000000..aabbccddee00
 +
 +out_unlock:
 +	unlock_page(page);
-+	if (slot) {
-+		spin_lock(&uksm_vma_hash_lock);
-+		hlist_del_init(&slot->hash_node);
-+		spin_unlock(&uksm_vma_hash_lock);
-+	}
 +out:
 +	return err;
 +}
@@ -4962,11 +4918,6 @@ index 000000000000..aabbccddee00
 +			return STILL;
 +	}
 +
-+	if (slot) {
-+		spin_lock(&uksm_vma_hash_lock);
-+		hlist_del_init(&slot->hash_node);
-+		spin_unlock(&uksm_vma_hash_lock);
-+	}
 +out:
 +	rshash_cont_obscure = 0;
 +	return ret;
@@ -5176,11 +5127,6 @@ index 000000000000..aabbccddee00
 +	kfree(slot->rmap_list_pool);
 +	kfree(slot->pool_counts);
 +
-+	if (slot) {
-+		spin_lock(&uksm_vma_hash_lock);
-+		hlist_del_init(&slot->hash_node);
-+		spin_unlock(&uksm_vma_hash_lock);
-+	}
 +out:
 +	slot->rung = NULL;
 +	if (slot->flags & UKSM_SLOT_IN_UKSM) {
@@ -6156,11 +6102,6 @@ index 000000000000..aabbccddee00
 +		rung->cover_msecs = values[i];
 +	}
 +
-+	if (slot) {
-+		spin_lock(&uksm_vma_hash_lock);
-+		hlist_del_init(&slot->hash_node);
-+		spin_unlock(&uksm_vma_hash_lock);
-+	}
 +out:
 +	kfree(p);
 +	return ret;
@@ -6427,11 +6368,6 @@ index 000000000000..aabbccddee00
 +	kmem_cache_destroy(stable_node_cache);
 +out_free1:
 +	kmem_cache_destroy(rmap_item_cache);
-+	if (slot) {
-+		spin_lock(&uksm_vma_hash_lock);
-+		hlist_del_init(&slot->hash_node);
-+		spin_unlock(&uksm_vma_hash_lock);
-+	}
 +out:
 +	return -ENOMEM;
 +}

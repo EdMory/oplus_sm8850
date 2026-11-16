@@ -794,7 +794,7 @@ new file mode 100644
 index 000000000000..aabbccddee00
 --- /dev/null
 +++ b/mm/uksm.c
-@@ -0,0 +1,5786 @@
+@@ -0,0 +1,5806 @@
 +/*
 + * Ultra KSM. Copyright (C) 2011-2012 Nai Xia
 + *
@@ -5615,6 +5615,7 @@ index 000000000000..aabbccddee00
 +	return 0;
 +}
 +
++#ifndef CONFIG_KSM
 +void rmap_walk_ksm(struct folio *folio, struct rmap_walk_control *rwc)
 +{
 +	struct ksm_stable_node *stable_node;
@@ -5677,9 +5678,11 @@ index 000000000000..aabbccddee00
 +	if (!search_new_forks++)
 +		goto again;
 +}
++#endif /* !CONFIG_KSM */
 +
 +#ifdef CONFIG_MIGRATION
 +/* Common ksm interface but may be specific to uksm */
++#ifndef CONFIG_KSM
 +void folio_migrate_ksm(struct folio *newfolio, struct folio *folio)
 +{
 +	struct ksm_stable_node *stable_node;
@@ -5702,6 +5705,7 @@ index 000000000000..aabbccddee00
 +		folio_set_stable_node(folio, NULL);
 +	}
 +}
++#endif /* !CONFIG_KSM */
 +#endif /* CONFIG_MIGRATION */
 +
 +#ifdef CONFIG_MEMORY_HOTREMOVE
@@ -6380,8 +6384,10 @@ index 000000000000..aabbccddee00
 +}
 +
 +/* Common interface to ksm, different to it. */
++#ifndef CONFIG_KSM
 +int ksm_madvise(struct vm_area_struct *vma, unsigned long start,
 +		unsigned long end, int advice, unsigned long *vm_flags)
++#endif /* !CONFIG_KSM */
 +{
 +	int err;
 +
@@ -6408,8 +6414,10 @@ index 000000000000..aabbccddee00
 +}
 +
 +/* Common interface to ksm, actually the same. */
++#ifndef CONFIG_KSM
 +struct folio *ksm_might_need_to_copy(struct folio *folio,
 +			struct vm_area_struct *vma, unsigned long addr)
++#endif /* !CONFIG_KSM */
 +{
 +	struct page *page = folio_page(folio, 0);
 +	struct anon_vma *anon_vma = folio_anon_vma(folio);
@@ -6546,34 +6554,46 @@ index 000000000000..aabbccddee00
 +}
 +
 +/* Functions used in ksm.c, but not part of uksm.c. */
++#ifndef CONFIG_KSM
 +void ksm_add_vma(struct vm_area_struct *vma)
 +{
 +}
++#endif /* !CONFIG_KSM */
 +
++#ifndef CONFIG_KSM
 +int ksm_enable_merge_any(struct mm_struct *mm)
 +{
 +	return 0;
 +}
++#endif /* !CONFIG_KSM */
 +
++#ifndef CONFIG_KSM
 +int ksm_disable_merge_any(struct mm_struct *mm)
 +{
 +	return 0;
 +}
++#endif /* !CONFIG_KSM */
 +
++#ifndef CONFIG_KSM
 +int ksm_disable(struct mm_struct *mm)
 +{
 +	return 0;
 +}
++#endif /* !CONFIG_KSM */
 +
++#ifndef CONFIG_KSM
 +void collect_procs_ksm(struct folio *folio, struct page *page,
 +		struct list_head *to_kill, int force_early)
++#endif /* !CONFIG_KSM */
 +{
 +}
 +
++#ifndef CONFIG_KSM
 +long ksm_process_profit(struct mm_struct *mm)
 +{
 +	return 0;
 +}
++#endif /* !CONFIG_KSM */
 +
 +#ifdef MODULE
 +subsys_initcall(ksm_init);

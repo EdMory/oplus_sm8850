@@ -57,11 +57,6 @@ on:
         required: true
         type: boolean
         default: 'true'
-      memcomp_enable:
-        description: '是否安装 Memcomp 补丁'
-        required: true
-        type: boolean
-        default: 'true'
       droidspaces_enable:
         description: '是否开启 Droidspaces 容器支持(轻量化的完整Linux容器支持)'
         required: true
@@ -836,19 +831,6 @@ jobs:
           patch -p1 -F 0 < $PATCH
           echo "cherry-pick 补丁集(44条)应用完成"
           
-      - name: 应用 Memcomp 补丁
-        if: inputs.memcomp_enable
-        run: |
-          echo "正在集成 Memcomp..."
-          cd kernel_workspace/common
-          PATCH=memcomp-6.12.69.patch
-          wget -O $PATCH https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/$PATCH
-          patch -p1 -F 0 < $PATCH
-          echo "CONFIG_MEMCOMP=y" >> ./arch/arm64/configs/gki_defconfig
-          echo "CONFIG_ZRAM=n" >> ./arch/arm64/configs/gki_defconfig
-          echo "CONFIG_MEMCOMP_DEFAULT_COMPRESSOR=lz4kd" >> ./arch/arm64/configs/gki_defconfig
-          echo "Memcomp应用完成"
-
       - name: 添加制作名称
         run: |
           cd kernel_workspace

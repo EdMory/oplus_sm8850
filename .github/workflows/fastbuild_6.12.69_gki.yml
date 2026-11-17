@@ -15,7 +15,7 @@ on:
         description: '选择 KernelSU 分支'
         required: true
         type: choice
-        default: 'BakaSU'
+        default: 'KowSU'
         options:
           - 'BakaSU'
           - 'KowSU'

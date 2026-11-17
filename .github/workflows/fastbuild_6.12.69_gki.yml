@@ -57,6 +57,11 @@ on:
         required: true
         type: boolean
         default: 'true'
+      memcomp_enable:
+        description: '是否安装 Memcomp 补丁'
+        required: true
+        type: boolean
+        default: 'true'
       droidspaces_enable:
         description: '是否开启 Droidspaces 容器支持(轻量化的完整Linux容器支持)'
         required: true
@@ -435,7 +440,7 @@ jobs:
           echo "CONFIG_CRYSTAL_HYBRIDSWAP_LEGACY_SWAPD_MEMCGS_PARAM=n" >> ./arch/arm64/configs/gki_defconfig
           # KUnit 测试保持关闭（生产内核）
           echo "CONFIG_CRYSTAL_HYBRIDSWAP_SDDC_KUNIT_TEST=n" >> ./arch/arm64/configs/gki_defconfig
-          # 固定 zram 大小为物理内存的 200%（12GB RAM → 24GB zram）
+          # 固定 zram 大小为物理内存的 163%（16GB RAM → 24GB zram）
           # 拦截 disksize 写操作并替换为此比例，用户态写入的值被忽略
           echo "CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_PIN_SIZE=y" >> ./arch/arm64/configs/gki_defconfig
           echo "CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_PIN_SIZE_PCT=163" >> ./arch/arm64/configs/gki_defconfig
@@ -831,6 +836,18 @@ jobs:
           patch -p1 -F 0 < $PATCH
           echo "cherry-pick 补丁集(44条)应用完成"
           
+      - name: 应用 Memcomp 补丁
+        if: inputs.memcomp_enable
+        run: |
+          echo "正在集成 Memcomp..."
+          cd kernel_workspace/common
+          PATCH=memcomp-6.12.69.patch
+          wget -O $PATCH https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/$PATCH
+          patch -p1 -F 0 < $PATCH
+          echo "CONFIG_MEMCOMP=y" >> ./arch/arm64/configs/gki_defconfig
+          echo "CONFIG_MEMCOMP_DEFAULT_COMPRESSOR=lz4kds" >> ./arch/arm64/configs/gki_defconfig
+          echo "Memcomp应用完成"
+
       - name: 添加制作名称
         run: |
           cd kernel_workspace

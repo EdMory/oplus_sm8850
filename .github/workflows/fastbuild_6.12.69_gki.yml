@@ -526,6 +526,7 @@ jobs:
         run: |
           echo "正在集成 BBR 拥塞控制补丁…"
           cd kernel_workspace/common
+          #添加更多拥塞算法支持
           echo "CONFIG_TCP_CONG_BBR=y" >> arch/arm64/configs/gki_defconfig
           echo 'CONFIG_DEFAULT_TCP_CONG="bbr"' >> arch/arm64/configs/gki_defconfig
           echo "CONFIG_TCP_CONG_ADVANCED=y" >> arch/arm64/configs/gki_defconfig
@@ -534,17 +535,20 @@ jobs:
           echo "CONFIG_TCP_CONG_NV=y" >> arch/arm64/configs/gki_defconfig
           echo "CONFIG_TCP_CONG_WESTWOOD=y" >> arch/arm64/configs/gki_defconfig
           echo "CONFIG_TCP_CONG_HTCP=y" >> arch/arm64/configs/gki_defconfig
-          #FQ_CODEL为默认队列算法
-          echo "CONFIG_NET_SCH_DEFAULT=y" >> arch/arm64/configs/gki_defconfig
-          echo "CONFIG_DEFAULT_FQ_CODEL=y" >> arch/arm64/configs/gki_defconfig
           #更新BBR3
           wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/bbr3-6.12.69-kabi.patch
           patch --batch --forward -p1 -F 0 --no-backup-if-mismatch < bbr3-6.12.69-kabi.patch
           #更新TCP Brutal 2.0.1
           wget -O tcp-brutal-upgrade.sh https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/tcp-brutal-upgrade.sh
           bash tcp-brutal-upgrade.sh
+          #BBR为默认拥塞算法
           echo "CONFIG_TCP_CONG_BRUTAL=y" >> arch/arm64/configs/gki_defconfig
-          echo "BBR3, TCP Brutal算法已集成，FQ_CODEL为默认队列算法"
+          echo "CONFIG_DEFAULT_BBR=y" >> arch/arm64/configs/gki_defconfig
+          echo 'CONFIG_DEFAULT_TCP_CONG="bbr"' >> arch/arm64/configs/gki_defconfig
+          #FQ_CODEL为默认队列算法
+          echo "CONFIG_NET_SCH_DEFAULT=y" >> arch/arm64/configs/gki_defconfig
+          echo "CONFIG_DEFAULT_FQ_CODEL=y" >> arch/arm64/configs/gki_defconfig
+          echo "更多拥塞算法已集成，BBR为默认拥塞算法，FQ_CODEL为默认队列算法"
           
       - name: 启用网络功能增强优化配置
         if: inputs.better_net

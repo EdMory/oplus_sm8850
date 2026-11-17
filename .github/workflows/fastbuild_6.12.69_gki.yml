@@ -558,13 +558,17 @@ jobs:
           echo "CONFIG_TCP_CONG_NV=y" >> arch/arm64/configs/gki_defconfig
           echo "CONFIG_TCP_CONG_WESTWOOD=y" >> arch/arm64/configs/gki_defconfig
           echo "CONFIG_TCP_CONG_HTCP=y" >> arch/arm64/configs/gki_defconfig
-          echo "CONFIG_TCP_CONG_BRUTAL=y" >> arch/arm64/configs/gki_defconfig
           #FQ_CODEL为默认队列算法
           echo "CONFIG_NET_SCH_DEFAULT=y" >> arch/arm64/configs/gki_defconfig
           echo "CONFIG_DEFAULT_FQ_CODEL=y" >> arch/arm64/configs/gki_defconfig
           #更新BBR3
           wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/bbr3-6.12.69-kabi.patch
           patch --batch --forward -p1 -F 0 --no-backup-if-mismatch < bbr3-6.12.69-kabi.patch
+          #更新TCP Brutal 2.0.1
+          wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/tcp-brutal-2.0.1.patch
+          patch -p1 -F 0 --no-backup-if-mismatch < tcp-brutal-2.0.1.patch
+          echo "CONFIG_TCP_CONG_BRUTAL=y" >> arch/arm64/configs/gki_defconfig
+          echo "BBR3, TCP Brutal算法已集成，FQ_CODEL为默认队列算法"
           
       - name: 启用网络功能增强优化配置
         if: inputs.better_net

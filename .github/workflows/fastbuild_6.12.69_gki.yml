@@ -845,6 +845,7 @@ jobs:
           wget -O $PATCH https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/$PATCH
           patch -p1 -F 0 < $PATCH
           echo "CONFIG_MEMCOMP=y" >> ./arch/arm64/configs/gki_defconfig
+          echo "CONFIG_ZRAM=n" >> ./arch/arm64/configs/gki_defconfig
           echo "CONFIG_MEMCOMP_DEFAULT_COMPRESSOR=lz4kd" >> ./arch/arm64/configs/gki_defconfig
           echo "Memcomp应用完成"
 

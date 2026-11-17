@@ -719,5 +719,3 @@ echo "=== TCP Brutal 2.0.1 升级完成 ==="
 echo "文件列表："
 ls -lh net/ipv4/tcp_brutal/
 echo ""
-echo "记得在 gki_defconfig 中确认以下配置："
-echo "  CONFIG_TCP_CONG_BRUTAL=y"

@@ -1,8 +1,8 @@
 # SM8850 系列通用6.12内核自动化编译脚本
-[![STAR](https://img.shields.io/github/stars/cctv18/oppo_oplus_realme_sm8850?style=flat&logo=data%3Aimage%2Fsvg%2Bxml%3Bbase64%2CPHN2ZyByb2xlPSJpbWciIHZpZXdCb3g9IjAgMCAyNCAyNCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48dGl0bGU%2BR2l0SHViPC90aXRsZT48cGF0aCBkPSJNMTIgLjI5N2MtNi42MyAwLTEyIDUuMzczLTEyIDEyIDAgNS4zMDMgMy40MzggOS44IDguMjA1IDExLjM4NS42LjExMy44Mi0uMjU4LjgyLS41NzcgMC0uMjg1LS4wMS0xLjA0LS4wMTUtMi4wNC0zLjMzOC43MjQtNC4wNDItMS42MS00LjA0Mi0xLjYxQzQuNDIyIDE4LjA3IDMuNjMzIDE3LjcgMy42MzMgMTcuN2MtMS4wODctLjc0NC4wODQtLjcyOS4wODQtLjcyOSAxLjIwNS4wODQgMS44MzggMS4yMzYgMS44MzggMS4yMzYgMS4wNyAxLjgzNSAyLjgwOSAxLjMwNSAzLjQ5NS45OTguMTA4LS43NzYuNDE3LTEuMzA1Ljc2LTEuNjA1LTIuNjY1LS4zLTUuNDY2LTEuMzMyLTUuNDY2LTUuOTMgMC0xLjMxLjQ2NS0yLjM4IDEuMjM1LTMuMjItLjEzNS0uMzAzLS41NC0xLjUyMy4xMDUtMy4xNzYgMCAwIDEuMDA1LS4zMjIgMy4zIDEuMjMuOTYtLjI2NyAxLjk4LS4zOTkgMy0uNDA1IDEuMDIuMDA2IDIuMDQuMTM4IDMgLjQwNSAyLjI4LTEuNTUyIDMuMjg1LTEuMjMgMy4yODUtMS4yMy42NDUgMS42NTMuMjQgMi44NzMuMTIgMy4xNzYuNzY1Ljg0IDEuMjMgMS45MSAxLjIzIDMuMjIgMCA0LjYxLTIuODA1IDUuNjI1LTUuNDc1IDUuOTIuNDIuMzYuODEgMS4wOTYuODEgMi4yMiAwIDEuNjA2LS4wMTUgMi44OTYtLjAxNSAzLjI4NiAwIC4zMTUuMjEuNjkuODI1LjU3QzIwLjU2NSAyMi4wOTIgMjQgMTcuNTkyIDI0IDEyLjI5N2MwLTYuNjI3LTUuMzczLTEyLTEyLTEyIiBmaWxsPSIjZmZmZmZmIj48L3BhdGg%2BPC9zdmc%2B)](https://github.com/cctv18/oppo_oplus_realme_sm8850/stargazers)
-[![FORK](https://img.shields.io/github/forks/cctv18/oppo_oplus_realme_sm8850?style=flat&logo=greasyfork&color=%2394E61A)](https://github.com/cctv18/oppo_oplus_realme_sm8850/forks)
-[![COOLAPK](https://img.shields.io/badge/cctv18_2-cctv18_2?style=flat&logo=android&logoColor=FF4500&label=%E9%85%B7%E5%AE%89&color=FF4500)](http://www.coolapk.com/u/22650293)
-[![DISCUSSION](https://img.shields.io/badge/%E8%AE%A8%E8%AE%BA%E5%8C%BA-discussions?logo=livechat&logoColor=FFBBFF&color=3399ff)](https://github.com/cctv18/oppo_oplus_realme_sm8850/discussions)
+[![STAR](https://img.shields.io/github/stars/edmory/oplus_sm8850?style=flat&logo=data%3Aimage%2Fsvg%2Bxml%3Bbase64%2CPHN2ZyByb2xlPSJpbWciIHZpZXdCb3g9IjAgMCAyNCAyNCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48dGl0bGU%2BR2l0SHViPC90aXRsZT48cGF0aCBkPSJNMTIgLjI5N2MtNi42MyAwLTEyIDUuMzczLTEyIDEyIDAgNS4zMDMgMy40MzggOS44IDguMjA1IDExLjM4NS42LjExMy44Mi0uMjU4LjgyLS41NzcgMC0uMjg1LS4wMS0xLjA0LS4wMTUtMi4wNC0zLjMzOC43MjQtNC4wNDItMS42MS00LjA0Mi0xLjYxQzQuNDIyIDE4LjA3IDMuNjMzIDE3LjcgMy42MzMgMTcuN2MtMS4wODctLjc0NC4wODQtLjcyOS4wODQtLjcyOSAxLjIwNS4wODQgMS44MzggMS4yMzYgMS44MzggMS4yMzYgMS4wNyAxLjgzNSAyLjgwOSAxLjMwNSAzLjQ5NS45OTguMTA4LS43NzYuNDE3LTEuMzA1Ljc2LTEuNjA1LTIuNjY1LS4zLTUuNDY2LTEuMzMyLTUuNDY2LTUuOTMgMC0xLjMxLjQ2NS0yLjM4IDEuMjM1LTMuMjItLjEzNS0uMzAzLS41NC0xLjUyMy4xMDUtMy4xNzYgMCAwIDEuMDA1LS4zMjIgMy4zIDEuMjMuOTYtLjI2NyAxLjk4LS4zOTkgMy0uNDA1IDEuMDIuMDA2IDIuMDQuMTM4IDMgLjQwNSAyLjI4LTEuNTUyIDMuMjg1LTEuMjMgMy4yODUtMS4yMy42NDUgMS42NTMuMjQgMi44NzMuMTIgMy4xNzYuNzY1Ljg0IDEuMjMgMS45MSAxLjIzIDMuMjIgMCA0LjYxLTIuODA1IDUuNjI1LTUuNDc1IDUuOTIuNDIuMzYuODEgMS4wOTYuODEgMi4yMiAwIDEuNjA2LS4wMTUgMi44OTYtLjAxNSAzLjI4NiAwIC4zMTUuMjEuNjkuODI1LjU3QzIwLjU2NSAyMi4wOTIgMjQgMTcuNTkyIDI0IDEyLjI5N2MwLTYuNjI3LTUuMzczLTEyLTEyLTEyIiBmaWxsPSIjZmZmZmZmIj48L3BhdGg%2BPC9zdmc%2B)](https://github.com/edmory/oplus_sm8850/stargazers)
+[![FORK](https://img.shields.io/github/forks/edmory/oplus_sm8850?style=flat&logo=greasyfork&color=%2394E61A)](https://github.com/edmory/oplus_sm8850/forks)
+[![COOLAPK](https://img.shields.io/badge/EdMory-EdMory?style=flat&logo=android&logoColor=FF4500&label=%E9%85%B7%E5%AE%89&color=FF4500)](http://www.coolapk.com/u/983818)
+[![DISCUSSION](https://img.shields.io/badge/%E8%AE%A8%E8%AE%BA%E5%8C%BA-discussions?logo=livechat&logoColor=FFBBFF&color=3399ff)](https://github.com/edmory/oplus_sm8850/discussions)
 
 <img alt="Endpoint Badge" src="https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fcctv18%2Fkernel-workshop%2Frefs%2Fheads%2Fhotfix%2Fnotice.json">
 
@@ -24,9 +24,10 @@
 - [x] 引入[Optprobe](https://lkml.rescloud.iu.edu/hypermail/linux/kernel/2503.3/02174.html)
 - [x] LZ4 1.11.0 & ZSTD 1.5.8 算法更新&优化补丁(来自[@ferstar](https://github.com/ferstar), 移植by [@Xiaomichael](https://github.com/Xiaomichael), 6.12版本补丁重制by [@cctv18](https://github.com/cctv18))
 - [x] 移植LZ4KD支持到6.12内核(可选补丁)
-- [x] 可选加入 BBR/Brutal 及一系列 tcp 拥塞控制算法，设置BBR3为默认拥塞算法，FQ_CODEL为默认队列算法以优化网络延迟环境下的表现
-- [x] [INTFP](https://github.com/firelzrd/intfp),[ISQRT](https://github.com/firelzrd/isqrt)移植
-- [x] [ADIOS](https://github.com/firelzrd/adios),[BORE](https://github.com/firelzrd/bore),[Cambyses](https://github.com/firelzrd/cambyses)移植
+- [x] 可选加入 [BBR](https://github.com/CachyOS/linux/commits/6.16/bbr3),[BRUTAL](https://github.com/HyNetworks/tcp-brutal) 及一系列 TCP 拥塞控制算法，设置BBR3为默认拥塞算法，FQ_CODEL为默认队列算法以优化网络延迟环境下的表现
+- [x] 移植[LE9UO](https://github.com/brokestar233/android_kernel_common_sm8850/commit/ba01e007572c91596e7ef0b78d2b16932f94adb3),[Kcompressd-Unofficial](https://github.com/brokestar233/android_kernel_common_sm8850/commit/8cb44929a08b2ca19a7711f3b510d5451726bb3a)支持到6.12内核(可选补丁)
+- [x] [INTFP](https://github.com/firelzrd/intfp),[ISQRT](https://github.com/firelzrd/isqrt)移植(可选补丁)
+- [x] [ADIOS](https://github.com/firelzrd/adios),[BORE](https://github.com/firelzrd/bore),[Cambyses](https://github.com/firelzrd/cambyses)移植(可选补丁)
 - [x] CherryPick了部分上游提交，优化了调度器表现
 - [x] 加入一些网络连接性能优化配置选项（用于为 ipset 及需要 iptables 等高级网络功能内核支持的程序提供支持）
 - [x] Droidspaces 容器化支持（比传统 Docker/LXC 更轻量化，便于移植的完整 Linux 环境容器实现）
@@ -37,6 +38,8 @@
 ##### 
 ##### 
 ## 鸣谢
+- BrokeStar233：[BrokeStar233](https://github.com/brokestar233)
+- 🎧：[whitewhale0612](https://github.com/whitewhale0612)
 - firelzrd：[firelzrd](https://github.com/firelzrd)
 - WildKernel的一加系列内核构建脚本：[WildKernels/OnePlus_KernelSU_SUSFS](https://github.com/WildKernels/OnePlus_KernelSU_SUSFS)
 - cctv18的欧加真米系列内核构建脚本：[oppo_oplus_realme_sm8850](https://github.com/cctv18/oppo_oplus_realme_sm8850)
@@ -50,6 +53,6 @@
 
 <!-- 这是一个访客统计，用来看看我的项目主页有多少人访问过 -->
 <div align="center">
-  <img width="0" height="0" src="https://count.getloli.com/get/@:cctv18" />
+  <img width="0" height="0" src="https://count.getloli.com/get/@:edmory" />
 </div>
 

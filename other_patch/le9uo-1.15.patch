@@ -3,7 +3,7 @@ From: GKI port <gki-port@localhost>
 Date: Wed, 18 Nov 2026 10:58:21 +0800
 Subject: [PATCH] mm: port le9uo workingset protection to Android 16 6.12
 
-Based on brokestar233/android_kernel_common_sm8850 commit ba01e007572c91596e7ef0b78d2b16932f94adb3 (Masahito S). Keep working set thresholds private to vmscan; enforce hard minima at LRU selection rather than adding fields to the Android hook-visible scan_control. Leave the policy off by default.
+Based on brokestar233/android_kernel_common_sm8850 commit ba01e007572c91596e7ef0b78d2b16932f94adb3 (Masahito S). Keep working set thresholds private to vmscan; enforce hard minima at LRU selection rather than adding fields to the Android hook-visible scan_control. Enable the policy by default.
 ---
  Documentation/admin-guide/sysctl/vm.rst |  22 +++++
  mm/Kconfig                              |  18 ++++
@@ -40,7 +40,7 @@ index f48eaa9..e30b407 100644
 +======================================================================
 +
 +Set workingset_protection to 1 to enable le9uo during LRU reclaim. The
-+switch defaults to 0. Ratios range from 0 to 100 percent of the current
++switch defaults to 1. Ratios range from 0 to 100 percent of the current
 +node's managed pages; 0 disables that threshold. The default ratios are
 +1, 15 and 4 respectively, unless overridden at build time.
 +
@@ -102,7 +102,7 @@ index 33275e0..3e7f406 100644
 +};
 +
 +#ifdef CONFIG_SYSCTL
-+static bool le9_enabled __read_mostly;
++static bool le9_enabled __read_mostly = true;
 +static u8 anon_min_ratio __read_mostly = CONFIG_ANON_MIN_RATIO;
 +static u8 clean_low_ratio __read_mostly = CONFIG_CLEAN_LOW_RATIO;
 +static u8 clean_min_ratio __read_mostly = CONFIG_CLEAN_MIN_RATIO;

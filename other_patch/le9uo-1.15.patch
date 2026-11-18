@@ -1,0 +1,246 @@
+From dcac94eb825b6d787a669f5fa5a8c985fb47b4b3 Mon Sep 17 00:00:00 2001
+From: GKI port <gki-port@localhost>
+Date: Wed, 18 Nov 2026 10:58:21 +0800
+Subject: [PATCH] mm: port le9uo workingset protection to Android 16 6.12
+
+Based on brokestar233/android_kernel_common_sm8850 commit ba01e007572c91596e7ef0b78d2b16932f94adb3 (Masahito S). Keep working set thresholds private to vmscan; enforce hard minima at LRU selection rather than adding fields to the Android hook-visible scan_control. Leave the policy off by default.
+---
+ Documentation/admin-guide/sysctl/vm.rst |  22 +++++
+ mm/Kconfig                              |  18 ++++
+ mm/vmscan.c                             | 108 +++++++++++++++++++++++-
+ 3 files changed, 144 insertions(+), 4 deletions(-)
+
+diff --git a/Documentation/admin-guide/sysctl/vm.rst b/Documentation/admin-guide/sysctl/vm.rst
+index f48eaa9..e30b407 100644
+--- a/Documentation/admin-guide/sysctl/vm.rst
++++ b/Documentation/admin-guide/sysctl/vm.rst
+@@ -25,6 +25,9 @@ files can be found in mm/swap.c.
+ Currently, these files are in /proc/sys/vm:
+ 
+ - admin_reserve_kbytes
++- anon_min_ratio
++- clean_low_ratio
++- clean_min_ratio
+ - compact_memory
+ - compaction_proactiveness
+ - compact_unevictable_allowed
+@@ -76,6 +79,7 @@ Currently, these files are in /proc/sys/vm:
+ - vfs_cache_pressure
+ - watermark_boost_factor
+ - watermark_scale_factor
++- workingset_protection
+ - zone_reclaim_mode
+ 
+ 
+@@ -108,6 +112,24 @@ On x86_64 this is about 128MB.
+ Changing this takes effect whenever an application requests memory.
+ 
+ 
++workingset_protection, anon_min_ratio, clean_low_ratio, clean_min_ratio
++======================================================================
++
++Set workingset_protection to 1 to enable le9uo during LRU reclaim. The
++switch defaults to 0. Ratios range from 0 to 100 percent of the current
++node's managed pages; 0 disables that threshold. The default ratios are
++1, 15 and 4 respectively, unless overridden at build time.
++
++Below anon_min_ratio, do not scan the anonymous LRU for eviction. Below
++clean_min_ratio, do not scan the file LRU for eviction. The clean-page
++estimate is the number of active, inactive and isolated file pages minus
++dirty file pages, clamped to zero. Below clean_low_ratio, prefer to evict
++anonymous pages when eligible; this preference gives way at the lowest
++reclaim priority. Hard minima remain in force. Excessive minima can cause
++early OOM, particularly without swap; the low watermark can increase swap
++traffic. These are sampled reclaim decisions, not reserved memory.
++
++
+ compact_memory
+ ==============
+ 
+diff --git a/mm/Kconfig b/mm/Kconfig
+index 88d7aba..df78f16 100644
+--- a/mm/Kconfig
++++ b/mm/Kconfig
+@@ -499,6 +499,24 @@ config ARCH_WANT_OPTIMIZE_DAX_VMEMMAP
+ config ARCH_WANT_OPTIMIZE_HUGETLB_VMEMMAP
+ 	bool
+ 
++config ANON_MIN_RATIO
++	int "le9uo default anonymous page minimum (%)"
++	depends on SYSCTL
++	range 0 100
++	default 1
++
++config CLEAN_LOW_RATIO
++	int "le9uo default clean file page low watermark (%)"
++	depends on SYSCTL
++	range 0 100
++	default 15
++
++config CLEAN_MIN_RATIO
++	int "le9uo default clean file page minimum (%)"
++	depends on SYSCTL
++	range 0 100
++	default 4
++
+ config HAVE_MEMBLOCK_PHYS_MAP
+ 	bool
+ 
+diff --git a/mm/vmscan.c b/mm/vmscan.c
+index 33275e0..3e7f406 100644
+--- a/mm/vmscan.c
++++ b/mm/vmscan.c
+@@ -215,6 +215,84 @@ struct scan_control {
+  */
+ int vm_swappiness = 60;
+ 
++/* le9uo policy is sampled per scan; no fields in hook-visible structures. */
++struct le9_limits {
++	bool anon_min;
++	bool clean_min;
++	bool clean_low;
++};
++
++#ifdef CONFIG_SYSCTL
++static bool le9_enabled __read_mostly;
++static u8 anon_min_ratio __read_mostly = CONFIG_ANON_MIN_RATIO;
++static u8 clean_low_ratio __read_mostly = CONFIG_CLEAN_LOW_RATIO;
++static u8 clean_min_ratio __read_mostly = CONFIG_CLEAN_MIN_RATIO;
++
++static struct ctl_table le9_sysctls[] = {
++	{
++		.procname = "workingset_protection",
++		.data = &le9_enabled,
++		.maxlen = sizeof(le9_enabled),
++		.mode = 0644,
++		.proc_handler = proc_dobool,
++	},
++#define LE9_RATIO(name) { \
++	.procname = #name, .data = &name, .maxlen = sizeof(name), \
++	.mode = 0644, .proc_handler = proc_dou8vec_minmax, \
++	.extra1 = SYSCTL_ZERO, .extra2 = SYSCTL_ONE_HUNDRED, \
++}
++	LE9_RATIO(anon_min_ratio),
++	LE9_RATIO(clean_low_ratio),
++	LE9_RATIO(clean_min_ratio),
++#undef LE9_RATIO
++};
++
++static int __init le9_sysctl_init(void)
++{
++	register_sysctl_init("vm", le9_sysctls);
++	return 0;
++}
++subsys_initcall(le9_sysctl_init);
++#endif
++
++static struct le9_limits le9_node_limits(pg_data_t *pgdat)
++{
++	struct le9_limits limits = {};
++#ifdef CONFIG_SYSCTL
++	unsigned long total, anon, file, dirty;
++	u8 amin, clow, cmin;
++	int zid;
++
++	if (!READ_ONCE(le9_enabled))
++		return limits;
++
++	amin = READ_ONCE(anon_min_ratio);
++	clow = READ_ONCE(clean_low_ratio);
++	cmin = READ_ONCE(clean_min_ratio);
++	/* Managed pages, in the same units as node_page_state(). */
++	total = 0;
++	for (zid = 0; zid < MAX_NR_ZONES; zid++)
++		total += zone_managed_pages(&pgdat->node_zones[zid]);
++
++	if (amin) {
++		anon = node_page_state(pgdat, NR_ACTIVE_ANON) +
++		       node_page_state(pgdat, NR_INACTIVE_ANON) +
++		       node_page_state(pgdat, NR_ISOLATED_ANON);
++		limits.anon_min = anon < mult_frac(total, amin, 100);
++	}
++	if (clow || cmin) {
++		file = node_page_state(pgdat, NR_ACTIVE_FILE) +
++		       node_page_state(pgdat, NR_INACTIVE_FILE) +
++		       node_page_state(pgdat, NR_ISOLATED_FILE);
++		dirty = node_page_state(pgdat, NR_FILE_DIRTY);
++		file -= min(file, dirty);
++		limits.clean_low = file < mult_frac(total, clow, 100);
++		limits.clean_min = file < mult_frac(total, cmin, 100);
++	}
++#endif
++	return limits;
++}
++
+ #ifdef CONFIG_MEMCG
+ 
+ /* Returns true for reclaim through cgroup limits or cgroup interfaces. */
+@@ -2574,6 +2652,7 @@ static void get_scan_count(struct lruvec *lruvec, struct scan_control *sc,
+ 	unsigned long ap, fp;
+ 	enum lru_list lru;
+ 	bool balance_anon_file_reclaim = false;
++	struct le9_limits le9 = le9_node_limits(pgdat);
+ 
+ 	/* If we have no swap space, do not bother scanning anon folios. */
+ 	if (!sc->may_swap || !can_reclaim_anon_pages(memcg, pgdat->node_id, sc)) {
+@@ -2595,6 +2674,12 @@ static void get_scan_count(struct lruvec *lruvec, struct scan_control *sc,
+ 		goto out;
+ 	}
+ 
++	/* Hard floors survive priority zero; the low watermark does not. */
++	if (le9.anon_min || le9.clean_min || (le9.clean_low && sc->priority)) {
++		scan_balance = le9.anon_min ? SCAN_FILE : SCAN_ANON;
++		goto out;
++	}
++
+ 	/*
+ 	 * Do not apply any pressure balancing cleverness when the
+ 	 * system is close to OOM, scan both anon and file equally
+@@ -2762,7 +2847,7 @@ out:
+ 			BUG();
+ 		}
+ 
+-		nr[lru] = scan;
++		nr[lru] = (file ? le9.clean_min : le9.anon_min) ? 0 : scan;
+ 	}
+ }
+ 
+@@ -4786,10 +4871,10 @@ static int get_type_to_scan(struct lruvec *lruvec, int swappiness)
+ }
+ 
+ static int isolate_folios(struct lruvec *lruvec, struct scan_control *sc, int swappiness,
+-			  int *type_scanned, struct list_head *list)
++			  int *type_scanned, struct list_head *list, bool prefer_anon)
+ {
+ 	int i;
+-	int type = get_type_to_scan(lruvec, swappiness);
++	int type = prefer_anon ? LRU_GEN_ANON : get_type_to_scan(lruvec, swappiness);
+ 
+ 	for_each_evictable_type(i, swappiness) {
+ 		int scanned;
+@@ -4824,9 +4909,24 @@ static int evict_folios(struct lruvec *lruvec, struct scan_control *sc, int swap
+ 	struct mem_cgroup *memcg = lruvec_memcg(lruvec);
+ 	struct pglist_data *pgdat = lruvec_pgdat(lruvec);
+ 
++	struct le9_limits le9 = le9_node_limits(pgdat);
++	bool prefer_anon = le9.clean_low && sc->priority && swappiness;
++
++	/* Respect the caller's file-only (0) and anon-only (>max) modes. */
++	if (le9.anon_min) {
++		if (le9.clean_min || swappiness > MAX_SWAPPINESS)
++			return 0;
++		swappiness = 0;
++		prefer_anon = false;
++	} else if (le9.clean_min) {
++		if (!swappiness)
++			return 0;
++		swappiness = MAX_SWAPPINESS + 1;
++	}
++
+ 	spin_lock_irq(&lruvec->lru_lock);
+ 
+-	scanned = isolate_folios(lruvec, sc, swappiness, &type, &list);
++	scanned = isolate_folios(lruvec, sc, swappiness, &type, &list, prefer_anon);
+ 
+ 	scanned += try_to_inc_min_seq(lruvec, swappiness);
+ 

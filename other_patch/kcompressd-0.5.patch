@@ -1,0 +1,262 @@
+diff --git a/Documentation/admin-guide/sysctl/vm.rst b/Documentation/admin-guide/sysctl/vm.rst
+index f48eaa98d22d2b575f6e913f437b0d548daac3e6..a6021a9a6703ac04218b6af5badb57565441b354 100644
+--- a/Documentation/admin-guide/sysctl/vm.rst
++++ b/Documentation/admin-guide/sysctl/vm.rst
+@@ -40,6 +40,7 @@ Currently, these files are in /proc/sys/vm:
+ - extfrag_threshold
+ - highmem_is_dirtyable
+ - hugetlb_shm_group
++- kcompressd
+ - laptop_mode
+ - legacy_va_layout
+ - lowmem_reserve_ratio
+@@ -347,6 +348,15 @@ hugetlb_shm_group contains group id that is allowed to create SysV
+ shared memory segment using hugetlb page.
+ 
+ 
++kcompressd
++=========
++
++Maximum number of locked anonymous folios queued per node for asynchronous
++swapout by kswapd. The default is 24 and the maximum is 256. Set this to 0
++to keep new writes on the normal swap path. Queued work still drains. Offload is
++available with zswap or a swap device advertising efficient synchronous writes.
++
++
+ laptop_mode
+ ===========
+ 
+diff --git a/mm/page_io.c b/mm/page_io.c
+index cc03fce5b8b44f693c6a4406d8df28dfbb3d4e51..399cde8d0dc2e0ec6e624b5b30fc45a16a04ea2f 100644
+--- a/mm/page_io.c
++++ b/mm/page_io.c
+@@ -25,6 +25,10 @@
+ #include <linux/sched/task.h>
+ #include <linux/delayacct.h>
+ #include <linux/zswap.h>
++#include <linux/kfifo.h>
++#include <linux/kthread.h>
++#include <linux/slab.h>
++#include <linux/sysctl.h>
+ #include "swap.h"
+ 
+ #undef CREATE_TRACE_POINTS
+@@ -237,6 +241,159 @@ static void swap_zeromap_folio_clear(struct folio *folio)
+ 	}
+ }
+ 
++/*
++ * Kcompressd-Unofficial, based on work by Masahito Suzuki and Qun-Wei Lin.
++ * Only the node's own kswapd produces work. Its start/stop lock serializes
++ * queue creation and teardown, so the queue outlives its sole producer.
++ */
++#define KCOMPRESS_FIFO_SIZE 256
++
++struct kcompress_queue {
++	DECLARE_KFIFO(folios, struct folio *, KCOMPRESS_FIFO_SIZE);
++	spinlock_t lock;
++	wait_queue_head_t wait;
++	struct task_struct *worker;
++};
++
++static struct kcompress_queue *kcompress_queues[MAX_NUMNODES];
++static int kcompressd_depth __read_mostly = 24;
++
++#ifdef CONFIG_SYSCTL
++static int kcompressd_max_depth = KCOMPRESS_FIFO_SIZE;
++static struct ctl_table kcompressd_sysctls[] = {
++	{
++		.procname	= "kcompressd",
++		.data		= &kcompressd_depth,
++		.maxlen		= sizeof(kcompressd_depth),
++		.mode		= 0644,
++		.proc_handler	= proc_dointvec_minmax,
++		.extra1		= SYSCTL_ZERO,
++		.extra2		= &kcompressd_max_depth,
++	},
++};
++
++static int __init kcompressd_sysctl_init(void)
++{
++	register_sysctl_init("vm", kcompressd_sysctls);
++	return 0;
++}
++late_initcall(kcompressd_sysctl_init);
++#endif
++
++/* Finish a queued write with a fresh wbc: the caller's swap plug is local. */
++static void kcompress_write(struct folio *folio)
++{
++	struct writeback_control wbc = {
++		.sync_mode = WB_SYNC_NONE,
++		.nr_to_write = SWAP_CLUSTER_MAX,
++		.range_end = LLONG_MAX,
++		.for_reclaim = 1,
++	};
++
++	if (zswap_store(folio)) {
++		folio_unlock(folio);
++	} else if (!mem_cgroup_zswap_writeback_enabled(folio_memcg(folio))) {
++		/* The limit may have changed since enqueue. Retry on reclaim. */
++		folio_mark_dirty(folio);
++		folio_unlock(folio);
++	} else {
++		__swap_writepage(folio, &wbc);
++	}
++	folio_put(folio);
++}
++
++static int kcompressd_thread(void *data)
++{
++	struct kcompress_queue *q = data;
++	struct folio *folio;
++
++	current->flags |= PF_MEMALLOC | PF_KSWAPD;
++	for (;;) {
++		wait_event_idle(q->wait, kthread_should_stop() ||
++				!kfifo_is_empty(&q->folios));
++		while (kfifo_out_spinlocked(&q->folios, &folio, 1, &q->lock)) {
++			kcompress_write(folio);
++			cond_resched();
++		}
++		if (kthread_should_stop())
++			break;
++	}
++	return 0;
++}
++
++void kcompressd_start(int nid)
++{
++	struct kcompress_queue *q;
++
++	q = kzalloc_node(sizeof(*q), GFP_KERNEL, nid);
++	if (!q)
++		return;
++	INIT_KFIFO(q->folios);
++	spin_lock_init(&q->lock);
++	init_waitqueue_head(&q->wait);
++	q->worker = kthread_create_on_node(kcompressd_thread, q, nid,
++					  "kcompressd%d", nid);
++	if (IS_ERR(q->worker)) {
++		kfree(q);
++		return;
++	}
++	kcompress_queues[nid] = q;
++	wake_up_process(q->worker);
++}
++
++void kcompressd_stop(int nid)
++{
++	struct kcompress_queue *q = kcompress_queues[nid];
++	struct folio *folio;
++
++	if (!q)
++		return;
++	kthread_stop(q->worker);
++	/* kthread_stop() may have preceded the first run of the worker. */
++	while (kfifo_get(&q->folios, &folio))
++		kcompress_write(folio);
++	kcompress_queues[nid] = NULL;
++	kfree(q);
++}
++
++static bool kcompressd_store(struct folio *folio)
++{
++	unsigned int depth = READ_ONCE(kcompressd_depth);
++	struct kcompress_queue *q;
++	struct folio *head;
++
++	if (!depth || !current_is_kswapd() || !folio_test_anon(folio) ||
++	    current != READ_ONCE(folio_pgdat(folio)->kswapd))
++		return false;
++	q = kcompress_queues[folio_nid(folio)];
++	if (!q || !mem_cgroup_zswap_writeback_enabled(folio_memcg(folio)))
++		return false;
++	if (!zswap_is_enabled() && !(data_race(folio_swap_flags(folio)) &
++				     __SWP_WRITE_SYNCHRONOUS_IO))
++		return false;
++
++	/* On saturation the producer processes older folios before enqueue. */
++	spin_lock(&q->lock);
++	while (kfifo_len(&q->folios) >= depth) {
++		if (WARN_ON_ONCE(!kfifo_get(&q->folios, &head))) {
++			spin_unlock(&q->lock);
++			return false;
++		}
++		spin_unlock(&q->lock);
++		kcompress_write(head);
++		spin_lock(&q->lock);
++	}
++	folio_get(folio);
++	if (WARN_ON_ONCE(!kfifo_put(&q->folios, folio))) {
++		spin_unlock(&q->lock);
++		folio_put(folio);
++		return false;
++	}
++	spin_unlock(&q->lock);
++	wake_up(&q->wait);
++	return true;
++}
++
+ /*
+  * We may have stale swap cache pages in memory: notice
+  * them here and get rid of the unnecessary final write.
+@@ -279,6 +436,8 @@ int swap_writepage(struct page *page, struct writeback_control *wbc)
+ 		 */
+ 		swap_zeromap_folio_clear(folio);
+ 	}
++	if (kcompressd_store(folio))
++		return 0;
+ 	if (zswap_store(folio)) {
+ 		folio_unlock(folio);
+ 		return 0;
+diff --git a/mm/swap.h b/mm/swap.h
+index ad2f121de970d50647b3010e1ddf8d5af7daa1ac..54b9d225180e81c6be4df12f73cc307c24266381 100644
+--- a/mm/swap.h
++++ b/mm/swap.h
+@@ -9,6 +9,8 @@ struct mempolicy;
+ #include <linux/blk_types.h> /* for bio_end_io_t */
+ 
+ /* linux/mm/page_io.c */
++void kcompressd_start(int nid);
++void kcompressd_stop(int nid);
+ int sio_pool_init(void);
+ struct swap_iocb;
+ void swap_read_folio(struct folio *folio, struct swap_iocb **plug);
+@@ -107,6 +109,8 @@ static inline int swap_zeromap_batch(swp_entry_t entry, int max_nr,
+ }
+ 
+ #else /* CONFIG_SWAP */
++static inline void kcompressd_start(int nid) { }
++static inline void kcompressd_stop(int nid) { }
+ struct swap_iocb;
+ static inline void swap_read_folio(struct folio *folio, struct swap_iocb **plug)
+ {
+diff --git a/mm/vmscan.c b/mm/vmscan.c
+index 33275e025eb3cd4a8f02f558114dc0ea258bc113..66ebe065738d2f44647f36198c1797fb65bd49b4 100644
+--- a/mm/vmscan.c
++++ b/mm/vmscan.c
+@@ -7674,6 +7674,7 @@ void __meminit kswapd_run(int nid)
+ 
+ 	pgdat_kswapd_lock(pgdat);
+ 	if (!pgdat->kswapd) {
++		kcompressd_start(nid);
+ 		pgdat->kswapd = kthread_run(kswapd, pgdat, "kswapd%d", nid);
+ 		if (IS_ERR(pgdat->kswapd)) {
+ 			/* failure at boot is fatal */
+@@ -7681,6 +7682,7 @@ void __meminit kswapd_run(int nid)
+ 				   nid, PTR_ERR(pgdat->kswapd));
+ 			BUG_ON(system_state < SYSTEM_RUNNING);
+ 			pgdat->kswapd = NULL;
++			kcompressd_stop(nid);
+ 		}
+ 	}
+ 	pgdat_kswapd_unlock(pgdat);
+@@ -7700,6 +7702,7 @@ void __meminit kswapd_stop(int nid)
+ 	if (kswapd) {
+ 		kthread_stop(kswapd);
+ 		pgdat->kswapd = NULL;
++		kcompressd_stop(nid);
+ 	}
+ 	pgdat_kswapd_unlock(pgdat);
+ }

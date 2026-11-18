@@ -57,6 +57,11 @@ on:
         required: true
         type: boolean
         default: 'true'
+      le9uo_enable:
+        description: '是否安装 LE9UO 与 Kcompressd 补丁'
+        required: true
+        type: boolean
+        default: 'true'
       droidspaces_enable:
         description: '是否开启 Droidspaces 容器支持(轻量化的完整Linux容器支持)'
         required: true
@@ -451,6 +456,26 @@ jobs:
           wget -O apply_lz4_neon.sh https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/apply_lz4_neon.sh
           bash apply_lz4_neon.sh
           echo "LZ4 NEON 加速挂钩完成"
+
+      - name: 应用 LE9UO 与 Kcompressd 补丁
+        run: |
+          echo "正在应用LE9UO 与 Kcompressd 补丁…"
+          cd kernel_workspace/common
+          wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/le9uo-1.15.patch
+          wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/kcompressd-0.5.patch
+          patch -p1 -F 3 < le9uo-1.15.patch
+          patch -p1 -F 3 < kcompressd-0.5.patch
+          #默认启用LE9UO
+          echo "CONFIG_WORKINGSET_PROTECTION=y" >> ./arch/arm64/configs/gki_defconfig
+          #匿名页硬下限。低于该比例时，le9uo 保护匿名页，范围0-100，默认为1
+          echo "CONFIG_ANON_MIN_RATIO=1" >> ./arch/arm64/configs/gki_defconfig
+          #干净文件页硬下限。提高它会保留更多文件缓存，也可能让系统更早触发 OOM，范围0-100，默认为4
+          echo "CONFIG_CLEAN_MIN_RATIO=4" >> ./arch/arm64/configs/gki_defconfig
+          #干净文件页软阈值。低于该比例时优先回收可换出的匿名页，回收压力最高时可放宽。通常应设为大于或等于 CLEAN_MIN_RATIO，范围0-100，默认为15
+          echo "CONFIG_CLEAN_LOW_RATIO=15" >> ./arch/arm64/configs/gki_defconfig
+          #Kcompressd-Unofficial编入内核后默认启用
+          #在设备上可以通过sysctl -w vm.kcompressd=24 指令修改队列深度，范围0-256，默认为24
+          echo "LE9UO 与 Kcompressd补丁应用完成"
           
       - name: 应用 PMICWD 修复补丁
         run: |

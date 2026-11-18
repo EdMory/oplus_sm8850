@@ -4,8 +4,6 @@
 [![COOLAPK](https://img.shields.io/badge/EdMory-EdMory?style=flat&logo=android&logoColor=FF4500&label=%E9%85%B7%E5%AE%89&color=FF4500)](http://www.coolapk.com/u/983818)
 [![DISCUSSION](https://img.shields.io/badge/%E8%AE%A8%E8%AE%BA%E5%8C%BA-discussions?logo=livechat&logoColor=FFBBFF&color=3399ff)](https://github.com/edmory/oplus_sm8850/discussions)
 
-<img alt="Endpoint Badge" src="https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fcctv18%2Fkernel-workshop%2Frefs%2Fheads%2Fhotfix%2Fnotice.json">
-
 ##### 
 一个更方便、快捷的自动化OPPO/一加/真我系列骁龙8Elite Gen5(SM8850)机型的通用6.12内核编译脚本。
 ##### 

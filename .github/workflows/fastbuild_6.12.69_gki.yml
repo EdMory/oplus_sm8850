@@ -808,7 +808,7 @@ jobs:
       - name: 安装性能优化补丁集
         if: inputs.perf_patch_enable
         run: |
-          echo "正在集成 SM8750 移植性能优化补丁集…"
+          echo "正在集成性能优化补丁集…"
           cd kernel_workspace/common
           PATCH=sm8750-perf-core-6.12.patch
           wget -O $PATCH https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/$PATCH
@@ -816,6 +816,7 @@ jobs:
           echo "性能优化补丁集应用完成"
 
       - name: 应用 cherry-pick 验证通过补丁集(35条)
+        if: inputs.perf_patch_enable
         run: |
           echo "正在集成 6.12.69->92 验证通过补丁集(35条)..."
           cd kernel_workspace/common
@@ -825,6 +826,7 @@ jobs:
           echo "cherry-pick 验证通过补丁集(35条)应用完成"
 
       - name: 应用 cherry-pick backport 补丁集(10条)
+        if: inputs.perf_patch_enable
         run: |
           echo "正在集成 6.12.69 backport 补丁集(10条，cctv18 6.12.69 树内置的11条已剔除)..."
           cd kernel_workspace/common
@@ -834,6 +836,7 @@ jobs:
           echo "cherry-pick backport 补丁集(10条)应用完成"
 
       - name: 应用 cherry-pick 补丁集(44条)
+        if: inputs.perf_patch_enable
         run: |
           echo "正在集成 6.12.69->115 补丁集(44条)..."
           cd kernel_workspace/common
@@ -1071,7 +1074,8 @@ jobs:
           echo "LZ4: ${{ github.event.inputs.lz4_enable }}" >> ./ak3.log
           echo "LZ4KD: ${{ github.event.inputs.lz4kd_enable }}" >> ./ak3.log
           echo "LZ4KDS: ${{ github.event.inputs.lz4kds_enable }}" >> ./ak3.log
-          echo "LE9UO ${{ github.event.inputs.le9uo_enable }}" >> ./ak3.log
+          echo "LE9UO: ${{ github.event.inputs.le9uo_enable }}" >> ./ak3.log
+          echo "Kcompressd: ${{ github.event.inputs.le9uo_enable }}" >> ./ak3.log
           echo "Re-Kernel: ${{ github.event.inputs.rekernel_enable }}" >> ./ak3.log
           echo "BBG: ${{ github.event.inputs.baseband_guard }}" >> ./ak3.log
           echo "IPset: ${{ github.event.inputs.better_net }}" >> ./ak3.log

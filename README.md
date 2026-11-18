@@ -22,9 +22,9 @@
 - [x] ReSukiSU/SukiSU Ultra/KernelSU Next/原版KernelSU多版本KSU可选
 - [x] cctv18独家设计的 [ccache-ECS](https://github.com/cctv18/ccache-ECS) 缓存及大量编译流程优化，编译时间可稳定在约6min *(首次编译时会拉取公共预置ccache，从第二次开始没有大量配置改动的情况下，单次编译时间约6min；距离上一次调用两周未调用后缓存会被自动清除，此时编译会自动重建缓存)*
 - [x] 引入[Optprobe](https://lkml.rescloud.iu.edu/hypermail/linux/kernel/2503.3/02174.html)
-- [x] LZ4 1.10.0 & ZSTD 1.5.7 算法更新&优化补丁(来自[@ferstar](https://github.com/ferstar), 移植by [@Xiaomichael](https://github.com/Xiaomichael), 6.12版本补丁重制by [@cctv18](https://github.com/cctv18))
+- [x] LZ4 1.11.0 & ZSTD 1.5.8 算法更新&优化补丁(来自[@ferstar](https://github.com/ferstar), 移植by [@Xiaomichael](https://github.com/Xiaomichael), 6.12版本补丁重制by [@cctv18](https://github.com/cctv18))
 - [x] 移植LZ4KD支持到6.12内核(可选补丁)
-- [x] 可选加入 BBR/Brutal 及一系列 tcp 拥塞控制算法
+- [x] 可选加入 BBR/Brutal 及一系列 tcp 拥塞控制算法，设置BBR3为默认拥塞算法，FQ_CODEL为默认队列算法以优化网络延迟环境下的表现
 - [x] [INTFP](https://github.com/firelzrd/intfp),[ISQRT](https://github.com/firelzrd/isqrt)移植
 - [x] [ADIOS](https://github.com/firelzrd/adios),[BORE](https://github.com/firelzrd/bore),[Cambyses](https://github.com/firelzrd/cambyses)移植
 - [x] CherryPick了部分上游提交，优化了调度器表现

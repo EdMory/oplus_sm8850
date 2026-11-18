@@ -466,9 +466,8 @@ jobs:
           wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/kcompressd-0.5.patch
           patch -p1 -F 3 < le9uo-1.15.patch
           patch -p1 -F 3 < kcompressd-0.5.patch
-          #默认启用LE9UO
-          echo "CONFIG_WORKINGSET_PROTECTION=y" >> ./arch/arm64/configs/gki_defconfig
-          #匿名页硬下限。低于该比例时，le9uo 保护匿名页，范围0-100，默认为1
+          #LE9UO编入内核后默认启用
+          #匿名页硬下限。低于该比例时，le9uo 保护匿名页，范围0-100，为了适配16GB RAM设备，默认为1
           echo "CONFIG_ANON_MIN_RATIO=1" >> ./arch/arm64/configs/gki_defconfig
           #干净文件页硬下限。提高它会保留更多文件缓存，也可能让系统更早触发 OOM，范围0-100，默认为4
           echo "CONFIG_CLEAN_MIN_RATIO=4" >> ./arch/arm64/configs/gki_defconfig

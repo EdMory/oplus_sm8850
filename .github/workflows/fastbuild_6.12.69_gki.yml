@@ -743,6 +743,7 @@ jobs:
           cd kernel_workspace
           echo "CONFIG_REKERNEL=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_REKERNEL_NETWORK=y" >> ./common/arch/arm64/configs/gki_defconfig
+          echo "Re-Kernel支持已集成完成"
 
       - name: 启用内核级基带保护
         if: inputs.baseband_guard

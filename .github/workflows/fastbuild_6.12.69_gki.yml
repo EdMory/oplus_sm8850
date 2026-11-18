@@ -458,6 +458,7 @@ jobs:
           echo "LZ4 NEON 加速挂钩完成"
 
       - name: 应用 LE9UO 与 Kcompressd 补丁
+        if: inputs.le9uo_enable
         run: |
           echo "正在应用LE9UO 与 Kcompressd 补丁…"
           cd kernel_workspace/common
@@ -1070,6 +1071,7 @@ jobs:
           echo "LZ4: ${{ github.event.inputs.lz4_enable }}" >> ./ak3.log
           echo "LZ4KD: ${{ github.event.inputs.lz4kd_enable }}" >> ./ak3.log
           echo "LZ4KDS: ${{ github.event.inputs.lz4kds_enable }}" >> ./ak3.log
+          echo "LE9UO ${{ github.event.inputs.le9uo_enable }}" >> ./ak3.log
           echo "Re-Kernel: ${{ github.event.inputs.rekernel_enable }}" >> ./ak3.log
           echo "BBG: ${{ github.event.inputs.baseband_guard }}" >> ./ak3.log
           echo "IPset: ${{ github.event.inputs.better_net }}" >> ./ak3.log
@@ -1163,6 +1165,7 @@ jobs:
           - LZ4支持：${{ github.event.inputs.lz4_enable }}
           - LZ4KD支持：${{ github.event.inputs.lz4kd_enable }}
           - LZ4KDS支持：${{ github.event.inputs.lz4kds_enable }}
+          - LE9UO与Kcompressd支持：${{ github.event.inputs.le9uo_enable }}
           - Droidspaces 容器支持：${{ github.event.inputs.droidspaces_enable }}
           - 网络功能增强：${{ github.event.inputs.better_net }}
           - BBR3 等拥塞控制算法支持：${{ github.event.inputs.bbr_enable }}

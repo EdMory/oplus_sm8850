@@ -338,7 +338,7 @@ jobs:
             KSU_VERSION=$(expr $(git rev-list --count main 2>/dev/null || git rev-list --count HEAD 2>/dev/null || echo 0) + 30000)
             echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
             echo "ksuver=$KSU_VERSION" >> $GITHUB_OUTPUT
-            # 修正头文件路径（KowSU 新布局）
+            # 修正头文件路径（KSU 新布局）
             cd kernel
             for h in include/*.h; do ln -sfn "include/$(basename "$h")" "$(basename "$h")"; done
             [ -d uapi ] && [ ! -L uapi ] && mv uapi uapi.bak
@@ -356,6 +356,11 @@ jobs:
             for h in include/*.h; do ln -sfn "include/$(basename "$h")" "$(basename "$h")"; done
             [ -d uapi ] && [ ! -L uapi ] && mv uapi uapi.bak
             ln -sfn ../uapi uapi
+            # 修复 preinit 相关问题
+            cd ../../common
+            mkdir -p usr/include
+            cp -r include/uapi/* usr/include/ 2>/dev/null || true
+            cp -r arch/arm64/include/uapi/* usr/include/ 2>/dev/null || true
           else
             echo "已选择无内置KernelSU模式，跳过KernelSU配置..."
           fi
@@ -534,8 +539,8 @@ jobs:
           echo "CONFIG_PM_WAKELOCKS_LIMIT=10" >> ./common/arch/arm64/configs/gki_defconfig
           # 禁用 defconfig 检查
           sed -i 's/check_defconfig//' ./common/build.config.gki
-          #将uapi标准头安装到 usr/include 目录，这可能会拖慢编译速度，但是禁用它将造成preinit相关的问题
-          echo "CONFIG_HEADERS_INSTALL=y" >> ./common/arch/arm64/configs/gki_defconfig
+          #跳过将uapi标准头安装到 usr/include 目录，加快编译速度
+          echo "CONFIG_HEADERS_INSTALL=n" >> ./common/arch/arm64/configs/gki_defconfig
           # 6.12内核Rust配置
           echo "CONFIG_RUST=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_ANDROID_BINDER_IPC_RUST=m" >> ./common/arch/arm64/configs/gki_defconfig

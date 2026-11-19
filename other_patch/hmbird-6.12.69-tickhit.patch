@@ -1,16 +1,16 @@
 diff --git a/kernel/sched/hmbird/hmbird_sched_proc.c b/kernel/sched/hmbird/hmbird_sched_proc.c
-index d99b31a..9999999 100644
+index d99b31a..1234567 100644
 --- a/kernel/sched/hmbird/hmbird_sched_proc.c
 +++ b/kernel/sched/hmbird/hmbird_sched_proc.c
 @@ -44,6 +44,150 @@ int cluster_separate = 1;
  
  char saved_gov[NR_CPUS][MAX_GOV_LEN];
  
-+/* SM8850 Boost Policy - SM8850优化默认参数 */
++/* SM8850 Boost Policy Parameters */
 +struct boost_policy_params boost_policy_params = {
-+	.enable = 1,              /* 启用 */
-+	.bottom_freq = 1500000,   /* 1.5 GHz 最低频率 */
-+	.boost_weight = 140,      /* 140% boost权重 */
++	.enable = 1,
++	.bottom_freq = 1500000,
++	.boost_weight = 140,
 +};
 +EXPORT_SYMBOL_GPL(boost_policy_params);
 +
@@ -32,7 +32,6 @@ index d99b31a..9999999 100644
 +}
 +EXPORT_SYMBOL_GPL(hmbird_get_boost_weight);
 +
-+/* Boost Policy proc操作 */
 +static int boost_policy_show(struct seq_file *m, void *v)
 +{
 +	struct boost_policy_params *data = m->private;
@@ -93,7 +92,6 @@ index d99b31a..9999999 100644
 +	.proc_release = single_release,
 +};
 +
-+/* Tick Hit proc操作 */
 +static int tick_hit_show(struct seq_file *m, void *v)
 +{
 +	struct tick_hit_params *data = m->private;
@@ -149,28 +147,31 @@ index d99b31a..9999999 100644
  static int set_proc_buf_val(struct file *file, const char __user *buf, size_t count, int *val)
  {
  	char kbuf[32] = {0};
-@@ -974,6 +1118,14 @@ static int __init hmbird_proc_init(void)
+@@ -855,6 +999,14 @@ static int __init hmbird_proc_init(void)
+ 	if (!hmbird_dir) {
+ 		pr_err("Error creating proc directory %s\n", HMBIRD_SCHED_PROC_DIR);
  		return -ENOMEM;
  	}
- 
-+	/* SM8850: 注册 Tick Hit 和 Boost Policy proc接口 */
++
++	/* SM8850: Register Tick Hit and Boost Policy */
 +	if (!proc_create_data("boost_policy", 0644, hmbird_dir,
 +			      &boost_policy_proc_ops, &boost_policy_params))
 +		return -ENOMEM;
 +	if (!proc_create_data("tick_hit", 0644, hmbird_dir,
 +			      &tick_hit_proc_ops, &tick_hit_params))
 +		return -ENOMEM;
-+
+ 
  	/* /proc/hmbird_sched--begin */
  	HMBIRD_CREATE_PROC_ENTRY_DATA("scx_enable", HMBIRD_PROC_PERMISSION,
+@@ -1028,6 +1176,10 @@ static int __init hmbird_proc_init(void)
+ 	HMBIRD_CREATE_PROC_ENTRY_DATA("cluster_separate", HMBIRD_PROC_PERMISSION,
  				hmbird_dir,
-@@ -1147,6 +1295,9 @@ static int __init hmbird_proc_init(void)
- 	/* /proc/hmbird_sched--end */
+ 				&hmbird_common_proc_ops,
+ 				&cluster_separate);
  
- 	/* 启用 Shadow Tick 和 Tick Hit 默认值 */
++	/* SM8850: Enable shadow tick by default */
 +	highres_tick_ctrl = 1;
 +	tick_hit_params.enable = 1;
-+	pr_info("[HMBIRD] SM8850: shadow tick and tick_hit enabled by default\n");
- 
- 	/* mkdir /proc/hmbird_sched/slim_walt */
- 	load_track_dir = proc_mkdir(LOAD_TRACK_DIR, hmbird_dir);
++
+ 	return 0;
+ }

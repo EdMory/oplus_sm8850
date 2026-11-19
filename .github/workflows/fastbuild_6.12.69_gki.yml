@@ -743,11 +743,7 @@ jobs:
           echo "基于一加调度移植, 独立调度类与 SCHED_CLASS_EXT/BORE 共存; 使用 android_oem_data1 槽位承载 TS/OPS/RQ, 不触碰 ANDROID_KABI_RESERVE"
           cd kernel_workspace/common
           wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/hmbird-6.12.69-kabi-safe.patch
-          wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/hmbird-6.12.69-shadow-tick-cpufreq-fix.patch
-          wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/hmbird-6.12.69-sm8850-complete-zero-fuzz.patch
           patch -p1 --no-backup-if-mismatch -F 0 < hmbird-6.12.69-kabi-safe.patch
-          patch -p1 --no-backup-if-mismatch -F 0 < hmbird-6.12.69-shadow-tick-cpufreq-fix.patch
-          patch -p1 --no-backup-if-mismatch -F 0 < hmbird-6.12.69-sm8850-complete-zero-fuzz.patch
           echo "CONFIG_HMBIRD_SCHED=y" >> ./arch/arm64/configs/gki_defconfig
           echo "CONFIG_HIGH_RES_TIMERS=y" >> ./arch/arm64/configs/gki_defconfig
           echo "HMBIRD 集成完成"

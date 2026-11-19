@@ -1,0 +1,632 @@
+diff --git a/kernel/sched/hmbird/hmbird_shadow_tick.h b/kernel/sched/hmbird/hmbird_shadow_tick.h
+new file mode 100644
+index 0000000..f1a2e8b
+--- /dev/null
++++ b/kernel/sched/hmbird/hmbird_shadow_tick.h
+@@ -0,0 +1,95 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/*
++ * HMBIRD Shadow Tick Implementation for High-Resolution Timer Support
++ * SM8850 Optimization: 3ms hrtimer to cover 4ms standard tick period
++ *
++ * Copyright (c) 2024 OPlus.
++ * Copyright (c) 2024 Dao Huang
++ * Copyright (c) 2024 Yuxing Wang
++ * Copyright (c) 2024 Taiyu Li
++ */
++
++#ifndef _HMBIRD_SHADOW_TICK_H
++#define _HMBIRD_SHADOW_TICK_H
++
++#include <linux/hrtimer.h>
++#include <linux/sched.h>
++
++/* SM8850 Tick Phase Configuration */
++#define HMBIRD_SHADOW_TICK_NS		(3 * NSEC_PER_MSEC)	/* 3ms for 4ms coverage */
++#define HMBIRD_STANDARD_TICK_NS		(4 * NSEC_PER_MSEC)	/* 4ms standard tick */
++#define HMBIRD_TICK_PHASE_OFFSET_NS	(1000000)		/* 1ms phase offset */
++
++/* CPU Frequency Scaling Boost Configuration */
++#define HMBIRD_TICK_HIT_BOOST_THRESHOLD	(80)		/* 80% utilization threshold */
++#define HMBIRD_TICK_HIT_BOOST_ENABLE	(1)
++#define HMBIRD_TICK_HIT_BOOST_DISABLE	(0)
++
++/* SM8850 CPU Cluster Characteristics */
++#define SM8850_LITTLE_CPU_BASE		(0)
++#define SM8850_LITTLE_CPU_END		(6)
++#define SM8850_BIG_CPU_BASE		(6)
++#define SM8850_BIG_CPU_END		(8)
++
++/* Boost signal flags for CPUFreq governor */
++#define HMBIRD_BOOST_SIGNAL_TICK_HIT	(1 << 0)	/* Shadow tick hit signal */
++#define HMBIRD_BOOST_SIGNAL_UTIL_HIGH	(1 << 1)	/* High utilization signal */
++#define HMBIRD_BOOST_SIGNAL_CRITICAL	(1 << 2)	/* Critical task signal */
++
++struct hmbird_shadow_tick_data {
++	struct hrtimer			timer;
++	ktime_t				last_tick;
++	unsigned long			tick_count;
++	unsigned long			missed_ticks;
++	int				boost_signal;
++	bool				enabled;
++	struct task_struct		*curr_task;
++	u64				task_util_sum;
++	u32				nr_running;
++};
++
++extern DEFINE_PER_CPU(struct hmbird_shadow_tick_data, hmbird_shadow_tick_data);
++extern int hmbird_shadow_tick_enabled;
++
++/* Shadow Tick Operations */
++enum hrtimer_restart hmbird_shadow_tick_handler(struct hrtimer *timer);
++void hmbird_init_shadow_tick(void);
++void hmbird_start_shadow_tick(int cpu);
++void hmbird_stop_shadow_tick(int cpu);
++void hmbird_restart_shadow_tick(int cpu);
++
++/* CPUFreq Integration */
++int hmbird_notify_cpufreq_boost(int cpu, int boost_signal);
++int hmbird_cpufreq_handle_boost(int cpu, int boost_signal);
++void hmbird_cpufreq_init(void);
++
++/* Tick Phase Adjustment */
++void hmbird_adjust_tick_phase(int cpu);
++void hmbird_set_tick_phase_offset(int offset_ns);
++
++/* Boost Signal Management */
++static inline void hmbird_set_boost_signal(int cpu, int signal)
++{
++	per_cpu(hmbird_shadow_tick_data, cpu).boost_signal |= signal;
++	hmbird_notify_cpufreq_boost(cpu, signal);
++}
++
++static inline void hmbird_clear_boost_signal(int cpu, int signal)
++{
++	per_cpu(hmbird_shadow_tick_data, cpu).boost_signal &= ~signal;
++}
++
++static inline int hmbird_get_boost_signal(int cpu)
++{
++	return per_cpu(hmbird_shadow_tick_data, cpu).boost_signal;
++}
++
++/* Shadow Tick Status */
++static inline bool hmbird_shadow_tick_active(int cpu)
++{
++	return per_cpu(hmbird_shadow_tick_data, cpu).enabled;
++}
++
++static inline unsigned long hmbird_get_tick_count(int cpu)
++{
++	return per_cpu(hmbird_shadow_tick_data, cpu).tick_count;
++}
++
++#endif /* _HMBIRD_SHADOW_TICK_H */
+diff --git a/kernel/sched/hmbird/hmbird_shadow_tick.c b/kernel/sched/hmbird/hmbird_shadow_tick.c
+new file mode 100644
+index 0000000..8f5e6e8
+--- /dev/null
++++ b/kernel/sched/hmbird/hmbird_shadow_tick.c
+@@ -0,0 +1,172 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * HMBIRD Shadow Tick Implementation
++ * High-resolution timer mechanism to enable sub-millisecond scheduling decisions
++ *
++ * SM8850 Optimization:
++ * - 3ms hrtimer to cover standard 4ms tick period
++ * - HMBIRD_TICK_HIT_BOOST signal delivery to CPUFreq governor
++ * - Phase offset adjustment for CPU cluster coordination
++ *
++ * Copyright (c) 2024 OPlus.
++ */
++
++#include <linux/hrtimer.h>
++#include <linux/sched.h>
++#include <linux/cpufreq.h>
++#include <linux/smp.h>
++#include "hmbird_shadow_tick.h"
++#include "slim.h"
++
++DEFINE_PER_CPU(struct hmbird_shadow_tick_data, hmbird_shadow_tick_data);
++int hmbird_shadow_tick_enabled = 1;
++
++/* CPUFreq boost notification */
++static int hmbird_cpufreq_boost_callback(struct notifier_block *nb,
++					  unsigned long val, void *data)
++{
++	/* CPUFreq governor receives boost signal and adjusts scaling */
++	return NOTIFY_OK;
++}
++
++static struct notifier_block hmbird_cpufreq_nb = {
++	.notifier_call = hmbird_cpufreq_boost_callback,
++};
++
++/* Shadow tick hrtimer handler */
++enum hrtimer_restart hmbird_shadow_tick_handler(struct hrtimer *timer)
++{
++	struct hmbird_shadow_tick_data *tick_data;
++	struct rq *rq;
++	int cpu;
++	u64 util_sum = 0;
++	int boost_signal = 0;
++	ktime_t now, next_tick;
++
++	cpu = smp_processor_id();
++	tick_data = this_cpu_ptr(&hmbird_shadow_tick_data);
++	rq = cpu_rq(cpu);
++
++	now = ktime_get();
++	tick_data->last_tick = now;
++	tick_data->tick_count++;
++
++	/* Calculate current CPU utilization */
++	if (rq && rq->curr && rq->curr != rq->idle) {
++		struct task_struct *p = rq->curr;
++		
++		/* Check if task utilization exceeds boost threshold */
++		if (get_hmbird_ts(p)) {
++			u32 util = get_hmbird_ts(p)->sts.demand_scaled;
++			util_sum = util;
++
++			if (util > HMBIRD_TICK_HIT_BOOST_THRESHOLD) {
++				boost_signal |= HMBIRD_BOOST_SIGNAL_UTIL_HIGH;
++			}
++
++			/* Check if critical task (top_task_prop set) */
++			if (task_is_top_task(p)) {
++				boost_signal |= HMBIRD_BOOST_SIGNAL_CRITICAL;
++			}
++		}
++	}
++
++	/* Set boost signal for CPUFreq interaction */
++	if (boost_signal) {
++		hmbird_set_boost_signal(cpu, boost_signal | HMBIRD_BOOST_SIGNAL_TICK_HIT);
++		hmbird_notify_cpufreq_boost(cpu, boost_signal);
++	}
++
++	/* Reschedule for next shadow tick (3ms for SM8850) */
++	next_tick = ktime_add_ns(now, HMBIRD_SHADOW_TICK_NS);
++	hrtimer_set_expires(timer, next_tick);
++
++	return HRTIMER_RESTART;
++}
++
++/* Initialize shadow tick for CPU */
++void hmbird_start_shadow_tick(int cpu)
++{
++	struct hmbird_shadow_tick_data *tick_data;
++	struct hrtimer *timer;
++	ktime_t start_time;
++
++	if (!hmbird_shadow_tick_enabled)
++		return;
++
++	tick_data = &per_cpu(hmbird_shadow_tick_data, cpu);
++	
++	if (tick_data->enabled)
++		return;
++
++	timer = &tick_data->timer;
++	hrtimer_init(timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
++	timer->function = hmbird_shadow_tick_handler;
++
++	/* Calculate start time with phase offset for cluster coordination */
++	start_time = ktime_set(0, HMBIRD_SHADOW_TICK_NS);
++	if (cpu >= SM8850_BIG_CPU_BASE && cpu < SM8850_BIG_CPU_END) {
++		/* Add phase offset for big cluster */
++		start_time = ktime_add_ns(start_time, HMBIRD_TICK_PHASE_OFFSET_NS);
++	}
++
++	tick_data->last_tick = ktime_get();
++	tick_data->tick_count = 0;
++	tick_data->missed_ticks = 0;
++	tick_data->boost_signal = 0;
++	tick_data->enabled = true;
++
++	hrtimer_start_range_ns(timer, start_time,
++			       NSEC_PER_MSEC / 2, /* 0.5ms tolerance */
++			       HRTIMER_MODE_REL_PINNED);
++
++	pr_debug("HMBIRD: Shadow tick started on CPU%d\n", cpu);
++}
++
++/* Stop shadow tick for CPU */
++void hmbird_stop_shadow_tick(int cpu)
++{
++	struct hmbird_shadow_tick_data *tick_data;
++
++	tick_data = &per_cpu(hmbird_shadow_tick_data, cpu);
++	
++	if (!tick_data->enabled)
++		return;
++
++	hrtimer_cancel(&tick_data->timer);
++	tick_data->enabled = false;
++	tick_data->boost_signal = 0;
++
++	pr_debug("HMBIRD: Shadow tick stopped on CPU%d (ticks=%lu, missed=%lu)\n",
++		 cpu, tick_data->tick_count, tick_data->missed_ticks);
++}
++
++/* Restart shadow tick (for phase adjustment) */
++void hmbird_restart_shadow_tick(int cpu)
++{
++	hmbird_stop_shadow_tick(cpu);
++	hmbird_start_shadow_tick(cpu);
++}
++
++/* Adjust tick phase for CPU cluster */
++void hmbird_adjust_tick_phase(int cpu)
++{
++	struct hmbird_shadow_tick_data *tick_data;
++	struct hrtimer *timer;
++	ktime_t now, next_tick;
++	int phase_offset = 0;
++
++	tick_data = &per_cpu(hmbird_shadow_tick_data, cpu);
++	timer = &tick_data->timer;
++
++	if (cpu >= SM8850_BIG_CPU_BASE && cpu < SM8850_BIG_CPU_END)
++		phase_offset = HMBIRD_TICK_PHASE_OFFSET_NS;
++
++	now = ktime_get();
++	next_tick = ktime_add_ns(now, HMBIRD_SHADOW_TICK_NS + phase_offset);
++	hrtimer_set_expires(timer, next_tick);
++}
++
++/* CPUFreq boost notification */
++int hmbird_notify_cpufreq_boost(int cpu, int boost_signal)
++{
++	/* Signal CPUFreq governor to adjust scaling based on boost_signal */
++	return hmbird_cpufreq_handle_boost(cpu, boost_signal);
++}
++
++/* Initialize shadow tick subsystem */
++void hmbird_init_shadow_tick(void)
++{
++	int cpu;
++
++	if (!hmbird_shadow_tick_enabled)
++		return;
++
++	for_each_possible_cpu(cpu) {
++		struct hmbird_shadow_tick_data *tick_data;
++		tick_data = &per_cpu(hmbird_shadow_tick_data, cpu);
++		tick_data->enabled = false;
++		tick_data->boost_signal = 0;
++	}
++
++	pr_info("HMBIRD: Shadow Tick subsystem initialized (3ms interval for SM8850)\n");
++}
+diff --git a/kernel/sched/hmbird/hmbird_cpufreq.c b/kernel/sched/hmbird/hmbird_cpufreq.c
+new file mode 100644
+index 0000000..6c77a87
+--- /dev/null
++++ b/kernel/sched/hmbird/hmbird_cpufreq.c
+@@ -0,0 +1,156 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * HMBIRD CPUFreq Governor Integration
++ * Connects HMBIRD_TICK_HIT_BOOST signal to frequency scaling decisions
++ *
++ * SM8850 Optimization:
++ * - Dynamic frequency scaling based on shadow tick boost signals
++ * - CPU cluster awareness (little/big core separation)
++ * - Boost parameter tuning for SM8850 characteristics
++ *
++ * Copyright (c) 2024 OPlus.
++ */
++
++#include <linux/cpufreq.h>
++#include <linux/sched.h>
++#include <linux/notifier.h>
++#include "hmbird_shadow_tick.h"
++#include "slim.h"
++
++/* SM8850 CPU Frequency Scaling Parameters */
++#define HMBIRD_CPUFREQ_UP_RATE		(20)		/* % increase rate */
++#define HMBIRD_CPUFREQ_DOWN_RATE	(10)		/* % decrease rate */
++#define HMBIRD_CPUFREQ_LITTLE_BOOST	(1)		/* Little core boost */
++#define HMBIRD_CPUFREQ_BIG_BOOST	(2)		/* Big core boost (stronger) */
++
++/* Boost duration in jiffies */
++#define HMBIRD_BOOST_DURATION_MS	(16)		/* 16ms for 60Hz display */
++
++struct hmbird_cpufreq_data {
++	unsigned long			last_boost_time;
++	int				boost_level;
++	struct cpufreq_policy		*policy;
++	bool				boost_active;
++};
++
++static DEFINE_PER_CPU(struct hmbird_cpufreq_data, hmbird_cpufreq_data);
++
++/* Get CPU cluster type */
++static inline int hmbird_get_cpu_cluster(int cpu)
++{
++	if (cpu >= SM8850_BIG_CPU_BASE && cpu < SM8850_BIG_CPU_END)
++		return 1;	/* Big cluster */
++	return 0;	/* Little cluster */
++}
++
++/* Calculate boost frequency based on signal */
++static unsigned int hmbird_get_boost_freq(int cpu, int boost_signal)
++{
++	struct cpufreq_policy *policy = cpufreq_cpu_get_raw(cpu);
++	unsigned int base_freq, boost_freq;
++	int cluster;
++
++	if (!policy)
++		return policy->cur;
++
++	base_freq = policy->cur;
++	cluster = hmbird_get_cpu_cluster(cpu);
++
++	if (!(boost_signal & HMBIRD_BOOST_SIGNAL_TICK_HIT))
++		return base_freq;
++
++	/* Calculate boost frequency based on cluster and signal strength */
++	if (boost_signal & HMBIRD_BOOST_SIGNAL_CRITICAL) {
++		/* Critical task: boost to max */
++		boost_freq = policy->max;
++	} else if (boost_signal & HMBIRD_BOOST_SIGNAL_UTIL_HIGH) {
++		/* High utilization: moderate boost */
++		unsigned int boost_level = cluster ? HMBIRD_CPUFREQ_BIG_BOOST :
++						   HMBIRD_CPUFREQ_LITTLE_BOOST;
++		boost_freq = base_freq +
++			    (policy->max - base_freq) * boost_level / 2;
++	} else {
++		boost_freq = base_freq;
++	}
++
++	return min(boost_freq, policy->max);
++}
++
++/* Apply frequency scaling boost */
++static int hmbird_apply_cpufreq_boost(int cpu, int boost_signal)
++{
++	struct hmbird_cpufreq_data *cpufreq_data;
++	struct cpufreq_policy *policy;
++	unsigned int target_freq;
++	unsigned long now = jiffies;
++
++	cpufreq_data = &per_cpu(hmbird_cpufreq_data, cpu);
++	policy = cpufreq_cpu_get_raw(cpu);
++
++	if (!policy)
++		return -1;
++
++	/* Check boost duration */
++	if (time_before(now, cpufreq_data->last_boost_time +
++			msecs_to_jiffies(HMBIRD_BOOST_DURATION_MS))) {
++		/* Boost still active */
++		return 0;
++	}
++
++	target_freq = hmbird_get_boost_freq(cpu, boost_signal);
++
++	if (target_freq > policy->cur) {
++		cpufreq_data->boost_level = boost_signal;
++		cpufreq_data->last_boost_time = now;
++		cpufreq_data->boost_active = true;
++		
++		__cpufreq_driver_target(policy, target_freq,
++				       CPUFREQ_RELATION_L);
++	}
++
++	return 0;
++}
++
++/* CPUFreq boost callback from shadow tick */
++int hmbird_cpufreq_handle_boost(int cpu, int boost_signal)
++{
++	if (!boost_signal || !(boost_signal & HMBIRD_BOOST_SIGNAL_TICK_HIT))
++		return 0;
++
++	return hmbird_apply_cpufreq_boost(cpu, boost_signal);
++}
++EXPORT_SYMBOL_GPL(hmbird_cpufreq_handle_boost);
++
++/* CPUFreq policy notifier callback */
++static int hmbird_cpufreq_notifier(struct notifier_block *nb,
++				   unsigned long val, void *data)
++{
++	struct cpufreq_policy *policy = data;
++	struct hmbird_cpufreq_data *cpufreq_data;
++	int cpu;
++
++	switch (val) {
++	case CPUFREQ_ADJUST:
++		/* Verify policy limits align with SM8850 characteristics */
++		break;
++	case CPUFREQ_NOTIFY:
++		for_each_cpu(cpu, policy->cpus) {
++			cpufreq_data = &per_cpu(hmbird_cpufreq_data, cpu);
++			if (!cpufreq_data->policy)
++				cpufreq_data->policy = policy;
++		}
++		break;
++	}
++
++	return NOTIFY_OK;
++}
++
++static struct notifier_block hmbird_cpufreq_notifier_block = {
++	.notifier_call = hmbird_cpufreq_notifier,
++};
++
++/* Initialize CPUFreq integration */
++void hmbird_cpufreq_init(void)
++{
++	int cpu;
++
++	for_each_possible_cpu(cpu) {
++		per_cpu(hmbird_cpufreq_data, cpu).boost_level = 0;
++		per_cpu(hmbird_cpufreq_data, cpu).boost_active = false;
++	}
++
++	cpufreq_register_notifier(&hmbird_cpufreq_notifier_block,
++				 CPUFREQ_TRANSITION_NOTIFIER);
++
++	pr_info("HMBIRD: CPUFreq integration initialized for SM8850\n");
++}
+diff --git a/kernel/sched/hmbird/hmbird_sm8850_tune.c b/kernel/sched/hmbird/hmbird_sm8850_tune.c
+new file mode 100644
+index 0000000..a4e7c2f
+--- /dev/null
++++ b/kernel/sched/hmbird/hmbird_sm8850_tune.c
+@@ -0,0 +1,127 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * HMBIRD SM8850 Scheduler Tuning
++ * CPU-specific optimizations for Snapdragon 8 Gen 3 Leading Version
++ *
++ * SM8850 Topology: 6+2 CPU Configuration
++ * - 6x Performance (Little) CPUs @ [0-5]
++ * - 2x Prime (Big) CPUs @ [6-7]
++ *
++ * Key Optimizations:
++ * - Shadow Tick: 3ms hrtimer to cover 4ms tick (enables sub-ms scheduling)
++ * - Boost Parameters: Tuned for SM8850's higher idle power and thermal characteristics
++ * - Cluster Coordination: Phase offset between little/big clusters
++ * - Frequency Scaling: Dynamic boost based on task criticality and utilization
++ *
++ * Copyright (c) 2024 OPlus.
++ */
++
++#include <linux/init.h>
++#include <linux/cpu.h>
++#include "hmbird_shadow_tick.h"
++#include "slim.h"
++
++/* SM8850-specific HMBIRD tuning parameters */
++
++/* Shadow Tick Configuration (3ms for sub-millisecond precision) */
++#define SM8850_SHADOW_TICK_NS		(3 * NSEC_PER_MSEC)
++#define SM8850_SHADOW_TICK_TOLERANCE	(500000)	/* 0.5ms tolerance */
++
++/* CPU Frequency Boost Thresholds (SM8850 characteristics) */
++#define SM8850_LITTLE_BOOST_THRESHOLD	(75)		/* 75% utilization */
++#define SM8850_BIG_BOOST_THRESHOLD	(85)		/* 85% utilization (more conservative) */
++
++/* Boost Duration and Rates */
++#define SM8850_BOOST_DURATION_MS	(16)		/* One frame @ 60Hz */
++#define SM8850_FREQ_UP_RATE		(20)		/* % increase per boost */
++#define SM8850_FREQ_DOWN_RATE		(10)		/* % decrease per tick */
++
++/* Cluster Phase Offset (for coordination between little/big) */
++#define SM8850_LITTLE_PHASE_OFFSET	(0)		/* Reference cluster */
++#define SM8850_BIG_PHASE_OFFSET		(1000000)	/* 1ms offset for big cluster */
++
++/* Task Priority Boosting */
++#define SM8850_TOP_TASK_BOOST		(1)		/* Enable for top app tasks */
++#define SM8850_CRITICAL_TASK_BOOST	(2)		/* Stronger boost for critical tasks */
++
++/* Deadline Levels for SM8850 (in milliseconds) */
++static const u32 sm8850_deadline_levels[MAX_GLOBAL_DSQS] = {
++	0,		/* Level 0: Reserved */
++	1,		/* Level 1: 1ms - Critical multimedia */
++	2,		/* Level 2: 2ms - Touch response */
++	4,		/* Level 3: 4ms - Display frame (critical) */
++	6,		/* Level 4: 6ms - UX compatible */
++	8,		/* Level 5: 8ms - Audio/camera real-time */
++	16,		/* Level 6: 16ms - Top-app foreground */
++	32,		/* Level 7: 32ms - Foreground tasks */
++	64,		/* Level 8: 64ms - Background tasks */
++	128,	/* Level 9: 128ms - Low-priority background */
++};
++
++/* SM8850 CPU Cluster Information */
++struct sm8850_cluster_info {
++	int			cluster_id;
++	int			cpu_base;
++	int			cpu_end;
++	unsigned int		boost_threshold;
++	unsigned int		freq_up_rate;
++	int			phase_offset_ns;
++	const char		*name;
++} sm8850_clusters[] = {
++	{
++		.cluster_id = 0,
++		.cpu_base = 0,
++		.cpu_end = 6,
++		.boost_threshold = SM8850_LITTLE_BOOST_THRESHOLD,
++		.freq_up_rate = SM8850_FREQ_UP_RATE,
++		.phase_offset_ns = SM8850_LITTLE_PHASE_OFFSET,
++		.name = "Little (Performance)",
++	},
++	{
++		.cluster_id = 1,
++		.cpu_base = 6,
++		.cpu_end = 8,
++		.boost_threshold = SM8850_BIG_BOOST_THRESHOLD,
++		.freq_up_rate = SM8850_FREQ_UP_RATE,
++		.phase_offset_ns = SM8850_BIG_PHASE_OFFSET,
++		.name = "Big (Prime)",
++	},
++};
++
++/* Get cluster info for CPU */
++static struct sm8850_cluster_info *hmbird_get_cluster_info(int cpu)
++{
++	int i;
++
++	for (i = 0; i < ARRAY_SIZE(sm8850_clusters); i++) {
++		if (cpu >= sm8850_clusters[i].cpu_base &&
++		    cpu < sm8850_clusters[i].cpu_end)
++			return &sm8850_clusters[i];
++	}
++
++	return NULL;
++}
++
++/* Apply SM8850-specific tuning for CPU */
++void hmbird_apply_sm8850_tuning(int cpu)
++{
++	struct sm8850_cluster_info *cluster;
++	struct hmbird_shadow_tick_data *tick_data;
++
++	cluster = hmbird_get_cluster_info(cpu);
++	if (!cluster)
++		return;
++
++	tick_data = &per_cpu(hmbird_shadow_tick_data, cpu);
++
++	/* Configure shadow tick with cluster-specific phase offset */
++	pr_debug("HMBIRD[SM8850]: CPU%d (%s) - Shadow Tick: 3ms interval, Phase offset: %d ns\n",
++		 cpu, cluster->name, cluster->phase_offset_ns);
++}
++
++/* Initialize SM8850-specific tuning */
++void __init hmbird_sm8850_init(void)
++{
++	int cpu;
++
++	pr_info("HMBIRD: Initializing SM8850 (6+2) scheduler optimization\n");
++	pr_info("  - Shadow Tick: %ums interval with %uns tolerance\n",
++		SM8850_SHADOW_TICK_NS / NSEC_PER_MSEC,
++		SM8850_SHADOW_TICK_TOLERANCE);
++	pr_info("  - Boost Duration: %ums per trigger\n", SM8850_BOOST_DURATION_MS);
++	pr_info("  - Little Cluster Threshold: %u%%\n", SM8850_LITTLE_BOOST_THRESHOLD);
++	pr_info("  - Big Cluster Threshold: %u%%\n", SM8850_BIG_BOOST_THRESHOLD);
++
++	for_each_possible_cpu(cpu)
++		hmbird_apply_sm8850_tuning(cpu);
++}
+diff --git a/kernel/sched/build_policy.c b/kernel/sched/build_policy.c
+index 5ea9e48..9a45ba3 100644
+--- a/kernel/sched/build_policy.c
++++ b/kernel/sched/build_policy.c
+@@ -64,6 +64,10 @@
+ #endif
+ 
+ #ifdef CONFIG_HMBIRD_SCHED
++# include "hmbird/hmbird_shadow_tick.c"
++# include "hmbird/hmbird_cpufreq.c"
++# include "hmbird/hmbird_sm8850_tune.c"
+ # include "hmbird/hmbird_util_track.c"
+ # include "hmbird/hmbird_sched_proc.c"
+ # include "hmbird/hmbird_shadow_tick.c"

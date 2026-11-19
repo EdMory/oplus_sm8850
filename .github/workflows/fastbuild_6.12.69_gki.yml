@@ -432,10 +432,10 @@ jobs:
           echo "CONFIG_CRYSTAL_HYBRIDSWAP_LEGACY_SWAPD_MEMCGS_PARAM=n" >> ./arch/arm64/configs/gki_defconfig
           # KUnit 测试保持关闭（生产内核）
           echo "CONFIG_CRYSTAL_HYBRIDSWAP_SDDC_KUNIT_TEST=n" >> ./arch/arm64/configs/gki_defconfig
-          # 固定 zram 大小为物理内存的 163%（16GB RAM → 24GB zram）
+          # 固定 zram 大小为物理内存的 109%（14.7GB RAM → 16GB zram）
           # 拦截 disksize 写操作并替换为此比例，用户态写入的值被忽略
           echo "CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_PIN_SIZE=y" >> ./arch/arm64/configs/gki_defconfig
-          echo "CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_PIN_SIZE_PCT=163" >> ./arch/arm64/configs/gki_defconfig
+          echo "CONFIG_CRYSTAL_HYBRIDSWAP_ZRAM_PIN_SIZE_PCT=109" >> ./arch/arm64/configs/gki_defconfig
           # 注入 drivers/Kconfig 和 drivers/Makefile 钩子（幂等）
           grep -qF 'drivers/crystalfrostwork/Kconfig' drivers/Kconfig \
             || echo -e '\nsource "drivers/crystalfrostwork/Kconfig"' >> drivers/Kconfig

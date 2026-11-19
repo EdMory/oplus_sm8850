@@ -1083,8 +1083,9 @@ jobs:
           echo "ISQRT: ${{ github.event.inputs.isqrt_enable }}" >> ./ak3.log
           echo "ADIOS: ${{ github.event.inputs.adios_enable }}" >> ./ak3.log
           echo "BORE: ${{ github.event.inputs.bore_enable }}" >> ./ak3.log
-          echo "Perf-Patch ${{ github.event.inputs.perf_patch_enable }}" >> ./ak3.log
           echo "Cambyses ${{ github.event.inputs.cambyses_enable }}" >> ./ak3.log
+          echo "Hmbird ${{ github.event.inputs.hmbird_enable }}" >> ./ak3.log
+          echo "Perf-Patch ${{ github.event.inputs.perf_patch_enable }}" >> ./ak3.log
           zip -z ../$AK3_NAME < ./ak3.log
 
       - name: 上传 Ccache 调试日志
@@ -1177,7 +1178,8 @@ jobs:
           - ISQRT支持：${{ github.event.inputs.isqrt_enable }}
           - ADIOS IO调度器支持：${{ github.event.inputs.adios_enable }}
           - BORE 调度器支持：${{ github.event.inputs.bore_enable }}
-          - Cambyses 调度器优化：${{ github.event.inputs.cambyses_enable }}
+          - Cambyses 调度器支持：${{ github.event.inputs.cambyses_enable }}
+          - 调度器优化：${{ github.event.inputs.hmbird_enable }}
           - 性能优化补丁集：${{ github.event.inputs.perf_patch_enable }}
           - BakaSU管理器下载：[BakaSU_CI](https://github.com/cctv18/ReSukiSU_CI/releases)
           
@@ -1189,9 +1191,8 @@ jobs:
           2. 若你的手机之前已有 root 权限，可在手机上安装[HorizonKernelFlasher](https://github.com/libxzr/HorizonKernelFlasher/releases)，在HorizonKernelFlasher中刷入AnyKernel刷机包并重启；
           3. 若你之前已刷入SukiSU Ultra内核，且SukiSU Ultra管理器已更新至最新版本，可在SukiSU Ultra管理器中直接刷入AnyKernel刷机包并重启；
           4. 刷入无lz4kd补丁版的内核前若刷入过lz4kd补丁版的内核，为避免出错，请先关闭zram模块；
-          5. 若启用 LZ4KDS(SDDC+ZMS)，其以 Crystal Hybridswap 私有驱动替代原生 zram(CONFIG_ZRAM=n)。切换回普通内核前请先关闭 zram 模块，避免驱动切换导致已压缩数据读取异常；
-          6. 由于KernelSU上游更新了元模块功能，最新版KSU管理器（包括除KernelSU Next以外的各分支）需要配合元模块(metamodule)才能正常挂载模块。目前的元模块包括[mountify](https://github.com/backslashxx/mountify),[NoMount](https://github.com/maxsteeel/nomount)等。若你是第一次使用KSU或刚从旧版KSU管理器升级至新版，请先安装一个元模块，这样其他涉及系统挂载的模块才能正常运行；
-          7. KernelPatch Next（即KPN）是一个独立于KSU的KPM实现，可以运行在任意KSU/面具环境中（不适用于Apatch），且不能与(Re)SukiSU内置的kpm功能共同使用，使用前请保证你的内核没有内置的kpm实现/修补。
+          5. 由于KernelSU上游更新了元模块功能，最新版KSU管理器（包括除KernelSU Next以外的各分支）需要配合元模块(metamodule)才能正常挂载模块。目前的元模块包括[mountify](https://github.com/backslashxx/mountify),[NoMount](https://github.com/maxsteeel/nomount)等。若你是第一次使用KSU或刚从旧版KSU管理器升级至新版，请先安装一个元模块，这样其他涉及系统挂载的模块才能正常运行；
+          6. KernelPatch Next（即KPN）是一个独立于KSU的KPM实现，可以运行在任意KSU/面具环境中（不适用于Apatch），且不能与(Re)SukiSU内置的kpm功能共同使用，使用前请保证你的内核没有内置的kpm实现/修补。
           
           #### ※※※刷写内核有风险，为防止出现意外导致手机变砖，在刷入内核前请务必用[KernelFlasher](https://github.com/capntrips/KernelFlasher)等软件备份boot等关键启动分区!※※※
           EOF

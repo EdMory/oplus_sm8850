@@ -745,7 +745,9 @@ jobs:
           trap 'echo "HMBIRD 集成步骤在脚本第 $LINENO 行失败(退出码 $?)" >&2' ERR
           cd kernel_workspace/common
           wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/hmbird-6.12.69-kabi-safe.patch
+          wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/hmbird-6.12.69-tickhit.patch
           patch -p1 --no-backup-if-mismatch -F 0 < hmbird-6.12.69-kabi-safe.patch
+          patch -p1 --no-backup-if-mismatch -F 0 < hmbird-6.12.69-tickhit.patch
           echo "CONFIG_HMBIRD_SCHED=y" >> ./arch/arm64/configs/gki_defconfig
           echo "HMBIRD 集成完成"
           

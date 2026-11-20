@@ -398,7 +398,7 @@ jobs:
         run: |
           echo "正在添加lz4kd补丁…"
           cd kernel_workspace/common
-          wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/lz4kd.patch
+          wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/zram_patch/lz4kd.patch
           patch -p1 -F 3 < lz4kd.patch || true
 
       - name: 应用 LZ4KDS 补丁
@@ -406,7 +406,7 @@ jobs:
         run: |
           echo "正在应用 LZ4KDS 补丁…"
           cd kernel_workspace/common
-          wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/lz4kds.patch
+          wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/zram_patch/lz4kds.patch
           patch -p1 -F 0 --no-backup-if-mismatch < lz4kds.patch
           # Crystal Hybridswap (lz4kds) 替代原生 zram，CONFIG_ZRAM 必须关闭(其 Kconfig 已声明 depends on ZRAM=n)
           echo "CONFIG_ZRAM=n" >> ./arch/arm64/configs/gki_defconfig

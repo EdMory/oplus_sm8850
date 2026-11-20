@@ -810,7 +810,7 @@ jobs:
         run: |
           echo "正在集成性能优化补丁集…"
           cd kernel_workspace/common
-          wget -O $PATCH https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/cherrypick-6.12.115.patch
+          wget -O https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/cherrypick-6.12.115.patch
           patch -p1 -F 0 < cherrypick-6.12.115.patch
           echo "性能优化补丁集应用完成"
 

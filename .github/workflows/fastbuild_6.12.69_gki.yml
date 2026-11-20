@@ -388,10 +388,10 @@ jobs:
         run: |
           echo "正在添加 LZ4 & ZSTD 补丁…"
           cd kernel_workspace/common
-          wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/zram_patch/001-lz4.patch
-          wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/zram_patch/002-zstd.patch
-          patch -p1 --no-backup-if-mismatch -F 0 < 001-lz4.patch
-          patch -p1 --no-backup-if-mismatch -F 0 < 002-zstd.patch
+          wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/zram_patch/lz4.patch
+          wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/zram_patch/zstd.patch
+          patch -p1 --no-backup-if-mismatch -F 0 < lz4.patch
+          patch -p1 --no-backup-if-mismatch -F 0 < zstd.patch
           
       - name: 应用 LZ4KD 补丁
         if: inputs.lz4kd_enable

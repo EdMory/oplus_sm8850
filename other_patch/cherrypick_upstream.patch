@@ -1,0 +1,127 @@
+From 5c0a52353929daeb4b321595a98fefd271409d8e Mon Sep 17 00:00:00 2001
+From: Backport <backport@localhost>
+Date: Sat, 21 Nov 2026 23:40:22 +0800
+Subject: [PATCH] mm: avoid unnecessary local LRU drains
+
+Combine the Android 6.12 backports by Rik van Riel, Usama Arif and Barry Song (Xiaomi) for teardown, swap readahead and anonymous write faults.
+
+Link: https://lore.kernel.org/all/20241219153253.3da9e8aa@fangorn/
+Link: https://lore.kernel.org/all/20260608143242.2869392-1-usama.arif@linux.dev/
+Link: https://lore.kernel.org/all/20260701235955.36126-2-baohua@kernel.org/
+---
+ mm/memory.c     | 11 +++++++----
+ mm/mmap.c       |  2 --
+ mm/swap_state.c |  3 ---
+ mm/vma.c        |  2 --
+ 4 files changed, 7 insertions(+), 11 deletions(-)
+
+diff --git a/mm/memory.c b/mm/memory.c
+index f1e0275..468e51a 100644
+--- a/mm/memory.c
++++ b/mm/memory.c
+@@ -1948,7 +1948,6 @@ void zap_page_range_single(struct vm_area_struct *vma, unsigned long address,
+ 	struct mmu_notifier_range range;
+ 	struct mmu_gather tlb;
+ 
+-	lru_add_drain();
+ 	mmu_notifier_range_init(&range, MMU_NOTIFY_CLEAR, 0, vma->vm_mm,
+ 				address, end);
+ 	hugetlb_zap_begin(vma, &range.start, &range.end);
+@@ -3608,6 +3607,9 @@ static vm_fault_t wp_page_shared(struct vm_fault *vmf, struct folio *folio)
+ static bool wp_can_reuse_anon_folio(struct folio *folio,
+ 				    struct vm_area_struct *vma)
+ {
++	const bool in_lru_cache = !folio_test_lru(folio);
++	const bool in_swapcache = folio_test_swapcache(folio);
++
+ 	/*
+ 	 * We could currently only reuse a subpage of a large folio if no
+ 	 * other subpages of the large folios are still mapped. However,
+@@ -3625,15 +3627,16 @@ static bool wp_can_reuse_anon_folio(struct folio *folio,
+ 	 *
+ 	 * KSM doesn't necessarily raise the folio refcount.
+ 	 */
+-	if (folio_test_ksm(folio) || folio_ref_count(folio) > 3)
++	if (folio_test_ksm(folio) ||
++	    folio_ref_count(folio) > 1 + in_lru_cache + in_swapcache)
+ 		return false;
+-	if (!folio_test_lru(folio))
++	if (in_lru_cache)
+ 		/*
+ 		 * We cannot easily detect+handle references from
+ 		 * remote LRU caches or references to LRU folios.
+ 		 */
+ 		lru_add_drain();
+-	if (folio_ref_count(folio) > 1 + folio_test_swapcache(folio))
++	if (folio_ref_count(folio) > 1 + in_swapcache)
+ 		return false;
+ 	if (!folio_trylock(folio))
+ 		return false;
+diff --git a/mm/mmap.c b/mm/mmap.c
+index 04196a8..496e9c0 100644
+--- a/mm/mmap.c
++++ b/mm/mmap.c
+@@ -1953,7 +1953,6 @@ void exit_mmap(struct mm_struct *mm)
+ 		goto destroy;
+ 	}
+ 
+-	lru_add_drain();
+ 	flush_cache_mm(mm);
+ 	tlb_gather_mmu_fullmm(&tlb, mm);
+ 	trace_android_vh_swapmem_gather_init(mm);
+@@ -2399,7 +2398,6 @@ int relocate_vma_down(struct vm_area_struct *vma, unsigned long shift)
+ 				       vma, new_start, length, false, true))
+ 		return -ENOMEM;
+ 
+-	lru_add_drain();
+ 	tlb_gather_mmu(&tlb, mm);
+ 	next = vma_next(&vmi);
+ 	if (new_end > old_start) {
+diff --git a/mm/swap_state.c b/mm/swap_state.c
+index 14f33d7..dad3071 100644
+--- a/mm/swap_state.c
++++ b/mm/swap_state.c
+@@ -319,7 +319,6 @@ void free_pages_and_swap_cache(struct encoded_page **pages, int nr)
+ 	struct folio_batch folios;
+ 	unsigned int refs[PAGEVEC_SIZE];
+ 
+-	lru_add_drain();
+ 	folio_batch_init(&folios);
+ 	for (int i = 0; i < nr; i++) {
+ 		struct folio *folio = page_folio(encoded_page_ptr(pages[i]));
+@@ -709,7 +708,6 @@ struct folio *swap_cluster_readahead(swp_entry_t entry, gfp_t gfp_mask,
+ 	}
+ 	blk_finish_plug(&plug);
+ 	swap_read_unplug(splug);
+-	lru_add_drain();	/* Push any new pages onto the LRU now */
+ skip:
+ 	/* The page was likely read above, so no need for plugging here */
+ 	folio = __read_swap_cache_async(entry, gfp_mask, mpol, ilx,
+@@ -859,7 +857,6 @@ static struct folio *swap_vma_readahead(swp_entry_t targ_entry, gfp_t gfp_mask,
+ 		pte_unmap(pte);
+ 	blk_finish_plug(&plug);
+ 	swap_read_unplug(splug);
+-	lru_add_drain();
+ skip:
+ 	/* The folio was likely read above, so no need for plugging here */
+ 	folio = __read_swap_cache_async(targ_entry, gfp_mask, mpol, targ_ilx,
+diff --git a/mm/vma.c b/mm/vma.c
+index 6853fab..f42b5f4 100644
+--- a/mm/vma.c
++++ b/mm/vma.c
+@@ -353,7 +353,6 @@ void unmap_region(struct ma_state *mas, struct vm_area_struct *vma,
+ 	struct mm_struct *mm = vma->vm_mm;
+ 	struct mmu_gather tlb;
+ 
+-	lru_add_drain();
+ 	tlb_gather_mmu(&tlb, mm);
+ 	update_hiwater_rss(mm);
+ 	unmap_vmas(&tlb, mas, vma, vma->vm_start, vma->vm_end, vma->vm_end,
+@@ -1120,7 +1119,6 @@ static inline void vms_clear_ptes(struct vma_munmap_struct *vms,
+ 	 * were isolated before we downgraded mmap_lock.
+ 	 */
+ 	mas_set(mas_detach, 1);
+-	lru_add_drain();
+ 	tlb_gather_mmu(&tlb, vms->vma->vm_mm);
+ 	update_hiwater_rss(vms->vma->vm_mm);
+ 	unmap_vmas(&tlb, mas_detach, vms->vma, vms->start, vms->end,

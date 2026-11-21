@@ -2,21 +2,14 @@
 # This patch combines all the following patches into one
 # to be applied with zero fuzz to android_gki_kernel_common-android16-6.12-2026-03
 #
-# Source patches (Original 4):
+# Source patches:
 #   1. cherry-pick-6.12.69-verified-35.patch
 #   2. cherry-pick-6.12.69-backported-10.patch
 #   3. cherry-pick-6.12.115.patch
 #   4. sm8750-perf-core-6.12-merged.patch
 #
-# Additional patches (New 3):
-#   5. Rik van Riel - mm: remove unnecessary calls to lru_add_drain
-#   6. Barry Song - mm: avoid unnecessary lru drain for wp_can_reuse_anon_folio()
-#   7. Usama Arif - mm/swap_state: remove unnecessary lru_add_drain() from readahead
-#
-# Total: 7 patches merged into 1 unified patch file
 # All patches are merged sequentially to create a single, unified patch file.
-# Applied with: patch -p1 < merged-kernel-patches-6.12.69-extended.patch
-# No conflicts detected - all modifications are complementary
+# Applied with: patch -p1 < merged-kernel-patches-6.12.69.patch
 From c71bf35caba12bfd9bc23e32b0bcd9e02d1cf1ac Mon Sep 17 00:00:00 2001
 From: Zicheng Qu <quzicheng@huawei.com>
 Date: Fri, 24 Apr 2026 07:11:13 +0000
@@ -5329,132 +5322,4 @@ index c563b79..242b8ef 100644
  EXPORT_SYMBOL_GPL(sysctl_vfs_cache_pressure);
  
  __cacheline_aligned_in_smp DEFINE_SEQLOCK(rename_lock);
-
-
-
-# ===== Additional Patch 1: Rik van Riel =====
-diff --git a/mm/memory.c b/mm/memory.c
-index 75c2dfd04f72..95ce298dc254 100644
---- a/mm/memory.c
-+++ b/mm/memory.c
-@@ -1935,7 +1935,6 @@ void zap_page_range_single(struct vm_area_struct *vma, unsigned long address,
- 	struct mmu_notifier_range range;
- 	struct mmu_gather tlb;
- 
--	lru_add_drain();
- 	mmu_notifier_range_init(&range, MMU_NOTIFY_CLEAR, 0, vma->vm_mm,
- 				address, end);
- 	hugetlb_zap_begin(vma, &range.start, &range.end);
-diff --git a/mm/mmap.c b/mm/mmap.c
-index d32b7e701058..ef57488f1020 100644
---- a/mm/mmap.c
-+++ b/mm/mmap.c
-@@ -1660,7 +1660,6 @@ void exit_mmap(struct mm_struct *mm)
- 		goto destroy;
- 	}
- 
--	lru_add_drain();
- 	flush_cache_mm(mm);
- 	tlb_gather_mmu_fullmm(&tlb, mm);
- 	/* update_hiwater_rss(mm) here? but nobody should be looking */
-@@ -2103,7 +2102,6 @@ int relocate_vma_down(struct vm_area_struct *vma, unsigned long shift)
- 				       vma, new_start, length, false, true))
- 		return -ENOMEM;
- 
--	lru_add_drain();
- 	tlb_gather_mmu(&tlb, mm);
- 	next = vma_next(&vmi);
- 	if (new_end > old_start) {
-diff --git a/mm/swap_state.c b/mm/swap_state.c
-index e0c0321b8ff7..ca42b2be64d9 100644
---- a/mm/swap_state.c
-+++ b/mm/swap_state.c
-@@ -317,7 +317,6 @@ void free_pages_and_swap_cache(struct encoded_page **pages, int nr)
- 	struct folio_batch folios;
- 	unsigned int refs[PAGEVEC_SIZE];
- 
--	lru_add_drain();
- 	folio_batch_init(&folios);
- 	for (int i = 0; i < nr; i++) {
- 		struct folio *folio = page_folio(encoded_page_ptr(pages[i]));
-diff --git a/mm/vma.c b/mm/vma.c
-index 8e31b7e25aeb..d84e5ef6d15b 100644
---- a/mm/vma.c
-+++ b/mm/vma.c
-@@ -398,7 +398,6 @@ void unmap_region(struct ma_state *mas, struct vm_area_struct *vma,
- 	struct mm_struct *mm = vma->vm_mm;
- 	struct mmu_gather tlb;
- 
--	lru_add_drain();
- 	tlb_gather_mmu(&tlb, mm);
- 	update_hiwater_rss(mm);
- 	unmap_vmas(&tlb, mas, vma, vma->vm_start, vma->vm_end, vma->vm_end,
-@@ -1130,7 +1129,6 @@ static inline void vms_clear_ptes(struct vma_munmap_struct *vms,
- 	 * were isolated before we downgraded mmap_lock.
- 	 */
- 	mas_set(mas_detach, 1);
--	lru_add_drain();
- 	tlb_gather_mmu(&tlb, vms->vma->vm_mm);
- 	update_hiwater_rss(vms->vma->vm_mm);
- 	unmap_vmas(&tlb, mas_detach, vms->vma, vms->start, vms->end,
-
-
-# ===== Additional Patch 2: Barry Song =====
-diff --git a/mm/memory.c b/mm/memory.c
-index 95ce298dc254..ff338c2abe92 100644
---- a/mm/memory.c
-+++ b/mm/memory.c
-@@ -4181,6 +4181,9 @@ static bool __wp_can_reuse_large_anon_folio(struct folio *folio,
- static bool wp_can_reuse_anon_folio(struct folio *folio,
- 				    struct vm_area_struct *vma)
- {
-+	const bool in_lru_cache = !folio_test_lru(folio);
-+	const bool in_swapcache = folio_test_swapcache(folio);
-+
- 	if (IS_ENABLED(CONFIG_TRANSPARENT_HUGEPAGE) && folio_test_large(folio))
- 		return __wp_can_reuse_large_anon_folio(folio, vma);
- 
-@@ -4191,15 +4194,16 @@ static bool wp_can_reuse_anon_folio(struct folio *folio,
- 	 *
- 	 * KSM doesn't necessarily raise the folio refcount.
- 	 */
--	if (folio_test_ksm(folio) || folio_ref_count(folio) > 3)
-+	if (folio_test_ksm(folio) ||
-+	    folio_ref_count(folio) > 1 + in_lru_cache + in_swapcache)
- 		return false;
--	if (!folio_test_lru(folio))
-+	if (in_lru_cache)
- 		/*
- 		 * We cannot easily detect+handle references from
- 		 * remote LRU caches or references to LRU folios.
- 		 */
- 		lru_add_drain();
--	if (folio_ref_count(folio) > 1 + folio_test_swapcache(folio))
-+	if (folio_ref_count(folio) > 1 + in_swapcache)
- 		return false;
- 	if (!folio_trylock(folio))
- 		return false;
-
-
-# ===== Additional Patch 3: Usama Arif =====
-diff --git a/mm/swap_state.c b/mm/swap_state.c
-index ca42b2be64d9..9c3a5cf99778 100644
---- a/mm/swap_state.c
-+++ b/mm/swap_state.c
-@@ -836,7 +836,6 @@ struct folio *swap_cluster_readahead(swp_entry_t entry, gfp_t gfp_mask,
- 	}
- 	blk_finish_plug(&plug);
- 	swap_read_unplug(splug);
--	lru_add_drain();	/* Push any new pages onto the LRU now */
- skip:
- 	/* The page was likely read above, so no need for plugging here */
- 	return swap_cache_read_folio(entry, gfp_mask, mpol, ilx, NULL, false);
-@@ -951,7 +950,6 @@ static struct folio *swap_vma_readahead(swp_entry_t targ_entry, gfp_t gfp_mask,
- 		pte_unmap(pte);
- 	blk_finish_plug(&plug);
- 	swap_read_unplug(splug);
--	lru_add_drain();
- skip:
- 	/* The folio was likely read above, so no need for plugging here */
- 	folio = swap_cache_read_folio(targ_entry, gfp_mask, mpol, targ_ilx,
 

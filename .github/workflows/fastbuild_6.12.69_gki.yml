@@ -375,6 +375,9 @@ jobs:
           wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/zram_patch/zstd.patch
           patch -p1 --no-backup-if-mismatch -F 0 < lz4.patch
           patch -p1 --no-backup-if-mismatch -F 0 < zstd.patch
+          wget -O lz4_neon.sh https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/zram_patch/lz4_neon.sh
+          bash lz4_neon.sh
+          echo "LZ4 NEON 加速挂钩完成"
           
       - name: 应用 LZ4KD 补丁
         if: inputs.lz4kd_enable
@@ -429,16 +432,6 @@ jobs:
           grep -qF 'CONFIG_CRYSTALFROSTWORK' drivers/Makefile \
             || { echo "错误: drivers/Makefile 钩子注入失败"; exit 1; }
           echo "LZ4KDS 补丁应用完成"
-
-      - name: 应用 LZ4 NEON 加速挂钩
-        if: inputs.lz4_enable
-        run: |
-          echo "正在应用 LZ4 NEON 加速挂钩(将 zram/f2fs/incfs 的 LZ4 解压路由到 ARM64 NEON 汇编实现)…"
-          cd kernel_workspace/common
-          # 下载挂钩脚本(已随仓库 other_patch/ 分发, 与补丁同分支同版本)
-          wget -O apply_lz4_neon.sh https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/apply_lz4_neon.sh
-          bash apply_lz4_neon.sh
-          echo "LZ4 NEON 加速挂钩完成"
 
       - name: 应用 LE9UO 与 Kcompressd 补丁
         if: inputs.le9uo_enable

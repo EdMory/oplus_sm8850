@@ -327,6 +327,7 @@ jobs:
             [ -d uapi ] && [ ! -L uapi ] && mv uapi uapi.bak
             ln -sfn ../uapi uapi
             sed -i "s/DKSU_VERSION=16/DKSU_VERSION=${KSU_VERSION}/" ./Kbuild
+            echo "KSU_KERNEL_DIR=$(pwd -P)" >> "$GITHUB_ENV"
           elif [[ ${{ github.event.inputs.ksu_type }} == "KowSU" ]]; then
             echo "正在配置 KowSU..."
             curl -LSs "https://raw.githubusercontent.com/KOWX712/KernelSU/refs/heads/master/kernel/setup.sh" | bash -s master
@@ -339,6 +340,7 @@ jobs:
             for h in include/*.h; do ln -sfn "include/$(basename "$h")" "$(basename "$h")"; done
             [ -d uapi ] && [ ! -L uapi ] && mv uapi uapi.bak
             ln -sfn ../uapi uapi
+            echo "KSU_KERNEL_DIR=$(pwd -P)" >> "$GITHUB_ENV"
           else
             echo "已选择无内置KernelSU模式，跳过KernelSU配置..."
           fi

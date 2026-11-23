@@ -314,6 +314,9 @@ jobs:
             # 存储版本号到 GitHub 环境变量
             echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
             echo "ksuver=$KSU_VERSION" >> $GITHUB_OUTPUT
+            #跳过将uapi标准头安装到 usr/include 目录，加快编译速度
+            #由于UAPI和PREINIT相关改动，此项无法应用在KowSU和KSU，且其带来的收益也非常有限
+            echo "CONFIG_HEADERS_INSTALL=n" >> ./common/arch/arm64/configs/gki_defconfig
           elif [[ ${{ github.event.inputs.ksu_type }} == "KSU" ]]; then
             echo "正在配置原版 KernelSU (tiann/KernelSU)..."
             curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/refs/heads/main/kernel/setup.sh" | bash -s main

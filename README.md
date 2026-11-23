@@ -12,11 +12,11 @@
 - 由于6.12内核引入了包括rust代码在内的大量新机制，导致市面上已有的使用make指令编译内核的方法无法正常完成编译，只能使用低效的bazel进行编译，而官方使用的 Bazel 编译器过于不稳定且臃肿不堪，容易出现各种各样莫名其妙的错误，且全网几乎找不到任何有效解决方法，对于新手极不友好；
 - 现有的6.12内核常用编译流程（使用bazel编译/拉取第三方工具链编译等）编译速度极慢，即使在有缓存的情况下二次编译时间也动辄需要20-30分钟，且bazel与ccache缓存不兼容，无法正常保存编译缓存。
 ## 本项目的主要内容
-- [x] 使用 AOSP 官方 LLVM/Clang 19 + Rust v1.82.0 进行编译，并排除了官方源码中不必要的 vendor 源码参与，大幅优化编译流程并引入ccache缓存机制，对比原 bazel 编译器缩短了近2/3的编译时间（原版官方编译器每次约需要超过1h才能完成编译），提高了编译过程的稳定性，输出日志更便于维护调试；
+- [x] 使用 AOSP 官方 LLVM/Clang 19 + Rust v1.82.0 进行编译，大幅优化编译流程并引入ccache缓存机制，对比原 bazel 编译器缩短了近2/3的编译时间（原版官方编译器每次约需要超过1h才能完成编译），提高了编译过程的稳定性，输出日志更便于维护调试；
 - [x] 修复官方代码未及时更新的补丁，并引入诸多第三方功能支持；
 - [x] 提供 Github Action 在线编译脚本。
 - [x] 骁龙 SM8850 通用GKI内核（基于谷歌源码的 6.12.69 ，其他同内核版本非SM8850机型可自行测试，部分机型可完全兼容）
-- [x] ReSukiSU/SukiSU Ultra/KernelSU Next/原版KernelSU多版本KSU可选
+- [x] [BakaSU](https://github.com/Baka-SU/BakaSU)/[KowSU](https://github.com/KOWX712/KernelSU)/原版[KernelSU](https://github.com/tiann/KernelSU)多版本KSU可选
 - [x] cctv18独家设计的 [ccache-ECS](https://github.com/cctv18/ccache-ECS) 缓存及大量编译流程优化，编译时间可稳定在约6min *(首次编译时会拉取公共预置ccache，从第二次开始没有大量配置改动的情况下，单次编译时间约6min；距离上一次调用两周未调用后缓存会被自动清除，此时编译会自动重建缓存)*
 - [x] 引入[Optprobe](https://lkml.rescloud.iu.edu/hypermail/linux/kernel/2503.3/02174.html)
 - [x] LZ4 1.11.0 & ZSTD 1.5.8 算法更新&优化补丁(来自[@ferstar](https://github.com/ferstar), 移植by [@Xiaomichael](https://github.com/Xiaomichael), 6.12版本补丁重制by [@cctv18](https://github.com/cctv18))

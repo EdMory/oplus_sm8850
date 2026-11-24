@@ -1,0 +1,19 @@
+diff --git a/block/elevator.c b/block/elevator.c
+index xxxxxxx..xxxxxxx 100644
+--- a/block/elevator.c
++++ b/block/elevator.c
+@@ -xx,xx +xx,xx @@ static struct elevator_type *elevator_get_default(struct request_queue *q)
+ static struct elevator_type *elevator_get_default(struct request_queue *q)
+ {
+-	/*
+-	 * For single queue devices, default to using mq-deadline. If we have
+-	 * multiple queues or mq-deadline is not available, default to "none".
+-	 */
+-	if (q->nr_hw_queues == 1)
+-		return elevator_get(q, "mq-deadline", false);
+-	return elevator_get(q, "none", false);
++	/* Start with no elevator; userspace can select a scheduler later. */
++	return NULL;
+ }
+ 
+ /*

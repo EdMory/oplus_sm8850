@@ -688,16 +688,16 @@ jobs:
           echo "正在集成 ADIOS…"
           cd kernel_workspace/common
           #cctv18源码已支持ADIOS 3.1.9
-          #因此升级到 3.3.0 只需整体替换 block/adios.c 这一个文件, 无需改动 Kconfig/Makefile/elevator.c。
-          #先移除旧版(3.1.9)实现, 再以"新建文件"方式落地 3.3.0
+          #因此升级到 3.3.0 只需整体替换 block/adios.c 这一个文件，先移除旧版(3.1.9)实现, 再以"新建文件"方式落地 3.3.0
           rm -f block/adios.c
           wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/adios-3.3.0-6.12.patch
           patch -p1 --no-backup-if-mismatch < adios-3.3.0-6.12.patch
-          # 调度器内置编译(=y)并设为 blk-mq 默认调度器
+          #启用ADIOS和BFQ调度器
           echo "CONFIG_MQ_IOSCHED_ADIOS=y" >> ./arch/arm64/configs/gki_defconfig 
-          echo "CONFIG_MQ_IOSCHED_DEFAULT_ADIOS=y" >> ./arch/arm64/configs/gki_defconfig
-          # BFQ作为备选
           echo "CONFIG_MQ_IOSCHED_BFQ=y" >> ./arch/arm64/configs/gki_defconfig
+          #ADIOS在高配设备上收益已不大，在某些情况下可能不及none
+          #使none作为默认IO调度器
+          sed -z -i 's/\(static struct elevator_type \*elevator_get_default(struct request_queue \*q)\n{\n\)[^}]*\n}/\1\treturn NULL;\n}/' block/elevator.c
           echo "提示: 运行时可用 /sys/block/<dev>/queue/scheduler 查看/切换 ADIOS, 并按需调节 ADIOS 的 sysfs 参数"
           echo "ADIOS 3.3.0 集成完成"
 

@@ -696,8 +696,9 @@ jobs:
           #调度器内置编译(=y)，但不设为默认
           echo "CONFIG_MQ_IOSCHED_ADIOS=y" >> ./arch/arm64/configs/gki_defconfig 
           echo "CONFIG_MQ_IOSCHED_BFQ=y" >> ./arch/arm64/configs/gki_defconfig
+          #ADIOS在高配设备上收益已不大，在某些情况下可能不及none
           #使得none作为默认IO调度器
-          sed -i '/For single queue devices/,/return elevator_get/c\\treturn NULL;' block/elevator.c
+          sed -i 's/^[[:space:]]*if (q->nr_hw_queues == 1)/\treturn NULL; \/\/ removed default mq-deadline logic/' block/elevator.c
           echo "提示: 运行时可用 /sys/block/<dev>/queue/scheduler 查看/切换 ADIOS, 并按需调节 ADIOS 的 sysfs 参数"
           echo "ADIOS 3.3.0 集成完成"
 

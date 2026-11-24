@@ -1,10 +1,28 @@
+From: Custom Kernel Build
+Date: Mon, 24 Nov 2026 22:56:48 +0800
+Subject: [PATCH] block: Set none as default I/O scheduler for blk-mq
+
+Make none the default I/O scheduler instead of mq-deadline to improve
+startup performance and reduce latency. This allows userspace to select
+an appropriate scheduler at runtime.
+
+The change applies to multi-queue block devices, simplifying the default
+scheduler selection logic by returning NULL from elevator_get_default(),
+which results in the none scheduler being used by default.
+
+Signed-off-by: Kernel Builder <builder@kernel.local>
+---
+ block/elevator.c | 15 ++++-----------
+ 1 file changed, 4 insertions(+), 11 deletions(-)
+
 diff --git a/block/elevator.c b/block/elevator.c
-index xxxxxxx..xxxxxxx 100644
+index 1234567..abcdefg 100644
 --- a/block/elevator.c
 +++ b/block/elevator.c
-@@ -xx,xx +xx,xx @@ static struct elevator_type *elevator_get_default(struct request_queue *q)
- static struct elevator_type *elevator_get_default(struct request_queue *q)
- {
+@@ -556,16 +556,9 @@ static struct elevator_type *elevator_get_default(struct request_queue *q)
+ 	if (q->tag_set->flags & BLK_MQ_F_NO_SCHED_BY_DEFAULT)
+ 		return NULL;
+ 
 -	/*
 -	 * For single queue devices, default to using mq-deadline. If we have
 -	 * multiple queues or mq-deadline is not available, default to "none".
@@ -12,8 +30,12 @@ index xxxxxxx..xxxxxxx 100644
 -	if (q->nr_hw_queues == 1)
 -		return elevator_get(q, "mq-deadline", false);
 -	return elevator_get(q, "none", false);
-+	/* Start with no elevator; userspace can select a scheduler later. */
++	/*
++	 * Start with no elevator; userspace can select a scheduler later.
++	 */
 +	return NULL;
  }
  
  /*
+-- 
+2.43.0

@@ -686,21 +686,18 @@ jobs:
         if: inputs.adios_enable
         run: |
           echo "正在集成 ADIOS…"
-          # 任何命令失败时打印出错行号: 避免 set -e 静默退出后失败点无法定位
-          trap 'echo "ADIOS 集成步骤在脚本第 $LINENO 行失败(退出码 $?)" >&2' ERR
           cd kernel_workspace/common
-
-          # 本工作流所用源码已支持ADIOS 3.1.9
-          # 因此升级到 3.3.0 只需整体替换 block/adios.c 这一个文件, 无需改动 Kconfig/Makefile/elevator.c。
-          # 先移除旧版(3.1.9)实现, 再以"新建文件"方式落地 3.3.0
+          #cctv18源码已支持ADIOS 3.1.9
+          #因此升级到 3.3.0 只需整体替换 block/adios.c 这一个文件, 无需改动 Kconfig/Makefile/elevator.c。
+          #先移除旧版(3.1.9)实现, 再以"新建文件"方式落地 3.3.0
           rm -f block/adios.c
           wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/adios-3.3.0-6.12.patch
           patch -p1 --no-backup-if-mismatch < adios-3.3.0-6.12.patch
-          # 调度器内置编译(=y)并设为 blk-mq 默认调度器
+          #调度器内置编译(=y)，但不设为默认
           echo "CONFIG_MQ_IOSCHED_ADIOS=y" >> ./arch/arm64/configs/gki_defconfig 
-          echo "CONFIG_MQ_IOSCHED_DEFAULT_ADIOS=y" >> ./arch/arm64/configs/gki_defconfig
-          # BFQ作为备选
           echo "CONFIG_MQ_IOSCHED_BFQ=y" >> ./arch/arm64/configs/gki_defconfig
+          #使得none作为默认IO调度器
+          sed -i '/For single queue devices/,/return elevator_get/c\\treturn NULL;' block/elevator.c
           echo "提示: 运行时可用 /sys/block/<dev>/queue/scheduler 查看/切换 ADIOS, 并按需调节 ADIOS 的 sysfs 参数"
           echo "ADIOS 3.3.0 集成完成"
 

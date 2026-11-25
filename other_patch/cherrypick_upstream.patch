@@ -125,3 +125,1038 @@ index 6853fab..f42b5f4 100644
  	tlb_gather_mmu(&tlb, vms->vma->vm_mm);
  	update_hiwater_rss(vms->vma->vm_mm);
  	unmap_vmas(&tlb, mas_detach, vms->vma, vms->start, vms->end,
+From 0ffc4fa8d702ad2c9c0174d6782c648e03b93f9d Mon Sep 17 00:00:00 2001
+From: Android GKI backport <backport@localhost>
+Date: Wed, 25 Nov 2026 16:26:47 +0800
+Subject: [PATCH 1/3] mm/zsmalloc: use the actual payload length for zram and
+ zswap reads
+
+Adapt the read-span optimization from Sergey Senozhatsky to the Android 6.12 map/unmap and zpool APIs. Keep the full-object stride for indexing and writes, and exclude class padding from length-aware reads.
+
+Preserve the original exports and zpool_driver layout. A sized backend explicitly registers with the new core. Old drivers continue to receive the original map callback. Pair both mapping variants with the same unmap.
+
+Link: https://lore.kernel.org/all/20260107052145.3586917-1-senozhatsky@chromium.org/
+---
+ drivers/block/zram/zram_drv.c |   4 +-
+ include/linux/zpool.h         |  13 +++++
+ include/linux/zsmalloc.h      |   1 +
+ mm/zpool.c                    |  28 +++++++++-
+ mm/zsmalloc.c                 | 101 ++++++++++++++++++++++------------
+ mm/zswap.c                    |   2 +-
+ 6 files changed, 109 insertions(+), 40 deletions(-)
+
+diff --git a/drivers/block/zram/zram_drv.c b/drivers/block/zram/zram_drv.c
+index 55f52f917fb31a9e381c054839e6b058e6b9c4c5..b0a4f94a58dbbf2ff495dc6f84084141eff93986 100644
+--- a/drivers/block/zram/zram_drv.c
++++ b/drivers/block/zram/zram_drv.c
+@@ -2404,7 +2404,7 @@ static int read_from_zspool_raw(struct zram *zram, struct page *page, u32 index)
+ 	/*
+ 	 * No decompression takes place here, as we read raw compressed data.
+ 	 */
+-	src = zs_map_object(zram->mem_pool, handle, ZS_MM_RO);
++	src = zs_map_object_read(zram->mem_pool, handle, size);
+ 	memcpy_to_page(page, 0, src, size);
+ 	zs_unmap_object(zram->mem_pool, handle);
+ 
+@@ -2444,7 +2444,7 @@ static int read_from_zspool(struct zram *zram, struct page *page, u32 index)
+ 		zstrm = zcomp_stream_get(zram->comps[prio]);
+ 	}
+ 
+-	src = zs_map_object(zram->mem_pool, handle, ZS_MM_RO);
++	src = zs_map_object_read(zram->mem_pool, handle, size);
+ 	if (size == PAGE_SIZE) {
+ 		dst = kmap_local_page(page);
+ 		copy_page(dst, src);
+diff --git a/include/linux/zpool.h b/include/linux/zpool.h
+index a67d62b796980a6bae9d695bd93ef23f533ba164..58c3518c8e4fb6efd6c8817a663267171b17de82 100644
+--- a/include/linux/zpool.h
++++ b/include/linux/zpool.h
+@@ -51,6 +51,7 @@ void zpool_free(struct zpool *pool, unsigned long handle);
+ void *zpool_map_handle(struct zpool *pool, unsigned long handle,
+ 			enum zpool_mapmode mm);
+ 
++void *zpool_map_handle_read(struct zpool *pool, unsigned long handle, size_t len);
+ void zpool_unmap_handle(struct zpool *pool, unsigned long handle);
+ 
+ u64 zpool_get_total_pages(struct zpool *pool);
+@@ -94,7 +95,19 @@ struct zpool_driver {
+ 	u64 (*total_pages)(void *pool);
+ };
+ 
++/*
++ * Register with zpool_register_driver_sized() and leave driver.map NULL.
++ * The extended operation takes a zero length for a legacy full-object map.
++ * Existing backends keep their original struct zpool_driver and callbacks.
++ */
++struct zpool_driver_sized {
++	struct zpool_driver driver;
++	void *(*map)(void *pool, unsigned long handle, enum zpool_mapmode mm,
++		     size_t len);
++};
++
+ void zpool_register_driver(struct zpool_driver *driver);
++void zpool_register_driver_sized(struct zpool_driver_sized *sized);
+ 
+ int zpool_unregister_driver(struct zpool_driver *driver);
+ 
+diff --git a/include/linux/zsmalloc.h b/include/linux/zsmalloc.h
+index a48cd0ffe57dda457f6d44ba8e00ccfdace99003..2f970aca2ad6d64d873848ae77bfde1b0b512ca3 100644
+--- a/include/linux/zsmalloc.h
++++ b/include/linux/zsmalloc.h
+@@ -50,6 +50,7 @@ size_t zs_huge_class_size(struct zs_pool *pool);
+ 
+ void *zs_map_object(struct zs_pool *pool, unsigned long handle,
+ 			enum zs_mapmode mm);
++void *zs_map_object_read(struct zs_pool *pool, unsigned long handle, size_t len);
+ void zs_unmap_object(struct zs_pool *pool, unsigned long handle);
+ 
+ unsigned long zs_get_total_pages(struct zs_pool *pool);
+diff --git a/mm/zpool.c b/mm/zpool.c
+index b9fda1fa857da7eb5a91445fabda6946e810dcfa..d3739505cffa2adc3aa70dec222ebf1809829630 100644
+--- a/mm/zpool.c
++++ b/mm/zpool.c
+@@ -39,6 +39,13 @@ void zpool_register_driver(struct zpool_driver *driver)
+ }
+ EXPORT_SYMBOL(zpool_register_driver);
+ 
++/* Bind extended backends only to cores that support length-aware maps. */
++void zpool_register_driver_sized(struct zpool_driver_sized *sized)
++{
++	zpool_register_driver(&sized->driver);
++}
++EXPORT_SYMBOL_GPL(zpool_register_driver_sized);
++
+ /**
+  * zpool_unregister_driver() - unregister a zpool implementation.
+  * @driver:	driver to unregister.
+@@ -277,6 +284,18 @@ void zpool_free(struct zpool *zpool, unsigned long handle)
+ 	zpool->driver->free(zpool->pool, handle);
+ }
+ 
++static void *zpool_map(struct zpool *zpool, unsigned long handle,
++		       enum zpool_mapmode mode, size_t len)
++{
++	struct zpool_driver_sized *sized;
++
++	if (zpool->driver->map)
++		return zpool->driver->map(zpool->pool, handle, mode);
++
++	sized = container_of(zpool->driver, struct zpool_driver_sized, driver);
++	return sized->map(zpool->pool, handle, mode, len);
++}
++
+ /**
+  * zpool_map_handle() - Map a previously allocated handle into memory
+  * @zpool:	The zpool that the handle was allocated from
+@@ -302,7 +321,14 @@ void zpool_free(struct zpool *zpool, unsigned long handle)
+ void *zpool_map_handle(struct zpool *zpool, unsigned long handle,
+ 			enum zpool_mapmode mapmode)
+ {
+-	return zpool->driver->map(zpool->pool, handle, mapmode);
++	return zpool_map(zpool, handle, mapmode, 0);
++}
++
++/* Legacy backends map the full object and ignore the read length. */
++void *zpool_map_handle_read(struct zpool *zpool, unsigned long handle,
++			    size_t len)
++{
++	return zpool_map(zpool, handle, ZPOOL_MM_RO, len);
+ }
+ 
+ /**
+diff --git a/mm/zsmalloc.c b/mm/zsmalloc.c
+index 574fe746a952a67957466602b66a084520cb0ef7..c7f9095d753652209e051170b1dd510e701727e3 100644
+--- a/mm/zsmalloc.c
++++ b/mm/zsmalloc.c
+@@ -389,14 +389,13 @@ static void zs_zpool_free(void *pool, unsigned long handle)
+ }
+ 
+ static void *zs_zpool_map(void *pool, unsigned long handle,
+-			enum zpool_mapmode mm)
++			  enum zpool_mapmode mm, size_t len)
+ {
+ 	enum zs_mapmode zs_mm;
+ 
+ 	switch (mm) {
+ 	case ZPOOL_MM_RO:
+-		zs_mm = ZS_MM_RO;
+-		break;
++		return zs_map_object_read(pool, handle, len);
+ 	case ZPOOL_MM_WO:
+ 		zs_mm = ZS_MM_WO;
+ 		break;
+@@ -418,17 +417,19 @@ static u64 zs_zpool_total_pages(void *pool)
+ 	return zs_get_total_pages(pool);
+ }
+ 
+-static struct zpool_driver zs_zpool_driver = {
+-	.type =			  "zsmalloc",
+-	.owner =		  THIS_MODULE,
+-	.create =		  zs_zpool_create,
+-	.destroy =		  zs_zpool_destroy,
+-	.malloc_support_movable = true,
+-	.malloc =		  zs_zpool_malloc,
+-	.free =			  zs_zpool_free,
+-	.map =			  zs_zpool_map,
+-	.unmap =		  zs_zpool_unmap,
+-	.total_pages =		  zs_zpool_total_pages,
++static struct zpool_driver_sized zs_zpool_driver = {
++	.driver = {
++		.type = "zsmalloc",
++		.owner = THIS_MODULE,
++		.create = zs_zpool_create,
++		.destroy = zs_zpool_destroy,
++		.malloc_support_movable = true,
++		.malloc = zs_zpool_malloc,
++		.free = zs_zpool_free,
++		.unmap = zs_zpool_unmap,
++		.total_pages = zs_zpool_total_pages,
++	},
++	.map = zs_zpool_map,
+ };
+ 
+ MODULE_ALIAS("zpool-zsmalloc");
+@@ -1169,23 +1170,8 @@ unsigned long zs_get_total_pages(struct zs_pool *pool)
+ }
+ EXPORT_SYMBOL_GPL(zs_get_total_pages);
+ 
+-/**
+- * zs_map_object - get address of allocated object from handle.
+- * @pool: pool from which the object was allocated
+- * @handle: handle returned from zs_malloc
+- * @mm: mapping mode to use
+- *
+- * Before using an object allocated from zs_malloc, it must be mapped using
+- * this function. When done with the object, it must be unmapped using
+- * zs_unmap_object.
+- *
+- * Only one object can be mapped per cpu at a time. There is no protection
+- * against nested mappings.
+- *
+- * This function returns with preemption and page faults disabled.
+- */
+-void *zs_map_object(struct zs_pool *pool, unsigned long handle,
+-			enum zs_mapmode mm)
++static void *zs_map_object_len(struct zs_pool *pool, unsigned long handle,
++			       enum zs_mapmode mm, size_t len)
+ {
+ 	struct zspage *zspage;
+ 	struct page *page;
+@@ -1225,7 +1211,12 @@ void *zs_map_object(struct zs_pool *pool, unsigned long handle,
+ 	local_lock(&zs_map_area.lock);
+ 	area = this_cpu_ptr(&zs_map_area);
+ 	area->vm_mm = mm;
+-	if (off + class->size <= PAGE_SIZE) {
++	/* Use the stored payload and its inline handle, excluding class padding. */
++	if (!len)
++		len = class->size;
++	else if (!ZsHugePage(zspage))
++		len += ZS_HANDLE_SIZE;
++	if (off + len <= PAGE_SIZE) {
+ 		/* this object is contained entirely within a page */
+ 		area->vm_addr = kmap_atomic(page);
+ 		ret = area->vm_addr + off;
+@@ -1237,15 +1228,52 @@ void *zs_map_object(struct zs_pool *pool, unsigned long handle,
+ 	pages[1] = get_next_page(page);
+ 	BUG_ON(!pages[1]);
+ 
+-	ret = __zs_map_object(area, pages, off, class->size);
++	area->vm_addr = NULL;
++	ret = __zs_map_object(area, pages, off, len);
+ out:
+ 	if (likely(!ZsHugePage(zspage)))
+ 		ret += ZS_HANDLE_SIZE;
+ 
+ 	return ret;
+ }
++
++/**
++ * zs_map_object - get address of allocated object from handle.
++ * @pool: pool from which the object was allocated
++ * @handle: handle returned from zs_malloc
++ * @mm: mapping mode to use
++ *
++ * Before using an object allocated from zs_malloc, it must be mapped using
++ * this function. When done with the object, it must be unmapped using
++ * zs_unmap_object.
++ *
++ * Only one object can be mapped per cpu at a time. There is no protection
++ * against nested mappings.
++ *
++ * This function returns with preemption and page faults disabled.
++ */
++void *zs_map_object(struct zs_pool *pool, unsigned long handle,
++			enum zs_mapmode mm)
++{
++	return zs_map_object_len(pool, handle, mm, 0);
++}
+ EXPORT_SYMBOL_GPL(zs_map_object);
+ 
++/**
++ * zs_map_object_read - map a payload for a read of known length
++ * @pool: pool containing the object
++ * @handle: handle returned by zs_malloc()
++ * @len: payload bytes to read, at most the originally allocated size
++ *
++ * Has the same mapping lifetime and context rules as zs_map_object().
++ * Pair with zs_unmap_object().
++ */
++void *zs_map_object_read(struct zs_pool *pool, unsigned long handle, size_t len)
++{
++	return zs_map_object_len(pool, handle, ZS_MM_RO, len);
++}
++EXPORT_SYMBOL_GPL(zs_map_object_read);
++
+ void zs_unmap_object(struct zs_pool *pool, unsigned long handle)
+ {
+ 	struct zspage *zspage;
+@@ -1263,7 +1291,8 @@ void zs_unmap_object(struct zs_pool *pool, unsigned long handle)
+ 	off = offset_in_page(class->size * obj_idx);
+ 
+ 	area = this_cpu_ptr(&zs_map_area);
+-	if (off + class->size <= PAGE_SIZE)
++	/* Short reads can be directly mapped even for a spanning slot. */
++	if (area->vm_addr)
+ 		kunmap_atomic(area->vm_addr);
+ 	else {
+ 		struct page *pages[2];
+@@ -2288,7 +2317,7 @@ static int __init zs_init(void)
+ 		goto out;
+ 
+ #ifdef CONFIG_ZPOOL
+-	zpool_register_driver(&zs_zpool_driver);
++	zpool_register_driver_sized(&zs_zpool_driver);
+ #endif
+ 
+ 	zs_stat_init();
+@@ -2302,7 +2331,7 @@ out:
+ static void __exit zs_exit(void)
+ {
+ #ifdef CONFIG_ZPOOL
+-	zpool_unregister_driver(&zs_zpool_driver);
++	zpool_unregister_driver(&zs_zpool_driver.driver);
+ #endif
+ 	cpuhp_remove_state(CPUHP_MM_ZS_PREPARE);
+ 
+diff --git a/mm/zswap.c b/mm/zswap.c
+index e15052e1a83c830623eded93fd0e6f9cb296c080..c7443d1fe47a1e576a40ff414b572160b59d4983 100644
+--- a/mm/zswap.c
++++ b/mm/zswap.c
+@@ -1007,7 +1007,7 @@ static void zswap_decompress(struct zswap_entry *entry, struct folio *folio)
+ 	u8 *src;
+ 
+ 	acomp_ctx = acomp_ctx_get_cpu_lock(entry->pool);
+-	src = zpool_map_handle(zpool, entry->handle, ZPOOL_MM_RO);
++	src = zpool_map_handle_read(zpool, entry->handle, entry->length);
+ 	/*
+ 	 * If zpool_map_handle is atomic, we cannot reliably utilize its mapped buffer
+ 	 * to do crypto_acomp_decompress() which might sleep. In such cases, we must
+From 4e81f7352982a043527e85f23b403f89367ce850 Mon Sep 17 00:00:00 2001
+From: Wenchao Hao <haowenchao@xiaomi.com>
+Date: Fri, 26 Jun 2026 09:50:00 +0800
+Subject: [PATCH 2/3] mm/zsmalloc: reduce lock contention in zs_free() on
+ Android 6.12
+
+Backport the four June v6 patches. Wenchao Hao authored parts 1, 2 and 4. Xueyuan Chen authored part 3, which releases an empty zspage outside the class lock.
+
+Encode the immutable class index in object locations when space permits. Re-read the location under the class lock, retain the migrate_lock fallback, and detach an empty zspage with its pages locked before releasing it. Keep the Android struct page paths, per-pool caches and deferred worker.
+
+Co-authored-by: Xueyuan Chen <xueyuan.chen21@gmail.com>
+
+Link: https://lore.kernel.org/all/20260626015003.2965881-1-haowenchao22@gmail.com/
+---
+ mm/zsmalloc.c | 173 ++++++++++++++++++++++++++++++++++++--------------
+ 1 file changed, 127 insertions(+), 46 deletions(-)
+
+diff --git a/mm/zsmalloc.c b/mm/zsmalloc.c
+index c7f9095d753652209e051170b1dd510e701727e3..b11c330c020e68324cecaa32290279706a41a5c1 100644
+--- a/mm/zsmalloc.c
++++ b/mm/zsmalloc.c
+@@ -37,6 +37,8 @@
+  *	pool->migrate_lock
+  *	class->lock
+  *	zspage->lock
++ *
++ * With class bits in obj, zs_free() takes class->lock directly.
+  */
+ 
+ #include <linux/module.h>
+@@ -80,8 +82,8 @@
+ #define ZS_HANDLE_SIZE (sizeof(unsigned long))
+ 
+ /*
+- * Object location (<PFN>, <obj_idx>) is encoded as
+- * a single (unsigned long) handle value.
++ * The handle points to an unsigned long encoding PFN and object index.
++ * When there are spare bits it also encodes the immutable size class.
+  *
+  * Note that object index <obj_idx> starts from 0.
+  *
+@@ -93,8 +95,7 @@
+ #define MAX_POSSIBLE_PHYSMEM_BITS MAX_PHYSMEM_BITS
+ #else
+ /*
+- * If this definition of MAX_PHYSMEM_BITS is used, OBJ_INDEX_BITS will just
+- * be PAGE_SHIFT
++ * Without a physical address limit, ZS_OBJ_PFN_SHIFT is PAGE_SHIFT.
+  */
+ #define MAX_POSSIBLE_PHYSMEM_BITS BITS_PER_LONG
+ #endif
+@@ -114,8 +115,8 @@
+ #define OBJ_TAG_BITS	1
+ #define OBJ_TAG_MASK	OBJ_ALLOCATED_TAG
+ 
+-#define OBJ_INDEX_BITS	(BITS_PER_LONG - _PFN_BITS)
+-#define OBJ_INDEX_MASK	((_AC(1, UL) << OBJ_INDEX_BITS) - 1)
++/* Object layout, from high to low: PFN | optional class index | object index. */
++#define ZS_OBJ_PFN_SHIFT	(BITS_PER_LONG - _PFN_BITS)
+ 
+ #define HUGE_BITS	1
+ #define FULLNESS_BITS	4
+@@ -124,9 +125,34 @@
+ 
+ #define ZS_MAX_PAGES_PER_ZSPAGE	(_AC(CONFIG_ZSMALLOC_CHAIN_SIZE, UL))
+ 
++/* ceil(log2(ZS_MAX_PAGES_PER_ZSPAGE)); Kconfig allows 4 through 16. */
++#if ZS_MAX_PAGES_PER_ZSPAGE <= 4
++#define ZS_PAGES_PER_ZSPAGE_BITS	2
++#elif ZS_MAX_PAGES_PER_ZSPAGE <= 8
++#define ZS_PAGES_PER_ZSPAGE_BITS	3
++#elif ZS_MAX_PAGES_PER_ZSPAGE <= 16
++#define ZS_PAGES_PER_ZSPAGE_BITS	4
++#else
++#error "ZSMALLOC_CHAIN_SIZE exceeds the supported range"
++#endif
++
++/* The smallest object is 32 bytes. Reserve enough indices for the chain. */
++#define ZS_OBJS_PER_ZSPAGE_BITS	(ZS_PAGES_PER_ZSPAGE_BITS + PAGE_SHIFT - 5)
++#if BITS_PER_LONG >= 64 && \
++	ZS_OBJ_PFN_SHIFT >= CLASS_BITS + 1 + ZS_OBJS_PER_ZSPAGE_BITS
++#define ZS_OBJ_CLASS_BITS	(CLASS_BITS + 1)
++#else
++#define ZS_OBJ_CLASS_BITS	0
++#endif
++#define ZS_OBJ_CLASS_MASK	((_AC(1, UL) << ZS_OBJ_CLASS_BITS) - 1)
++#define ZS_OBJ_IDX_BITS		(ZS_OBJ_PFN_SHIFT - ZS_OBJ_CLASS_BITS)
++#define ZS_OBJ_IDX_MASK		((_AC(1, UL) << ZS_OBJ_IDX_BITS) - 1)
++
++static_assert(ZS_OBJ_IDX_BITS >= ZS_PAGES_PER_ZSPAGE_BITS);
++
+ /* ZS_MIN_ALLOC_SIZE must be multiple of ZS_ALIGN */
+ #define ZS_MIN_ALLOC_SIZE \
+-	MAX(32, (ZS_MAX_PAGES_PER_ZSPAGE << PAGE_SHIFT >> OBJ_INDEX_BITS))
++	MAX(32, (ZS_MAX_PAGES_PER_ZSPAGE << PAGE_SHIFT >> ZS_OBJ_IDX_BITS))
+ /* each chunk includes extra space to keep handle */
+ #define ZS_MAX_ALLOC_SIZE	PAGE_SIZE
+ 
+@@ -349,10 +375,10 @@ static void cache_free_zspage(struct zs_pool *pool, struct zspage *zspage)
+ 	kmem_cache_free(pool->zspage_cachep, zspage);
+ }
+ 
+-/* class->lock(which owns the handle) synchronizes races */
++/* zs_free() can sample the encoded class before acquiring class->lock. */
+ static void record_obj(unsigned long handle, unsigned long obj)
+ {
+-	*(unsigned long *)handle = obj;
++	WRITE_ONCE(*(unsigned long *)handle, obj);
+ }
+ 
+ /* zpool driver */
+@@ -760,33 +786,41 @@ static struct page *get_next_page(struct page *page)
+ static void obj_to_location(unsigned long obj, struct page **page,
+ 				unsigned int *obj_idx)
+ {
+-	*page = pfn_to_page(obj >> OBJ_INDEX_BITS);
+-	*obj_idx = (obj & OBJ_INDEX_MASK);
++	*page = pfn_to_page(obj >> ZS_OBJ_PFN_SHIFT);
++	*obj_idx = obj & ZS_OBJ_IDX_MASK;
+ }
+ 
+ static void obj_to_page(unsigned long obj, struct page **page)
+ {
+-	*page = pfn_to_page(obj >> OBJ_INDEX_BITS);
++	*page = pfn_to_page(obj >> ZS_OBJ_PFN_SHIFT);
++}
++
++static inline unsigned int obj_to_class_idx(unsigned long obj)
++{
++	return (obj >> ZS_OBJ_IDX_BITS) & ZS_OBJ_CLASS_MASK;
+ }
+ 
+ /**
+- * location_to_obj - get obj value encoded from (<page>, <obj_idx>)
++ * location_to_obj - encode page, object index and size class
+  * @page: page object resides in zspage
+  * @obj_idx: object index
++ * @class_idx: size class index, ignored when the encoding has no class bits
+  */
+-static unsigned long location_to_obj(struct page *page, unsigned int obj_idx)
++static unsigned long location_to_obj(struct page *page, unsigned int obj_idx,
++				     unsigned int class_idx)
+ {
+ 	unsigned long obj;
+ 
+-	obj = page_to_pfn(page) << OBJ_INDEX_BITS;
+-	obj |= obj_idx & OBJ_INDEX_MASK;
++	obj = page_to_pfn(page) << ZS_OBJ_PFN_SHIFT;
++	obj |= (unsigned long)(class_idx & ZS_OBJ_CLASS_MASK) << ZS_OBJ_IDX_BITS;
++	obj |= obj_idx & ZS_OBJ_IDX_MASK;
+ 
+ 	return obj;
+ }
+ 
+ static unsigned long handle_to_obj(unsigned long handle)
+ {
+-	return *(unsigned long *)handle;
++	return READ_ONCE(*(unsigned long *)handle);
+ }
+ 
+ static inline bool obj_allocated(struct page *page, void *obj,
+@@ -839,13 +873,21 @@ unlock:
+ 	return 0;
+ }
+ 
+-static void __free_zspage(struct zs_pool *pool, struct size_class *class,
+-				struct zspage *zspage)
++/*
++ * __free_zspage_lockless() returns the component pages and frees metadata.
++ * The caller has removed the empty zspage from its list and holds all its
++ * page locks. zs_free() can therefore call it outside the class lock.
++ *
++ * __free_zspage() also updates the class and pool counters, under the
++ * class lock. The deferred worker uses it after locking the pages.
++ *
++ * free_zspage() is used by compaction: trylock the pages, remove the
++ * empty zspage and call __free_zspage(), or queue work on contention.
++ */
++static void __free_zspage_lockless(struct zs_pool *pool, struct zspage *zspage)
+ {
+ 	struct page *page, *next;
+ 
+-	assert_spin_locked(&class->lock);
+-
+ 	VM_BUG_ON(get_zspage_inuse(zspage));
+ 	VM_BUG_ON(zspage->fullness != ZS_INUSE_RATIO_0);
+ 
+@@ -861,7 +903,13 @@ static void __free_zspage(struct zs_pool *pool, struct size_class *class,
+ 	} while (page != NULL);
+ 
+ 	cache_free_zspage(pool, zspage);
++}
+ 
++static void __free_zspage(struct zs_pool *pool, struct size_class *class,
++			  struct zspage *zspage)
++{
++	assert_spin_locked(&class->lock);
++	__free_zspage_lockless(pool, zspage);
+ 	class_stat_sub(class, ZS_OBJS_ALLOCATED, class->objs_per_zspage);
+ 	atomic_long_sub(class->pages_per_zspage, &pool->pages_allocated);
+ }
+@@ -873,9 +921,8 @@ static void free_zspage(struct zs_pool *pool, struct size_class *class,
+ 	VM_BUG_ON(list_empty(&zspage->list));
+ 
+ 	/*
+-	 * Since zs_free couldn't be sleepable, this function cannot call
+-	 * lock_page. The page locks trylock_zspage got will be released
+-	 * by __free_zspage.
++	 * We hold the class spinlock, so page locking must not sleep.
++	 * __free_zspage() releases the page locks acquired here.
+ 	 */
+ 	if (!trylock_zspage(zspage)) {
+ 		kick_deferred_free(pool);
+@@ -1364,7 +1411,7 @@ static unsigned long obj_malloc(struct zs_pool *pool,
+ 	kunmap_atomic(vaddr);
+ 	mod_zspage_inuse(zspage, 1);
+ 
+-	obj = location_to_obj(m_page, obj);
++	obj = location_to_obj(m_page, obj, zspage->class);
+ 	record_obj(handle, obj);
+ 
+ 	return obj;
+@@ -1466,10 +1513,42 @@ static void obj_free(int class_size, unsigned long obj)
+ 	mod_zspage_inuse(zspage, -1);
+ }
+ 
++/*
++ * The first lockless sample identifies the immutable class. Migration and
++ * compaction may have moved the object, so only dereference the PFN from
++ * a fresh sample taken under class->lock. Without class bits, protect
++ * the initial lookup with migrate_lock until the class lock is acquired.
++ */
++static inline void obj_class_get_and_lock(struct zs_pool *pool, unsigned long handle,
++					  unsigned long *objp, struct zspage **zspagep,
++					  struct size_class **classp)
++	__acquires(&(*classp)->lock)
++{
++	struct page *page;
++	unsigned long obj;
++
++#if ZS_OBJ_CLASS_BITS > 0
++	obj = handle_to_obj(handle);
++	*classp = pool->size_class[obj_to_class_idx(obj)];
++	spin_lock(&(*classp)->lock);
++	obj = handle_to_obj(handle);
++	obj_to_page(obj, &page);
++	*zspagep = get_zspage(page);
++#else
++	read_lock(&pool->migrate_lock);
++	obj = handle_to_obj(handle);
++	obj_to_page(obj, &page);
++	*zspagep = get_zspage(page);
++	*classp = zspage_class(pool, *zspagep);
++	spin_lock(&(*classp)->lock);
++	read_unlock(&pool->migrate_lock);
++#endif
++	*objp = obj;
++}
++
+ void zs_free(struct zs_pool *pool, unsigned long handle)
+ {
+-	struct zspage *zspage;
+-	struct page *f_page;
++	struct zspage *zspage, *zspage_to_free = NULL;
+ 	unsigned long obj;
+ 	struct size_class *class;
+ 	int fullness;
+@@ -1477,26 +1556,28 @@ void zs_free(struct zs_pool *pool, unsigned long handle)
+ 	if (IS_ERR_OR_NULL((void *)handle))
+ 		return;
+ 
+-	/*
+-	 * The pool->migrate_lock protects the race with zpage's migration
+-	 * so it's safe to get the page from handle.
+-	 */
+-	read_lock(&pool->migrate_lock);
+-	obj = handle_to_obj(handle);
+-	obj_to_page(obj, &f_page);
+-	zspage = get_zspage(f_page);
+-	class = zspage_class(pool, zspage);
+-	spin_lock(&class->lock);
+-	read_unlock(&pool->migrate_lock);
++	obj_class_get_and_lock(pool, handle, &obj, &zspage, &class);
+ 
+ 	class_stat_sub(class, ZS_OBJS_INUSE, 1);
+ 	obj_free(class->size, obj);
+ 
+ 	fullness = fix_fullness_group(class, zspage);
+-	if (fullness == ZS_INUSE_RATIO_0)
+-		free_zspage(pool, class, zspage);
++	if (fullness == ZS_INUSE_RATIO_0) {
++		if (trylock_zspage(zspage)) {
++			remove_zspage(class, zspage);
++			class_stat_sub(class, ZS_OBJS_ALLOCATED,
++				       class->objs_per_zspage);
++			zspage_to_free = zspage;
++		} else {
++			kick_deferred_free(pool);
++		}
++	}
+ 
+ 	spin_unlock(&class->lock);
++	if (zspage_to_free) {
++		__free_zspage_lockless(pool, zspage_to_free);
++		atomic_long_sub(class->pages_per_zspage, &pool->pages_allocated);
++	}
+ 	cache_free_handle(pool, handle);
+ }
+ EXPORT_SYMBOL_GPL(zs_free);
+@@ -1817,8 +1898,8 @@ static int zs_page_migrate(struct page *newpage, struct page *page,
+ 	pool = zspage->pool;
+ 
+ 	/*
+-	 * The pool migrate_lock protects the race between zpage migration
+-	 * and zs_free.
++	 * Keep PFN-based lookups stable until they acquire the class or
++	 * zspage lock. Class-encoded frees synchronize on class->lock.
+ 	 */
+ 	write_lock(&pool->migrate_lock);
+ 	class = zspage_class(pool, zspage);
+@@ -1846,8 +1927,8 @@ static int zs_page_migrate(struct page *newpage, struct page *page,
+ 
+ 			old_obj = handle_to_obj(handle);
+ 			obj_to_location(old_obj, &dummy, &obj_idx);
+-			new_obj = (unsigned long)location_to_obj(newpage,
+-								obj_idx);
++			new_obj = location_to_obj(newpage, obj_idx,
++						  obj_to_class_idx(old_obj));
+ 			record_obj(handle, new_obj);
+ 		}
+ 	}
+@@ -1978,8 +2059,8 @@ static unsigned long __zs_compact(struct zs_pool *pool,
+ 	unsigned long pages_freed = 0;
+ 
+ 	/*
+-	 * protect the race between zpage migration and zs_free
+-	 * as well as zpage allocation/free
++	 * Serialize PFN-based lookups and take the class lock before moving
++	 * objects, including those concurrently looked up by class index.
+ 	 */
+ 	write_lock(&pool->migrate_lock);
+ 	spin_lock(&class->lock);
+From a9fb7cfad8f18efb0c12e42e1fdc417f3dcfd2f7 Mon Sep 17 00:00:00 2001
+From: Hongfeng Chen <hongfengchen@xiaomi.com>
+Date: Sat, 17 Oct 2026 11:15:42 +0800
+Subject: [PATCH 3/3] zram: keep the hot statistics per CPU
+
+Backport the five per-CPU counters to the Android GKI 6.12 zram driver.
+Pin the CPU once per slot transition and use local64_t so updates also
+work from interrupt context and remote reads do not tear on 32-bit.
+Include Android prefetch reuse and repopulation in byte/huge accounting.
+Sum all possible CPUs for sysfs and reset the shards after draining I/O.
+
+Link: https://lore.kernel.org/all/20261017031542.3504947-1-hongfengchen@xiaomi.com/
+---
+ drivers/block/zram/zram_drv.c | 126 +++++++++++++++++++++++++---------
+ drivers/block/zram/zram_drv.h |   6 +-
+ 2 files changed, 94 insertions(+), 38 deletions(-)
+
+diff --git a/drivers/block/zram/zram_drv.c b/drivers/block/zram/zram_drv.c
+index b0a4f94a58dbbf2ff495dc6f84084141eff93986..84b032d80e7974a9a1f10c286ee619bb23324ade 100644
+--- a/drivers/block/zram/zram_drv.c
++++ b/drivers/block/zram/zram_drv.c
+@@ -15,6 +15,7 @@
+ #define KMSG_COMPONENT "zram"
+ #define pr_fmt(fmt) KMSG_COMPONENT ": " fmt
+ 
++#include <asm/local64.h>
+ #include <linux/module.h>
+ #include <linux/kernel.h>
+ #include <linux/bio.h>
+@@ -59,6 +60,39 @@ static void zram_free_page(struct zram *zram, size_t index);
+ static int zram_read_page(struct zram *zram, struct page *page, u32 index,
+ 			  struct bio *parent);
+ 
++struct zram_pcpu_stats {
++	local64_t pages_stored;
++	local64_t compr_data_size;
++	local64_t same_pages;
++	local64_t huge_pages;
++	local64_t notify_free;
++};
++
++/* Pin once per slot transition. Local updates are atomic against IRQs. */
++static inline void zram_account_slot(struct zram *zram, int pages, s64 bytes,
++				     int same, int huge)
++{
++	struct zram_pcpu_stats *s = get_cpu_ptr(zram->pcpu_stats);
++
++	if (pages)
++		local64_add(pages, &s->pages_stored);
++	if (bytes)
++		local64_add(bytes, &s->compr_data_size);
++	if (same)
++		local64_add(same, &s->same_pages);
++	if (huge)
++		local64_add(huge, &s->huge_pages);
++	put_cpu_ptr(zram->pcpu_stats);
++}
++
++static inline void zram_account_notify(struct zram *zram)
++{
++	struct zram_pcpu_stats *s = get_cpu_ptr(zram->pcpu_stats);
++
++	local64_inc(&s->notify_free);
++	put_cpu_ptr(zram->pcpu_stats);
++}
++
+ static int zram_slot_trylock(struct zram *zram, u32 index)
+ {
+ 	return spin_trylock(&zram->table[index].lock);
+@@ -899,10 +933,8 @@ static int zram_writeback_complete(struct zram *zram, struct zram_wb_req *req)
+ 	}
+ 
+ 	zram_clear_flag(zram, index, ZRAM_IDLE);
+-	if (zram_test_flag(zram, index, ZRAM_HUGE))
+-		atomic64_dec(&zram->stats.huge_pages);
+-	atomic64_sub(zram_get_obj_size(zram, index),
+-		     &zram->stats.compr_data_size);
++	zram_account_slot(zram, 0, -(s64)zram_get_obj_size(zram, index), 0,
++			  -zram_test_flag(zram, index, ZRAM_HUGE));
+ 	zs_free(zram->mem_pool, zram_get_handle(zram, index));
+ 	zram_set_handle(zram, index, req->blk_idx);
+ 	zram_set_flag(zram, index, ZRAM_WB);
+@@ -1053,10 +1085,8 @@ int zram_prefetch_cache_reuse(struct zram *zram, u32 index)
+ 		return err;
+ 
+ 	zram_clear_flag(zram, index, ZRAM_IDLE);
+-	if (zram_test_flag(zram, index, ZRAM_HUGE))
+-		atomic64_dec(&zram->stats.huge_pages);
+-	atomic64_sub(zram_get_obj_size(zram, index),
+-		     &zram->stats.compr_data_size);
++	zram_account_slot(zram, 0, -(s64)zram_get_obj_size(zram, index), 0,
++			  -zram_test_flag(zram, index, ZRAM_HUGE));
+ 	zs_free(zram->mem_pool, zram_get_handle(zram, index));
+ 	zram_set_handle(zram, index, blk_idx);
+ 	zram_set_flag(zram, index, ZRAM_WB);
+@@ -1144,9 +1174,8 @@ static int zram_populate_table(struct zram *zram, struct page *page, u32 index)
+ 
+ 	zram_clear_flag(zram, index, ZRAM_WB);
+ 	zram_set_handle(zram, index, handle);
+-	atomic64_add(size, &zram->stats.compr_data_size);
+-	if (zram_test_flag(zram, index, ZRAM_HUGE))
+-		atomic64_inc(&zram->stats.huge_pages);
++	zram_account_slot(zram, 0, size, 0,
++			  zram_test_flag(zram, index, ZRAM_HUGE));
+ 	zram_slot_unlock(zram, index);
+ 
+ 	return 0;
+@@ -2198,14 +2227,21 @@ static ssize_t io_stat_show(struct device *dev,
+ 		struct device_attribute *attr, char *buf)
+ {
+ 	struct zram *zram = dev_to_zram(dev);
++	u64 notify_free = 0;
+ 	ssize_t ret;
++	int cpu;
+ 
+ 	down_read(&zram->init_lock);
++	for_each_possible_cpu(cpu) {
++		struct zram_pcpu_stats *s = per_cpu_ptr(zram->pcpu_stats, cpu);
++
++		notify_free += local64_read(&s->notify_free);
++	}
+ 	ret = scnprintf(buf, PAGE_SIZE,
+ 			"%8llu %8llu 0 %8llu\n",
+ 			(u64)atomic64_read(&zram->stats.failed_reads),
+ 			(u64)atomic64_read(&zram->stats.failed_writes),
+-			(u64)atomic64_read(&zram->stats.notify_free));
++			notify_free);
+ 	up_read(&zram->init_lock);
+ 
+ 	return ret;
+@@ -2216,7 +2252,9 @@ static ssize_t mm_stat_show(struct device *dev,
+ {
+ 	struct zram *zram = dev_to_zram(dev);
+ 	struct zs_pool_stats pool_stats;
++	s64 pages = 0, bytes = 0, same = 0, huge = 0;
+ 	u64 orig_size, mem_used = 0;
++	int cpu;
+ 	long max_used;
+ 	ssize_t ret;
+ 
+@@ -2228,19 +2266,28 @@ static ssize_t mm_stat_show(struct device *dev,
+ 		zs_pool_stats(zram->mem_pool, &pool_stats);
+ 	}
+ 
+-	orig_size = atomic64_read(&zram->stats.pages_stored);
++	/* A concurrent store and free on different CPUs can skew the sum. */
++	for_each_possible_cpu(cpu) {
++		struct zram_pcpu_stats *s = per_cpu_ptr(zram->pcpu_stats, cpu);
++
++		pages += local64_read(&s->pages_stored);
++		bytes += local64_read(&s->compr_data_size);
++		same += local64_read(&s->same_pages);
++		huge += local64_read(&s->huge_pages);
++	}
++	orig_size = max_t(s64, pages, 0);
+ 	max_used = atomic_long_read(&zram->stats.max_used_pages);
+ 
+ 	ret = scnprintf(buf, PAGE_SIZE,
+ 			"%8llu %8llu %8llu %8lu %8ld %8llu %8lu %8llu %8llu\n",
+ 			orig_size << PAGE_SHIFT,
+-			(u64)atomic64_read(&zram->stats.compr_data_size),
++			(u64)max_t(s64, bytes, 0),
+ 			mem_used << PAGE_SHIFT,
+ 			zram->limit_pages << PAGE_SHIFT,
+ 			max_used << PAGE_SHIFT,
+-			(u64)atomic64_read(&zram->stats.same_pages),
++			(u64)max_t(s64, same, 0),
+ 			atomic_long_read(&pool_stats.pages_compacted),
+-			(u64)atomic64_read(&zram->stats.huge_pages),
++			(u64)max_t(s64, huge, 0),
+ 			(u64)atomic64_read(&zram->stats.huge_pages_since));
+ 	up_read(&zram->init_lock);
+ 
+@@ -2340,7 +2387,9 @@ static bool zram_meta_alloc(struct zram *zram, u64 disksize)
+  */
+ static void zram_free_page(struct zram *zram, size_t index)
+ {
++	int pages = 0, same = 0, huge = 0;
+ 	unsigned long handle;
++	s64 bytes = 0;
+ 
+ #ifdef CONFIG_ZRAM_TRACK_ENTRY_ACTIME
+ 	zram->table[index].ac_time = 0;
+@@ -2357,7 +2406,7 @@ static void zram_free_page(struct zram *zram, size_t index)
+ 		 * ZRAM_HUGE flag for deferred decompression path.
+ 		 */
+ 		if (!zram_test_flag(zram, index, ZRAM_WB))
+-			atomic64_dec(&zram->stats.huge_pages);
++			huge = -1;
+ 		zram_clear_flag(zram, index, ZRAM_HUGE);
+ 	}
+ 
+@@ -2373,22 +2422,23 @@ static void zram_free_page(struct zram *zram, size_t index)
+ 	 */
+ 	if (zram_test_flag(zram, index, ZRAM_SAME)) {
+ 		zram_clear_flag(zram, index, ZRAM_SAME);
+-		atomic64_dec(&zram->stats.same_pages);
++		same = -1;
+ 		goto out;
+ 	}
+ 
+ 	handle = zram_get_handle(zram, index);
+ 	if (!handle)
+-		return;
++		goto account;
+ 
+ 	zs_free(zram->mem_pool, handle);
+-
+-	atomic64_sub(zram_get_obj_size(zram, index),
+-		     &zram->stats.compr_data_size);
++	bytes = -(s64)zram_get_obj_size(zram, index);
+ out:
+-	atomic64_dec(&zram->stats.pages_stored);
++	pages = -1;
+ 	zram_set_handle(zram, index, 0);
+ 	zram_set_obj_size(zram, index, 0);
++account:
++	if (pages || huge)
++		zram_account_slot(zram, pages, bytes, same, huge);
+ }
+ 
+ #if defined CONFIG_ZRAM_WRITEBACK
+@@ -2533,7 +2583,6 @@ static int zram_write_page(struct zram *zram, struct page *page, u32 index)
+ 		kunmap_local(mem);
+ 		/* Free memory associated with this sector now. */
+ 		flags = ZRAM_SAME;
+-		atomic64_inc(&zram->stats.same_pages);
+ 		goto out;
+ 	}
+ 	kunmap_local(mem);
+@@ -2615,7 +2664,6 @@ compress_again:
+ 
+ 	zcomp_stream_put(zram->comps[ZRAM_PRIMARY_COMP]);
+ 	zs_unmap_object(zram->mem_pool, handle);
+-	atomic64_add(comp_len, &zram->stats.compr_data_size);
+ out:
+ 	/*
+ 	 * Free memory associated with this sector
+@@ -2626,7 +2674,6 @@ out:
+ 
+ 	if (comp_len == PAGE_SIZE) {
+ 		zram_set_flag(zram, index, ZRAM_HUGE);
+-		atomic64_inc(&zram->stats.huge_pages);
+ 		atomic64_inc(&zram->stats.huge_pages_since);
+ 	}
+ 
+@@ -2637,10 +2684,10 @@ out:
+ 		zram_set_handle(zram, index, handle);
+ 		zram_set_obj_size(zram, index, comp_len);
+ 	}
++	zram_account_slot(zram, 1, comp_len, flags == ZRAM_SAME,
++			  comp_len == PAGE_SIZE);
+ 	zram_slot_unlock(zram, index);
+ 
+-	/* Update stats */
+-	atomic64_inc(&zram->stats.pages_stored);
+ 	return ret;
+ }
+ 
+@@ -2878,8 +2925,7 @@ static int recompress_slot(struct zram *zram, u32 index, struct page *page,
+ 	zram_set_obj_size(zram, index, comp_len_new);
+ 	zram_set_priority(zram, index, prio);
+ 
+-	atomic64_add(comp_len_new, &zram->stats.compr_data_size);
+-	atomic64_inc(&zram->stats.pages_stored);
++	zram_account_slot(zram, 1, comp_len_new, 0, 0);
+ 
+ 	return 0;
+ }
+@@ -3086,7 +3132,7 @@ static void zram_bio_discard(struct zram *zram, struct bio *bio)
+ 		zram_slot_lock(zram, index);
+ 		zram_free_page(zram, index);
+ 		zram_slot_unlock(zram, index);
+-		atomic64_inc(&zram->stats.notify_free);
++		zram_account_notify(zram);
+ 		index++;
+ 		n -= PAGE_SIZE;
+ 	}
+@@ -3186,7 +3232,7 @@ static void zram_slot_free_notify(struct block_device *bdev,
+ 
+ 	zram = bdev->bd_disk->private_data;
+ 
+-	atomic64_inc(&zram->stats.notify_free);
++	zram_account_notify(zram);
+ 	if (!zram_slot_trylock(zram, index)) {
+ 		atomic64_inc(&zram->stats.miss_free);
+ 		return;
+@@ -3232,6 +3278,8 @@ static void zram_destroy_comps(struct zram *zram)
+ 
+ static void zram_reset_device(struct zram *zram)
+ {
++	int cpu;
++
+ 	down_write(&zram->init_lock);
+ 
+ 	zram->limit_pages = 0;
+@@ -3244,6 +3292,9 @@ static void zram_reset_device(struct zram *zram)
+ 	zram->disksize = 0;
+ 	zram_destroy_comps(zram);
+ 	memset(&zram->stats, 0, sizeof(zram->stats));
++	for_each_possible_cpu(cpu)
++		memset(per_cpu_ptr(zram->pcpu_stats, cpu), 0,
++		       sizeof(struct zram_pcpu_stats));
+ 	atomic_set(&zram->pp_in_progress, 0);
+ 	reset_bdev(zram);
+ 
+@@ -3463,9 +3514,15 @@ static int zram_add(void)
+ 	if (!zram)
+ 		return -ENOMEM;
+ 
++	zram->pcpu_stats = alloc_percpu(struct zram_pcpu_stats);
++	if (!zram->pcpu_stats) {
++		ret = -ENOMEM;
++		goto out_free_dev;
++	}
++
+ 	ret = idr_alloc(&zram_index_idr, zram, 0, 0, GFP_KERNEL);
+ 	if (ret < 0)
+-		goto out_free_dev;
++		goto out_free_stats;
+ 	device_id = ret;
+ 
+ 	init_rwsem(&zram->init_lock);
+@@ -3508,6 +3565,8 @@ out_cleanup_disk:
+ 	put_disk(zram->disk);
+ out_free_idr:
+ 	idr_remove(&zram_index_idr, device_id);
++out_free_stats:
++	free_percpu(zram->pcpu_stats);
+ out_free_dev:
+ 	kfree(zram);
+ 	return ret;
+@@ -3557,6 +3616,7 @@ static int zram_remove(struct zram *zram)
+ 	zram_reset_device(zram);
+ 
+ 	put_disk(zram->disk);
++	free_percpu(zram->pcpu_stats);
+ 	kfree(zram);
+ 	return 0;
+ }
+diff --git a/drivers/block/zram/zram_drv.h b/drivers/block/zram/zram_drv.h
+index 2a600c48baa1bb46509c9c1649df02a5fd846d8c..3b3845690fb822b04003c298cf4649ba3aa1be66 100644
+--- a/drivers/block/zram/zram_drv.h
++++ b/drivers/block/zram/zram_drv.h
+@@ -78,14 +78,9 @@ struct zram_table_entry {
+ };
+ 
+ struct zram_stats {
+-	atomic64_t compr_data_size;	/* compressed size of pages stored */
+ 	atomic64_t failed_reads;	/* can happen when memory is too low */
+ 	atomic64_t failed_writes;	/* can happen when memory is too low */
+-	atomic64_t notify_free;	/* no. of swap slot free notifications */
+-	atomic64_t same_pages;		/* no. of same element filled pages */
+-	atomic64_t huge_pages;		/* no. of huge pages */
+ 	atomic64_t huge_pages_since;	/* no. of huge pages since zram set up */
+-	atomic64_t pages_stored;	/* no. of pages currently stored */
+ 	atomic_long_t max_used_pages;	/* no. of maximum pages stored */
+ 	atomic64_t writestall;		/* no. of write slow paths */
+ 	atomic64_t miss_free;		/* no. of missed free */
+@@ -120,6 +115,7 @@ struct zram {
+ 	unsigned long limit_pages;
+ 
+ 	struct zram_stats stats;
++	struct zram_pcpu_stats __percpu *pcpu_stats;
+ 	/*
+ 	 * This is the limit on amount of *uncompressed* worth of data
+ 	 * we can store in a disk.
